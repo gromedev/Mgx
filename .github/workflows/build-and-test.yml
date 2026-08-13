@@ -21,7 +21,11 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '9.0.x'
+          # 8.0.x is what src/ targets and ships; 10.0.x is only for the test project,
+          # which stays on net10.0 so it can host the newest PowerShell SDK.
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Restore
         run: dotnet restore Mgx.slnx
@@ -40,8 +44,9 @@ jobs:
       - name: Install test prerequisites
         shell: pwsh
         run: |
-          # Pester drives the surface tests; Microsoft.Graph.Authentication is in
-          # RequiredModules, so importing mgx fails without it.
+          # Pester drives the surface tests. Microsoft.Graph.Authentication is NOT a
+          # declared dependency (mgx resolves auth reflectively), so importing works
+          # without it - but the live-tagged tests need a real token, so install it here.
           Install-PSResource -Name Pester -TrustRepository -Scope AllUsers
           Install-PSResource -Name Microsoft.Graph.Authentication -TrustRepository -Scope AllUsers
 
@@ -72,3 +77,41 @@ jobs:
             TestResults/
             tests/TestResults.xml
           if-no-files-found: ignore
+
+  # The manifest claims PowerShell 7.4+. That claim is only honest if every supported
+  # host actually imports the module and passes the surface tests, so each one gets a leg.
+  # 7.4 is the LTS floor; without this job the floor is an assertion rather than a result.
+  compat:
+    name: PowerShell ${{ matrix.psversion }}
+    runs-on: windows-latest
+    needs: build-and-test
+    if: github.repository == 'gromedev/mgx'
+    strategy:
+      fail-fast: false
+      matrix:
+        psversion: ['7.4', '7.5', '7.6']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install PowerShell ${{ matrix.psversion }}
+        shell: pwsh
+        run: |
+          dotnet tool install --global PowerShell --version '${{ matrix.psversion }}.*'
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Build module
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release
+
+      - name: Import and run surface tests on ${{ matrix.psversion }}
+        run: |
+          pwsh -NoProfile -Command "@(\$PSVersionTable.PSVersion.ToString()) | Write-Host"
+          pwsh -NoProfile -Command "Install-PSResource -Name Pester -TrustRepository -Scope CurrentUser; Import-Module ./module/mgx.psd1 -ErrorAction Stop; \$r = Invoke-Pester -Path ./tests/Unit -PassThru; if (\$r.FailedCount -gt 0) { throw \"\$(\$r.FailedCount) failed on PowerShell ${{ matrix.psversion }}\" }"

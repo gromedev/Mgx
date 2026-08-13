@@ -192,8 +192,8 @@ public class DeltaQueryTests
         Assert.Equal("user5", items[1].GetProperty("id").GetString());
         Assert.True(items[1].TryGetProperty("@removed", out var removed));
         Assert.Equal("deleted", removed.GetProperty("reason").GetString());
-        // @removed does NOT start with @odata. so it survives JsonToPSObject's
-        // @odata.* stripping filter (MgxCmdletBase line 452-454)
+        // @removed does NOT start with @odata. so it survives JsonToHashtable's
+        // @odata.* stripping filter
         Assert.False("@removed".StartsWith("@odata.", StringComparison.OrdinalIgnoreCase));
     }
 

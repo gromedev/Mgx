@@ -4,6 +4,7 @@ using System.Management.Automation;
 using System.Text.Json;
 using Mgx.Cmdlets.Base;
 using Mgx.Cmdlets.Cmdlets;
+using Mgx.Cmdlets.Cmdlets.Batch;
 
 namespace Mgx.IntegrationTests.Cmdlets;
 
@@ -78,6 +79,125 @@ public class PipelineContractTests
         // empty marker, so unwrapping it would discard everything.
         var pso = PSCustomObject(("id", "abc"));
         Assert.Same(pso, MgxCmdletBase.UnwrapPSObject(pso));
+    }
+
+    #endregion
+
+    #region Invoke-MgxRequest fan-out input
+
+    [Fact]
+    public void ResolvePipelineId_accepts_a_bare_id_string()
+    {
+        Assert.Equal("abc", InvokeMgxRequest.ResolvePipelineId("abc"));
+        Assert.Equal("abc", InvokeMgxRequest.ResolvePipelineId(PSObject.AsPSObject("abc")));
+    }
+
+    [Fact]
+    public void ResolvePipelineId_extracts_id_from_a_piped_hashtable()
+    {
+        // Regression: a hashtable used to bind whole to the [string] parameter, putting
+        // the literal "System.Collections.Hashtable" into the request URL with no error.
+        var user = new Hashtable(StringComparer.OrdinalIgnoreCase)
+        {
+            ["id"] = "abc",
+            ["displayName"] = "Bob"
+        };
+
+        Assert.Equal("abc", InvokeMgxRequest.ResolvePipelineId(user));
+        Assert.Equal("abc", InvokeMgxRequest.ResolvePipelineId(PSObject.AsPSObject(user)));
+    }
+
+    [Fact]
+    public void ResolvePipelineId_extracts_id_from_a_piped_PSCustomObject()
+    {
+        Assert.Equal("abc", InvokeMgxRequest.ResolvePipelineId(PSCustomObject(("id", "abc"))));
+    }
+
+    [Fact]
+    public void ResolvePipelineId_returns_null_when_there_is_no_id()
+    {
+        // ProcessRecord turns this into a WriteError rather than a corrupt URL
+        Assert.Null(InvokeMgxRequest.ResolvePipelineId(new Hashtable { ["displayName"] = "Bob" }));
+        Assert.Null(InvokeMgxRequest.ResolvePipelineId(PSCustomObject(("displayName", "Bob"))));
+    }
+
+    #endregion
+
+    #region Invoke-MgxBatchRequest input
+
+    [Fact]
+    public void ParsePipelineInput_treats_a_string_as_a_url_with_the_shared_method()
+    {
+        var cmdlet = new InvokeMgxBatchRequest { Method = "GET" };
+
+        var parsed = cmdlet.ParsePipelineInput("/me");
+
+        Assert.NotNull(parsed);
+        Assert.Equal("/me", parsed.Url);
+        Assert.Equal("GET", parsed.Method);
+    }
+
+    [Fact]
+    public void ParsePipelineInput_accepts_a_hashtable_with_per_item_method_and_body()
+    {
+        var cmdlet = new InvokeMgxBatchRequest { Method = "GET" };
+        var item = new Hashtable(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Url"] = "/users",
+            ["Method"] = "post",
+            ["Body"] = new Hashtable { ["displayName"] = "Bob" }
+        };
+
+        var parsed = cmdlet.ParsePipelineInput(item);
+
+        Assert.NotNull(parsed);
+        Assert.Equal("/users", parsed.Url);
+        Assert.Equal("POST", parsed.Method);
+        Assert.NotNull(parsed.Body);
+    }
+
+    [Fact]
+    public void ParsePipelineInput_accepts_this_cmdlets_own_output_shape()
+    {
+        // Batch results carry Url/Method/Status/Body, so they can be piped back in for retry
+        var cmdlet = new InvokeMgxBatchRequest { Method = "GET" };
+        var previousResult = new Hashtable(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Url"] = "/me",
+            ["Method"] = "GET",
+            ["Status"] = 429,
+            ["Body"] = null
+        };
+
+        var parsed = cmdlet.ParsePipelineInput(previousResult);
+
+        Assert.NotNull(parsed);
+        Assert.Equal("/me", parsed.Url);
+        Assert.Equal("GET", parsed.Method);
+    }
+
+    [Fact]
+    public void ParsePipelineInput_still_accepts_the_documented_PSCustomObject_shape()
+    {
+        var cmdlet = new InvokeMgxBatchRequest { Method = "GET" };
+
+        var parsed = cmdlet.ParsePipelineInput(
+            PSCustomObject(("Url", "/groups"), ("Method", "PATCH")));
+
+        Assert.NotNull(parsed);
+        Assert.Equal("/groups", parsed.Url);
+        Assert.Equal("PATCH", parsed.Method);
+    }
+
+    [Fact]
+    public void ParsePipelineInput_falls_back_to_the_shared_method_when_the_item_has_none()
+    {
+        var cmdlet = new InvokeMgxBatchRequest { Method = "DELETE" };
+
+        var parsed = cmdlet.ParsePipelineInput(new Hashtable { ["Url"] = "/users/abc" });
+
+        Assert.NotNull(parsed);
+        Assert.Equal("DELETE", parsed.Method);
     }
 
     #endregion
@@ -189,6 +309,64 @@ public class PipelineContractTests
         var json = InvokeMgxRequest.SerializeBody(new OrderedDictionary { ["displayName"] = "Bob" });
 
         Assert.Equal("Bob", JsonDocument.Parse(json).RootElement.GetProperty("displayName").GetString());
+    }
+
+    #endregion
+
+    #region Response shape
+
+    [Fact]
+    public void TryUnwrapCollection_unwraps_an_action_response_envelope()
+    {
+        // POST /directoryObjects/getByIds and friends answer with the same {"value":[...]}
+        // envelope a GET collection uses. The write path used to emit it as one object.
+        var json = JsonSerializer.Deserialize<JsonElement>("""
+            { "@odata.context": "ctx", "value": [ { "id": "a" }, { "id": "b" } ] }
+            """);
+
+        var items = InvokeMgxRequest.TryUnwrapCollection(json, out var truncated);
+
+        Assert.NotNull(items);
+        Assert.Equal(2, items.Count);
+        Assert.Equal("a", items[0].GetProperty("id").GetString());
+        Assert.False(truncated);
+    }
+
+    [Fact]
+    public void TryUnwrapCollection_reports_a_truncated_envelope()
+    {
+        var json = JsonSerializer.Deserialize<JsonElement>("""
+            { "value": [ { "id": "a" } ], "@odata.nextLink": "https://graph.microsoft.com/v1.0/next" }
+            """);
+
+        Assert.NotNull(InvokeMgxRequest.TryUnwrapCollection(json, out var truncated));
+        Assert.True(truncated);
+    }
+
+    [Fact]
+    public void TryUnwrapCollection_leaves_a_single_entity_alone()
+    {
+        // An entity with its own scalar 'value' property must not be mistaken for a collection
+        var json = JsonSerializer.Deserialize<JsonElement>("""{ "id": "a", "value": "not-an-array" }""");
+
+        Assert.Null(InvokeMgxRequest.TryUnwrapCollection(json, out _));
+    }
+
+    [Fact]
+    public void TryUnwrapCollection_unwraps_an_entity_with_an_array_valued_value_property()
+    {
+        // Documented limitation: the gate is structural, so an entity whose own 'value'
+        // property is an array (e.g. a schemaExtension value collection) is indistinguishable
+        // from a collection envelope and unwraps. -Raw is the escape hatch for such payloads.
+        var json = JsonSerializer.Deserialize<JsonElement>("""
+            { "id": "a", "value": [ 1, 2, 3 ] }
+            """);
+
+        var items = InvokeMgxRequest.TryUnwrapCollection(json, out var truncated);
+
+        Assert.NotNull(items);
+        Assert.Equal(3, items.Count);
+        Assert.False(truncated);
     }
 
     #endregion

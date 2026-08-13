@@ -307,7 +307,11 @@ public sealed class ResilientGraphClient : IDisposable
         try
         {
             using var bodyCts = CreateBodyReadCts(ct);
-            await response.Content.LoadIntoBufferAsync(bodyCts.Token);
+            // WaitAsync rather than the LoadIntoBufferAsync(CancellationToken) overload: that
+            // overload is .NET 9+, and taking it here would raise the module's floor from
+            // PowerShell 7.4 to 7.5 for the sake of one debug-only trace. The buffering itself
+            // is uncancellable this way, but BodyReadTimeout still bounds the wait.
+            await response.Content.LoadIntoBufferAsync().WaitAsync(bodyCts.Token);
             body = await response.Content.ReadAsStringAsync(bodyCts.Token);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)

@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Management.Automation;
 using System.Net;
@@ -20,11 +21,15 @@ namespace Mgx.Cmdlets.Cmdlets.Expand;
 /// (-Top, -Filter) on the source cmdlet rather than downstream Select-Object -First.
 /// </summary>
 [Cmdlet(VerbsData.Expand, "MgxRelation")]
-[OutputType(typeof(PSObject))]
+[OutputType(typeof(Hashtable))]
 public class ExpandMgxRelation : MgxCmdletBase
 {
+    /// <summary>
+    /// Object to enrich. Accepts a Hashtable (what the Mgx cmdlets emit) or a PSCustomObject;
+    /// the relation is attached in the same shape the object arrived in.
+    /// </summary>
     [Parameter(Mandatory = true, ValueFromPipeline = true)]
-    public PSObject InputObject { get; set; } = null!;
+    public object InputObject { get; set; } = null!;
 
     [Parameter(Mandatory = true, Position = 0)]
     public string Uri { get; set; } = string.Empty;
@@ -64,7 +69,7 @@ public class ExpandMgxRelation : MgxCmdletBase
     [ValidateRange(1, int.MaxValue)]
     public int Top { get; set; }
 
-    private readonly List<PSObject> _buffer = [];
+    private readonly List<object> _buffer = [];
 
     private static readonly Regex IdPlaceholder = new(
         @"\{id\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -140,8 +145,8 @@ public class ExpandMgxRelation : MgxCmdletBase
 
         foreach (var obj in _buffer)
         {
-            var idProp = obj.Properties[IdProperty];
-            if (idProp?.Value == null)
+            var idValue = TryGetMember(obj, IdProperty);
+            if (idValue == null)
             {
                 WriteError(new ErrorRecord(
                     new ArgumentException($"Input object is missing the '{IdProperty}' property."),
@@ -152,7 +157,7 @@ public class ExpandMgxRelation : MgxCmdletBase
                 continue;
             }
 
-            var id = idProp.Value.ToString() ?? string.Empty;
+            var id = idValue.ToString() ?? string.Empty;
             if (seen.Add(id))
                 uniqueIds.Add(id);
         }
@@ -277,15 +282,14 @@ public class ExpandMgxRelation : MgxCmdletBase
     /// </summary>
     private void OutputBufferedObjects(Dictionary<string, JsonElement[]> resultsById)
     {
-        // Cache converted results per ID to avoid redundant JsonToPSObject calls
+        // Cache converted results per ID to avoid redundant JsonToHashtable calls
         // when multiple buffer objects share the same ID
         var convertedCache = new Dictionary<string, object?>();
         HashSet<string>? flattenWarned = Flatten.IsPresent ? [] : null;
 
         foreach (var obj in _buffer)
         {
-            var idProp = obj.Properties[IdProperty];
-            var id = idProp?.Value?.ToString();
+            var id = TryGetMember(obj, IdProperty)?.ToString();
 
             object? relationValue = null;
 
@@ -294,7 +298,7 @@ public class ExpandMgxRelation : MgxCmdletBase
                 if (!convertedCache.TryGetValue(id, out relationValue))
                 {
                     var items = resultsById[id];
-                    var converted = items.Select(JsonToPSObject).ToArray();
+                    var converted = items.Select(JsonToHashtable).ToArray();
 
                     if (Flatten.IsPresent)
                     {
@@ -318,12 +322,35 @@ public class ExpandMgxRelation : MgxCmdletBase
                 }
             }
 
-            // Remove existing property if present (same pattern as _MgxSourceId in InvokeMgxRequest)
-            if (obj.Properties[As] != null)
-                obj.Properties.Remove(As);
+            // Attach the relation in whatever shape the object arrived in, so hashtables
+            // from the Mgx cmdlets and user-supplied PSCustomObjects both round-trip.
+            var target = UnwrapPSObject(obj);
 
-            obj.Properties.Add(new PSNoteProperty(As, relationValue));
-            WriteObject(obj);
+            if (target is IDictionary dict)
+            {
+                dict[As] = relationValue;
+            }
+            else if (target is PSObject pso)
+            {
+                // Remove existing property if present (same pattern as _MgxSourceId in InvokeMgxRequest)
+                if (pso.Properties[As] != null)
+                    pso.Properties.Remove(As);
+
+                pso.Properties.Add(new PSNoteProperty(As, relationValue));
+            }
+            else
+            {
+                // Plain .NET object with no writable member store
+                // wrap it so the relation sticks
+                var wrapped = PSObject.AsPSObject(target);
+                if (wrapped.Properties[As] != null)
+                    wrapped.Properties.Remove(As);
+
+                wrapped.Properties.Add(new PSNoteProperty(As, relationValue));
+                target = wrapped;
+            }
+
+            WriteObject(target);
         }
     }
 

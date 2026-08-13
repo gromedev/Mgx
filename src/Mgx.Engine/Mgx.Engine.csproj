@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Mgx.Engine</RootNamespace>
@@ -17,8 +17,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Polly.Core" Version="8.6.6" />
-    <PackageReference Include="System.Threading.RateLimiting" Version="9.0.0" />
+    <PackageReference Include="Polly.Core" Version="8.7.0" />
+    <PackageReference Include="System.Threading.RateLimiting" Version="10.0.10" />
 
   </ItemGroup>
 

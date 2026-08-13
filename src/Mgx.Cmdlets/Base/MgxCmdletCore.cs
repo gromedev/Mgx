@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 namespace Mgx.Cmdlets.Base;
 
 /// <summary>
-/// Protocol-neutral base for Mgx cmdlets. Owns cancellation, disposal, and JSON-to-PSObject
+/// Protocol-neutral base for Mgx cmdlets. Owns cancellation, disposal, and JSON-to-Hashtable
 /// conversion — everything that is not tied to a specific transport.
 /// <para>
 /// Graph cmdlets derive from <see cref="MgxCmdletBase"/>, which adds the Graph HTTP client and
@@ -65,49 +65,39 @@ public abstract class MgxCmdletCore : PSCmdlet, IDisposable
     #region JSON conversion
 
     /// <summary>
-    /// Convert a JsonElement to a PSObject with all properties preserved.
+    /// Convert a JsonElement to a case-insensitive Hashtable with all properties preserved.
     /// </summary>
-    protected static PSObject JsonToPSObject(JsonElement element)
+    protected internal static Hashtable JsonToHashtable(JsonElement element)
     {
-        var pso = new PSObject();
+        // OrdinalIgnoreCase matches PowerShell's @{} literal, so member access stays
+        // case-insensitive ($user.DisplayName resolves the camelCase 'displayName' key).
+        var ht = new Hashtable(StringComparer.OrdinalIgnoreCase);
 
         // Non-Object elements (string, number, etc.) must wrap value in a property
         if (element.ValueKind != JsonValueKind.Object)
         {
-            pso.Properties.Add(new PSNoteProperty("Value", ConvertJsonValue(element)));
-            return pso;
+            ht["Value"] = ConvertJsonValue(element);
+            return ht;
         }
-
-        string? odataType = null;
 
         foreach (var prop in element.EnumerateObject())
         {
-            // Preserve @odata.type as ODataType (critical for polymorphic queries)
-            if (prop.Name.Equals("@odata.type", StringComparison.OrdinalIgnoreCase))
-            {
-                odataType = prop.Value.GetString();
-                if (odataType != null)
-                    pso.Properties.Add(new PSNoteProperty("ODataType", odataType));
-                continue;
-            }
-
-            // Strip other @odata.* metadata (nextLink, context, count)
-            if (prop.Name.StartsWith("@odata.", StringComparison.OrdinalIgnoreCase))
+            // Strip @odata.* transport metadata (nextLink, context, count, etag), but keep
+            // @odata.type verbatim: it round-trips on write and drives polymorphic handling.
+            //
+            // @odata.etag is stripped deliberately. It changes on every write, so preserving it
+            // makes two reads of an unchanged entity compare unequal - which surfaces as phantom
+            // drift in state-comparison consumers such as Microsoft365DSC. Callers that need the
+            // If-Match tag can read it from the raw payload (-Raw | ConvertFrom-Json).
+            if (prop.Name.StartsWith("@odata.", StringComparison.OrdinalIgnoreCase)
+                && !prop.Name.Equals("@odata.type", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            pso.Properties.Add(new PSNoteProperty(prop.Name, ConvertJsonValue(prop.Value)));
+            // Indexer, not Add: keys differing only by case would throw with Add
+            ht[prop.Name] = ConvertJsonValue(prop.Value);
         }
 
-        // Decorate with PSTypeName from @odata.type for Format.ps1xml / polymorphic dispatch
-        // e.g., "#microsoft.graph.user" -> "Mgx.User"
-        if (odataType != null)
-        {
-            var psTypeName = MapODataTypeToPSTypeName(odataType);
-            if (psTypeName != null)
-                pso.TypeNames.Insert(0, psTypeName);
-        }
-
-        return pso;
+        return ht;
     }
 
     private static object? ConvertJsonValue(JsonElement element)
@@ -131,25 +121,11 @@ public abstract class MgxCmdletCore : PSCmdlet, IDisposable
             JsonValueKind.False => false,
             JsonValueKind.Null => null,
             JsonValueKind.Array => element.EnumerateArray()
-                .Select(item => item.ValueKind == JsonValueKind.Object ? (object?)JsonToPSObject(item) : ConvertJsonValue(item))
+                .Select(item => item.ValueKind == JsonValueKind.Object ? (object?)JsonToHashtable(item) : ConvertJsonValue(item))
                 .ToArray(),
-            JsonValueKind.Object => JsonToPSObject(element),
+            JsonValueKind.Object => JsonToHashtable(element),
             _ => element.GetRawText()
         };
-    }
-
-    private static string? MapODataTypeToPSTypeName(string odataType)
-    {
-        const string prefix = "#microsoft.graph.";
-        if (!odataType.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        var typePart = odataType.Substring(prefix.Length);
-        if (string.IsNullOrEmpty(typePart))
-            return null;
-
-        var pascalName = char.ToUpperInvariant(typePart[0]) + typePart.Substring(1);
-        return $"Mgx.{pascalName}";
     }
 
     #endregion

@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Management.Automation;
 using System.Net;
 using System.Text.Json;
@@ -13,20 +14,20 @@ namespace Mgx.Cmdlets.Cmdlets.Batch;
 /// Invoke-MgxBatchRequest: Bundle multiple Graph API requests into /$batch calls.
 /// Supports GET, POST, PATCH, PUT, DELETE with optional request bodies.
 /// Auto-chunks into 20-request batches per Graph API limit.
-/// Returns PSObjects with Url, Status, and Body properties per request.
+/// Returns Hashtables with Url, Method, Status, and Body keys per request.
 /// Preferred over fan-out (Invoke-MgxRequest) for bulk writes: 3-4x faster due to fewer HTTP round-trips.
 ///
 /// Pipeline input can be:
 ///   - String URLs (for GET, or combined with -Method/-Body for same method/body on all)
-///   - PSObjects with Url, Method, Body properties (for per-item method/body)
+///   - Hashtables or PSObjects with Url, Method, Body members (for per-item method/body)
 /// </summary>
 [Cmdlet(VerbsLifecycle.Invoke, "MgxBatchRequest", SupportsShouldProcess = true)]
-[OutputType(typeof(PSObject))]
+[OutputType(typeof(Hashtable))]
 public class InvokeMgxBatchRequest : MgxCmdletBase
 {
     /// <summary>
     /// Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id)
-    /// or relative URLs (/users/id). Also accepts PSObjects with Url/Method/Body properties.
+    /// or relative URLs (/users/id). Also accepts Hashtables or PSObjects with Url/Method/Body members.
     /// </summary>
     [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true)]
     [Alias("Url")]
@@ -34,7 +35,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
 
     /// <summary>
     /// HTTP method for all requests (when piping string URLs). Default: GET.
-    /// Ignored when pipeline input contains PSObjects with their own Method property.
+    /// Ignored when pipeline input carries its own Method member.
     /// </summary>
     [Parameter]
     [ValidateSet("GET", "POST", "PATCH", "PUT", "DELETE")]
@@ -42,7 +43,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
 
     /// <summary>
     /// Request body for all requests (when piping string URLs).
-    /// Ignored when pipeline input contains PSObjects with their own Body property.
+    /// Ignored when pipeline input carries its own Body member.
     /// </summary>
     [Parameter]
     public object? Body { get; set; }
@@ -210,28 +211,24 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
             var results = batchResult.Results;
             var telemetry = batchResult.Telemetry;
 
-            // Output all results as PSObjects (success and failure)
+            // Output all results as Hashtables (success and failure)
             for (int i = 0; i < results.Count; i++)
             {
                 var (_, item) = results[i];
                 var input = submitted[i];
 
-                var pso = new PSObject();
-                pso.TypeNames.Insert(0, "Mgx.BatchResult");
-                pso.Properties.Add(new PSNoteProperty("Url", input.Url));
-                pso.Properties.Add(new PSNoteProperty("Method", input.Method));
-                pso.Properties.Add(new PSNoteProperty("Status", item.Status));
-
-                if (item.Body.HasValue && item.Body.Value.ValueKind != JsonValueKind.Null)
+                var result = new Hashtable(StringComparer.OrdinalIgnoreCase)
                 {
-                    pso.Properties.Add(new PSNoteProperty("Body", JsonToPSObject(item.Body.Value)));
-                }
-                else
-                {
-                    pso.Properties.Add(new PSNoteProperty("Body", null));
-                }
+                    ["Url"] = input.Url,
+                    ["Method"] = input.Method,
+                    ["Status"] = item.Status,
+                    ["Body"] = item.Body.HasValue && item.Body.Value.ValueKind != JsonValueKind.Null
+                        ? JsonToHashtable(item.Body.Value)
+                        : null
+                };
 
-                WriteObject(pso);
+                // Single-argument WriteObject does not enumerate, so the Hashtable is emitted whole
+                WriteObject(result);
             }
 
             // Emit errors for failed items (enables -ErrorAction Stop, populates $Error)
@@ -325,35 +322,31 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
     /// <summary>
     /// Parse pipeline input into a BatchInput. Supports:
     /// - String: use as URL with shared -Method/-Body parameters
-    /// - PSObject with Url property: use per-item Url/Method/Body
+    /// - Hashtable or PSObject with a Url member: use per-item Url/Method/Body
     /// </summary>
-    private BatchInput? ParsePipelineInput(object item)
+    internal BatchInput? ParsePipelineInput(object item)
     {
-        if (item is string url)
+        var value = UnwrapPSObject(item);
+
+        if (value is string url)
         {
             return new BatchInput(url, Method, Body);
         }
 
-        if (item is PSObject pso)
+        // Structured batch input: hashtable (including this cmdlet's own output) or PSCustomObject
+        if (value is IDictionary or PSObject)
         {
-            // Check if it's a structured batch input (has Url property)
-            var urlProp = pso.Properties["Url"]?.Value?.ToString();
-            if (urlProp != null)
+            var urlValue = TryGetMember(value, "Url")?.ToString();
+            if (urlValue != null)
             {
-                var method = (pso.Properties["Method"]?.Value?.ToString() ?? Method).ToUpperInvariant();
+                var method = (TryGetMember(value, "Method")?.ToString() ?? Method).ToUpperInvariant();
                 if (method is not ("GET" or "POST" or "PATCH" or "PUT" or "DELETE"))
                 {
-                    WriteWarning($"Skipping invalid HTTP method '{method}' for URL: {urlProp}");
+                    WriteWarning($"Skipping invalid HTTP method '{method}' for URL: {urlValue}");
                     return null;
                 }
-                var body = pso.Properties["Body"]?.Value;
-                return new BatchInput(urlProp, method, body);
-            }
-
-            // If it has a BaseObject that's a string, treat as URL
-            if (pso.BaseObject is string baseStr)
-            {
-                return new BatchInput(baseStr, Method, Body);
+                var body = TryGetMember(value, "Body");
+                return new BatchInput(urlValue, method, body);
             }
         }
 
@@ -488,5 +481,5 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
         }
     }
 
-    private sealed record BatchInput(string Url, string Method, object? Body);
+    internal sealed record BatchInput(string Url, string Method, object? Body);
 }

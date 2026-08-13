@@ -7,7 +7,7 @@
     Copyright         = '(c) 2026 Thomas Maillo Grome. All rights reserved.'
     Description       = 'Resilient companion for Microsoft.Graph PowerShell. Adds retry, circuit breaker, rate limiting, streaming pagination, batching, and fan-out to any Graph API endpoint.'
 
-    PowerShellVersion = '7.5'
+    PowerShellVersion = '7.4'
     CompatiblePSEditions = @('Core')
 
     FormatsToProcess  = @('mgx.Format.ps1xml')
@@ -18,9 +18,14 @@
     # time with TypeLoadException when Get-MgxTelemetry is called.
     RequiredAssemblies = @('Mgx.Engine.dll')
 
-    RequiredModules   = @(
-        @{ ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.10.0' }
-    )
+    # Microsoft.Graph.Authentication is deliberately NOT in RequiredModules.
+    #
+    # Auth is discovered reflectively at call time (GraphSession.Instance, falling back to
+    # Get-MgContext), so nothing here links against the SDK and the module imports without it.
+    # Declaring it would force the dependency on every consumer - including hosts that supply
+    # their own Graph auth and only want the resilience layer - and would install a second copy
+    # alongside whatever they already load. Cmdlets that need a token raise
+    # GraphAuthModuleNotLoaded with install instructions when it is genuinely absent.
 
     CmdletsToExport   = @(
         'Invoke-MgxRequest'

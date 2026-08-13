@@ -34,9 +34,12 @@ Describe 'mgx module manifest' {
         $script:Manifest.RequiredAssemblies | Should -Contain 'Mgx.Engine.dll'
     }
 
-    It 'requires Microsoft.Graph.Authentication' {
-        # Auth and the Graph endpoint are resolved from the SDK's GraphSession
-        $script:Manifest.RequiredModules.Name | Should -Contain 'Microsoft.Graph.Authentication'
+    It 'does not hard-require Microsoft.Graph.Authentication' {
+        # Auth is discovered reflectively (GraphSession, then Get-MgContext), so the SDK is a
+        # soft dependency: hosts that bring their own Graph auth must be able to import mgx
+        # without it, and installing mgx must not drag a second copy in alongside theirs.
+        # Cmdlets that need a token raise GraphAuthModuleNotLoaded when it is truly absent.
+        $script:Manifest.RequiredModules.Name | Should -Not -Contain 'Microsoft.Graph.Authentication'
     }
 
     It 'exports cmdlets and no functions' {
@@ -121,13 +124,15 @@ Describe 'Format file' {
     }
 
     It 'declares only views the module actually emits' {
-        # Graph entity views (Mgx.User etc.) select on the synthetic PSTypeName stamped
-        # from @odata.type; everything else must be a real Mgx.Cmdlets.Models type.
+        # The Graph entity views (Mgx.User etc.) were removed in 2.0: the cmdlets emit
+        # Hashtables, which the formatter always renders with the built-in Name/Value
+        # view, so an entity view can never be selected. Only the informational
+        # Mgx.Cmdlets.Models.* views may remain.
         $declared = $script:FormatXml.Configuration.ViewDefinitions.View.ViewSelectedBy.TypeName
 
         foreach ($typeName in $declared)
         {
-            $typeName | Should -Match '^Mgx\.(Cmdlets\.Models\.)?[A-Za-z]+$'
+            $typeName | Should -Match '^Mgx\.Cmdlets\.Models\.[A-Za-z]+$'
         }
     }
 }

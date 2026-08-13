@@ -67,9 +67,12 @@ Describe 'Module import' {
 }
 
 Describe 'Output contract' {
-    It '<_> declares PSObject output' -ForEach $script:GraphDataCmdlets {
-        (Get-Command -Name $_).OutputType.Type.FullName |
-            Should -Contain 'System.Management.Automation.PSObject'
+    It '<_> declares Hashtable output' -ForEach $script:GraphDataCmdlets {
+        $outputTypes = (Get-Command -Name $_).OutputType.Type.FullName
+
+        $outputTypes | Should -Contain 'System.Collections.Hashtable'
+        # 2.0 is a hard cutover: no cmdlet may still advertise the 1.x PSObject shape
+        $outputTypes | Should -Not -Contain 'System.Management.Automation.PSObject'
     }
 
     It 'Invoke-MgxRequest also declares String output for -Raw' {

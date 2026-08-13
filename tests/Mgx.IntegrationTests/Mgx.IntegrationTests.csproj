@@ -1,11 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- net9.0 matches src/ and the runtime PowerShell 7.5 actually hosts. This used to say
-         net10.0, which meant the suite exercised a runtime the module never ships on.
-         RollForward=Major only kicks in when .NET 9 is absent (a machine with just the .NET 10
-         SDK); the authoritative run is on real .NET 9 in Docker. -->
-    <TargetFramework>net9.0</TargetFramework>
+    <!-- Deliberately ahead of src/, which targets net8.0 so the module runs on PowerShell 7.4
+         (LTS) and up. This project stays on net10.0 because Microsoft.PowerShell.SDK 7.6.x
+         requires it, and referencing a net8.0 project from net10.0 is fine. What that buys is
+         the shipped assembly exercised on the newest runtime; the older hosts are covered by
+         the `compat` matrix in CI, which imports the module under 7.4/7.5/7.6 for real. -->
+    <TargetFramework>net10.0</TargetFramework>
     <RollForward>Major</RollForward>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -16,12 +17,12 @@
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <!-- Not used directly: pins the transitive dependency from Microsoft.PowerShell.SDK
-         above 9.0.14, which carries five High advisories (GHSA-37gx-xxp4-5rgx et al.).
+         above 10.0.6, which carries five High advisories (GHSA-cvvh-rhrc-wg4q et al.).
          Remove once the PowerShell.SDK reference resolves a patched version on its own. -->
-    <PackageReference Include="System.Security.Cryptography.Xml" Version="9.0.19" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.11" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.5.5" />
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.4" />
   </ItemGroup>
 
   <ItemGroup>

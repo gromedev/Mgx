@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Diagnostics;
 using System.Management.Automation;
 using System.Net;
@@ -17,7 +18,7 @@ namespace Mgx.Cmdlets.Cmdlets.Delta;
 /// Delta state persists across successful completions (unlike CheckpointPath which is ephemeral).
 /// </summary>
 [Cmdlet(VerbsData.Sync, "MgxDelta")]
-[OutputType(typeof(PSObject))]
+[OutputType(typeof(Hashtable))]
 public class SyncMgxDelta : MgxCmdletBase
 {
     [Parameter(Mandatory = true, Position = 0)]
@@ -308,8 +309,8 @@ public class SyncMgxDelta : MgxCmdletBase
                     {
                         while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                         {
-                            var pso = JsonToPSObject(enumerator.Current);
-                            WriteObject(pso);
+                            var ht = JsonToHashtable(enumerator.Current);
+                            WriteObject(ht);
                             itemCount++;
                             DrainClientMessages();
                         }

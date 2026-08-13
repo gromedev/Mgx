@@ -1219,7 +1219,7 @@ Describe 'Live API Tests' -Tag 'Live' {
         { Invoke-MgxRequest '/users/{id}' } | Should -Throw '*pipeline*'
     }
 
-    It '@odata.type should be preserved as ODataType property' {
+    It '@odata.type should be preserved verbatim' {
         # Use group members (polymorphic endpoint that reliably returns @odata.type)
         $groups = Invoke-MgxRequest /groups -Top 5 -Property id
         $members = @()
@@ -1228,10 +1228,10 @@ Describe 'Live API Tests' -Tag 'Live' {
             if ($members.Count -gt 0) { break }
         }
         if ($members.Count -eq 0) {
-            Set-ItResult -Skipped -Because 'No group members found to test ODataType'
+            Set-ItResult -Skipped -Because 'No group members found to test @odata.type'
             return
         }
-        $withType = $members | Where-Object { $_.ODataType }
+        $withType = $members | Where-Object { $_['@odata.type'] }
         $withType | Should -Not -BeNullOrEmpty
     }
 

@@ -19,7 +19,7 @@ namespace Mgx.Cmdlets.Cmdlets;
 /// </summary>
 [Cmdlet(VerbsLifecycle.Invoke, "MgxRequest", DefaultParameterSetName = "Direct",
     SupportsShouldProcess = true)]
-[OutputType(typeof(PSObject), typeof(string))]
+[OutputType(typeof(Hashtable), typeof(string))]
 public class InvokeMgxRequest : MgxCmdletBase
 {
     #region Common parameters
@@ -101,9 +101,13 @@ public class InvokeMgxRequest : MgxCmdletBase
 
     #region Fan-out parameters
 
-    [Parameter(ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = "Pipeline")]
+    /// <summary>
+    /// Entity ID, or an object carrying one. Accepts a plain string, a Hashtable (what the
+    /// Mgx cmdlets emit), or a PSCustomObject; the 'id' member is extracted in ProcessRecord.
+    /// </summary>
+    [Parameter(ValueFromPipeline = true, ParameterSetName = "Pipeline")]
     [Alias("Id")]
-    public string? InputObject { get; set; }
+    public object? InputObject { get; set; }
 
     [Parameter(ParameterSetName = "Pipeline")]
     [ValidateRange(1, 128)]
@@ -170,12 +174,37 @@ public class InvokeMgxRequest : MgxCmdletBase
                 WriteVerbose("Skipping null pipeline input.");
                 return;
             }
-            _pipelineIds.Add(InputObject);
+
+            var id = ResolvePipelineId(InputObject);
+            if (string.IsNullOrEmpty(id))
+            {
+                WriteError(new ErrorRecord(
+                    new ArgumentException(
+                        "Pipeline input is missing an 'id' property. Pipe entity IDs, or objects with an 'id' property."),
+                    "MissingPipelineId", ErrorCategory.InvalidArgument, InputObject));
+                return;
+            }
+
+            _pipelineIds.Add(id);
             return;
         }
 
         // Direct mode (no fan-out): execute immediately
         ExecuteRequest(Uri, sourceId: null);
+    }
+
+    /// <summary>
+    /// Extract the entity ID from pipeline input: a bare string, or the 'id' member of a
+    /// Hashtable / PSCustomObject.
+    /// </summary>
+    internal static string? ResolvePipelineId(object input)
+    {
+        var value = UnwrapPSObject(input);
+
+        if (value is string s)
+            return s;
+
+        return TryGetMember(value, "id")?.ToString();
     }
 
     protected override void EndProcessing()
@@ -427,22 +456,7 @@ public class InvokeMgxRequest : MgxCmdletBase
             var json = JsonSerializer.DeserializeAsync<JsonElement>(stream, cancellationToken: CancellationToken)
                 .AsTask().GetAwaiter().GetResult();
 
-            // If response is a collection (has "value" array), return items from first page
-            if (json.ValueKind == JsonValueKind.Object &&
-                json.TryGetProperty("value", out var valueArray) &&
-                valueArray.ValueKind == JsonValueKind.Array)
-            {
-                // Warn on truncated collection
-                if (json.TryGetProperty("@odata.nextLink", out _))
-                    WriteWarning("Response contains more items. Use -All to retrieve all pages, or -Top to limit results.");
-
-                foreach (var item in valueArray.EnumerateArray())
-                    OutputItem(item, sourceId);
-            }
-            else
-            {
-                OutputItem(json, sourceId);
-            }
+            OutputPayload(json, sourceId);
         }
         catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
         {
@@ -496,7 +510,7 @@ public class InvokeMgxRequest : MgxCmdletBase
                 if (bodyBytes.Length > 0)
                 {
                     var jsonEl = JsonSerializer.Deserialize<JsonElement>(bodyBytes);
-                    OutputItem(jsonEl, sourceId);
+                    OutputPayload(jsonEl, sourceId);
                 }
             }
             finally
@@ -706,7 +720,7 @@ public class InvokeMgxRequest : MgxCmdletBase
             // Output response bodies (created/updated entities)
             foreach (var (sourceId, json) in result.Responses)
             {
-                OutputItem(json, sourceId);
+                OutputPayload(json, sourceId);
             }
 
             // Handle errors with SkipNotFound/SkipForbidden filtering
@@ -903,6 +917,48 @@ public class InvokeMgxRequest : MgxCmdletBase
     private Dictionary<string, string>? BuildHeaders() =>
         BuildRequestHeaders(ConsistencyLevel, Headers);
 
+    /// <summary>
+    /// Emit a Graph response payload. A collection envelope ({"value":[...]}, returned by GET and by
+    /// action endpoints such as /directoryObjects/getByIds) is unwrapped into one item per element;
+    /// anything else is emitted whole.
+    /// </summary>
+    private void OutputPayload(JsonElement json, string? sourceId)
+    {
+        var items = TryUnwrapCollection(json, out var truncated);
+        if (items == null)
+        {
+            OutputItem(json, sourceId);
+            return;
+        }
+
+        if (truncated)
+            WriteWarning("Response contains more items. Use -All to retrieve all pages, or -Top to limit results.");
+
+        foreach (var item in items)
+            OutputItem(item, sourceId);
+    }
+
+    /// <summary>
+    /// The elements of a Graph collection envelope ({"value":[...]}), or null when the payload is a
+    /// single entity. <paramref name="truncated"/> reports whether the envelope carried @odata.nextLink.
+    /// The gate is structural: an entity whose own 'value' property happens to be an array is
+    /// indistinguishable from an envelope and unwraps too (use -Raw to see such a payload whole).
+    /// </summary>
+    internal static List<JsonElement>? TryUnwrapCollection(JsonElement json, out bool truncated)
+    {
+        truncated = false;
+
+        if (json.ValueKind != JsonValueKind.Object
+            || !json.TryGetProperty("value", out var valueArray)
+            || valueArray.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        truncated = json.TryGetProperty("@odata.nextLink", out _);
+        return valueArray.EnumerateArray().ToList();
+    }
+
     private void OutputItem(JsonElement element, string? sourceId)
     {
         if (Raw.IsPresent)
@@ -911,18 +967,17 @@ public class InvokeMgxRequest : MgxCmdletBase
             return;
         }
 
-        var pso = JsonToPSObject(element);
+        var ht = JsonToHashtable(element);
 
         if (sourceId != null)
         {
-            // Use unique prefix to avoid collision with Graph entity properties
-            const string propName = "_MgxSourceId";
-            if (pso.Properties[propName] != null)
-                pso.Properties.Remove(propName);
-            pso.Properties.Add(new PSNoteProperty(propName, sourceId));
+            // Unique prefix avoids collision with Graph entity properties. The indexer
+            // overwrites, so a repeated key does not need removing first.
+            ht["_MgxSourceId"] = sourceId;
         }
 
-        WriteObject(pso);
+        // Single-argument WriteObject does not enumerate, so the Hashtable is emitted whole
+        WriteObject(ht);
     }
 
     /// <summary>

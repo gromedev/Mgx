@@ -58,9 +58,22 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         var identity = GetCurrentAuthIdentity(WriteVerbose);
         if (string.IsNullOrEmpty(identity.Fingerprint))
         {
+            // Microsoft.Graph.Authentication is a soft dependency (see mgx.psd1), so an empty
+            // fingerprint has two distinct causes that need different advice. While it sat in
+            // RequiredModules the SDK was guaranteed present and "run Connect-MgGraph" was
+            // always the right answer; without it, that message sends someone to a cmdlet
+            // that does not exist in their session.
+            var (message, errorId) = IsGraphAuthLoaded()
+                ? ("Not connected to Microsoft Graph. Run Connect-MgGraph first.",
+                   "NotConnected")
+                : ("Microsoft.Graph.Authentication is not loaded. Install it "
+                   + "(Install-PSResource -Name Microsoft.Graph.Authentication) and run "
+                   + "Connect-MgGraph, or supply your own transport via Enable-MgxResilience.",
+                   "GraphAuthModuleNotLoaded");
+
             ThrowTerminatingError(new ErrorRecord(
-                new InvalidOperationException("Not connected to Microsoft Graph. Run Connect-MgGraph first."),
-                "NotConnected",
+                new InvalidOperationException(message),
+                errorId,
                 ErrorCategory.ConnectionError,
                 null));
             return null!;
@@ -288,6 +301,36 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         var graphSessionType = FindType("Microsoft.Graph.PowerShell.Authentication.GraphSession");
         return graphSessionType?.GetProperty("Instance",
             BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+    }
+
+    /// <summary>
+    /// Whether Microsoft.Graph.Authentication is present in the session. Because mgx does not
+    /// declare it in RequiredModules, "absent" is a real state that has to be told apart from
+    /// "present but disconnected" when reporting why a token could not be obtained.
+    /// <para>
+    /// Checks the type first, then Get-MgContext: the SDK's internal type layout has moved
+    /// before, and the module can be loaded even when GraphSession is not where we look.
+    /// FindType caches only successful lookups, so a module imported later is still seen.
+    /// </para>
+    /// </summary>
+    internal static bool IsGraphAuthLoaded()
+    {
+        if (FindType("Microsoft.Graph.PowerShell.Authentication.GraphSession") != null)
+            return true;
+
+        try
+        {
+            using var ps = PowerShell.Create(RunspaceMode.CurrentRunspace);
+            ps.AddCommand("Get-Command")
+              .AddParameter("Name", "Get-MgContext")
+              .AddParameter("ErrorAction", "SilentlyContinue");
+            return ps.Invoke().Count > 0;
+        }
+        catch
+        {
+            // No runspace (hosted/test process) means no module either.
+            return false;
+        }
     }
 
     /// <summary>
