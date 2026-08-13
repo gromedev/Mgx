@@ -17,5 +17,6 @@ module/*.json
 module/Dependencies/
 module/.build-hash
 
-# Pester harness output
+# Test outputs
 tests/TestResults.xml
+tests/Benchmarks/results/*

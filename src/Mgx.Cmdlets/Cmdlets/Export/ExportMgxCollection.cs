@@ -134,13 +134,24 @@ public class ExportMgxCollection : MgxCmdletBase
             defaultedToPageSize = true;
         }
 
-        // Checkpoint safety: if checkpoint exists but output file was deleted,
-        // the checkpoint is invalid (items before checkpoint are lost).
-        // Delete checkpoint and start fresh.
+        // Checkpoint safety: a checkpoint without its output file usually means a
+        // first-run export died mid-flight. The data lives in an orphaned temp file
+        // (fresh runs write to <output>.<guid>.tmp and rename on success), so try to
+        // adopt it: trim to exactly the item count the checkpoint recorded (content
+        // past the last flush may be missing or torn) and promote it to the output
+        // path. Only when no usable temp exists is the checkpoint truly stale.
         if (cpPath != null && File.Exists(cpPath) && !File.Exists(outputPath))
         {
-            WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
-            PaginationCheckpoint.Delete(cpPath);
+            var orphanCp = PaginationCheckpoint.Load(cpPath);
+            if (orphanCp?.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))
+            {
+                WriteWarning($"Recovered {orphanCp.ItemsCollected} items from an interrupted export's temp file. Resuming from checkpoint.");
+            }
+            else
+            {
+                WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                PaginationCheckpoint.Delete(cpPath);
+            }
         }
 
         // ShouldProcess check (before requiring Graph connection, so -WhatIf works without auth)
@@ -329,12 +340,41 @@ public class ExportMgxCollection : MgxCmdletBase
                         File.Move(writePath, outputPath, overwrite: true);
                     }
                 }
-                catch
+                catch (Exception attemptEx)
                 {
-                    // Clean up temp file on any error (don't leave orphaned .tmp files)
                     if (!append)
                     {
-                        try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                        // User cancellation of a checkpointed fresh run: promote the temp
+                        // file (the using block already flushed it on unwind) and save a
+                        // checkpoint matching its exact content, so the printed resume
+                        // hint is true for first runs too. Previously the temp was
+                        // deleted here and the next run declared the checkpoint stale.
+                        var cancelled = attemptEx is OperationCanceledException
+                            && CancellationToken.IsCancellationRequested;
+                        var promoted = false;
+                        if (cancelled && cpPath != null && itemCount > 0)
+                        {
+                            try
+                            {
+                                new PaginationCheckpoint
+                                {
+                                    Resource = url,
+                                    NextLink = currentFetchUrl,
+                                    ItemsCollected = totalWritten,
+                                    PageItemsAlreadyWritten = pageItemsWritten
+                                }.Save(cpPath);
+                                File.Move(writePath, outputPath, overwrite: true);
+                                promoted = true;
+                            }
+                            catch (Exception promoteEx) when (promoteEx is IOException or UnauthorizedAccessException)
+                            {
+                                // Promotion is best-effort; fall back to the old cleanup.
+                            }
+                        }
+                        if (!promoted)
+                        {
+                            try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                        }
                     }
                     throw; // re-throw to retry catch or outer catch blocks
                 }
@@ -423,6 +463,55 @@ public class ExportMgxCollection : MgxCmdletBase
                     ErrorCategory.PermissionDenied, OutputFile));
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// Recovers a fresh-run export that was interrupted before its temp file was
+    /// promoted (kill/crash: the temp survives; the checkpoint reflects the last
+    /// flush). Copies exactly <paramref name="itemCount"/> lines from the newest
+    /// matching temp file to the output path - content beyond the last flush may
+    /// be absent or torn - then removes the temp. Returns false when nothing
+    /// usable exists, leaving the caller to the stale-checkpoint path.
+    /// </summary>
+    private static bool TryAdoptOrphanedTemp(string outputPath, long itemCount)
+    {
+        try
+        {
+            if (itemCount <= 0) return false;
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+            var temp = Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp")
+                .Select(p => new FileInfo(p))
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .FirstOrDefault();
+            if (temp == null) return false;
+
+            long copied = 0;
+            var adoptPath = outputPath + ".adopt";
+            using (var reader = new StreamReader(temp.FullName))
+            using (var writer = new StreamWriter(adoptPath, append: false))
+            {
+                string? line;
+                while (copied < itemCount && (line = reader.ReadLine()) != null)
+                {
+                    writer.WriteLine(line);
+                    copied++;
+                }
+            }
+            if (copied < itemCount)
+            {
+                // Temp holds less than the checkpoint promises - unusable.
+                File.Delete(adoptPath);
+                return false;
+            }
+            File.Move(adoptPath, outputPath, overwrite: true);
+            temp.Delete();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 

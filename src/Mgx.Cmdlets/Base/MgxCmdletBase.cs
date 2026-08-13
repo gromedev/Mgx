@@ -838,15 +838,34 @@ public abstract class MgxCmdletBase : MgxCmdletCore
 
     // Count discrepancy detection thresholds.
     // Not user-configurable (YAGNI). Change these constants if defaults prove problematic.
-    // 10% tolerance prevents noise from eventual consistency lag;
+    // Undercount: 10% tolerance prevents noise from eventual consistency lag;
     // 100-item floor avoids false alarms on small collections.
+    // Overcount: much tighter (0.5%, 50-item floor) - the observed failure mode is a
+    // duplicated page from a service-side skiptoken overlap (~one $top of extras),
+    // which a symmetric 10% tolerance would never catch at scale.
     protected const double CountDiscrepancyThreshold = 0.9;
     protected const long CountDiscrepancyMinItems = 100;
+    protected const double CountOvershootThreshold = 0.005;
+    protected const long CountOvershootMinItems = 50;
 
     protected void WriteCountDiscrepancyWarning(
         string resource, long reportedCount, long actualCount, string? filter)
     {
         if (reportedCount < CountDiscrepancyMinItems) return;
+
+        if (actualCount > reportedCount)
+        {
+            var overshoot = actualCount - reportedCount;
+            if (overshoot <= Math.Max(CountOvershootMinItems, (long)(reportedCount * CountOvershootThreshold)))
+                return;
+            WriteWarning(
+                $"[{resource}] Graph returned {actualCount} items but reported a count of {reportedCount} "
+                + $"({overshoot} extra). This can indicate a duplicated page during pagination "
+                + "(observed as a transient service-side skiptoken overlap). If the output feeds a "
+                + "downstream system, deduplicate on 'id'.");
+            return;
+        }
+
         if (actualCount >= (long)(reportedCount * CountDiscrepancyThreshold)) return;
 
         var pct = reportedCount > 0 ? (int)((1.0 - (double)actualCount / reportedCount) * 100) : 0;

@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '1.0.4'
+    ModuleVersion     = '1.0.5'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -46,6 +46,21 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
+v1.0.5
+Fixes and hardening driven by a rebuilt benchmark suite run against a seeded 100k-user tenant.
+- Fixed Export-MgxCollection losing all progress when a first run was interrupted: a cancelled
+  run now promotes its temp file with a checkpoint matching its exact content, and a killed or
+  crashed run is recovered on the next invocation from the orphaned temp file, trimmed to the
+  checkpointed item count. The "Resume with:" hint is now truthful for first runs
+- Fixed Get-MgxTelemetry reporting zero retry delay for batch-heavy sessions: per-item
+  Retry-After waits inside $batch processing now flow into RetryDelayMs
+- The count-discrepancy warning now also fires when an enumeration returns more items than
+  @odata.count reported (detects transient duplicated pages; dedup on id downstream)
+- Documented write-cost pacing in about_Mgx_Tuning: Graph throttles writes, not items -
+  budget BatchItemsPerSecond by writes per item (a 20-member group create costs ~21 writes)
+- New reproducible benchmark suite under tests/benchmarks, including a fault-injection
+  gauntlet that runs against a local mock Graph and needs no tenant; README rebuilt on the
+  suite's measured results
 v1.0.4
 Fixes ported from the Microsoft365DSC fork, contributed by Fabien Tschanz.
 - Fixed Mgx cmdlets keeping the credentials of the first Connect-MgGraph call: the cached

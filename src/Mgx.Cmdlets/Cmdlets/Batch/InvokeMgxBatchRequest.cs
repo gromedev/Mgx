@@ -460,6 +460,11 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
         if (telemetry.ThrottleEncounters > 0)
             MgxTelemetryCollector.Current.RecordBatchItemThrottles(telemetry.ThrottleEncounters);
 
+        // Propagate item-retry delay time so Get-MgxTelemetry's RetryDelayMs reflects
+        // batch retry waits (they previously existed only in per-call BatchTelemetry)
+        if (telemetry.TotalRetryDelayMs > 0)
+            MgxTelemetryCollector.Current.RecordBatchRetryDelay(telemetry.TotalRetryDelayMs);
+
         // Always emit verbose summary with timing breakdown
         var elapsedSec = telemetry.TotalElapsedMs / 1000.0;
         var throughput = telemetry.TotalElapsedMs > 0 ? telemetry.TotalRequests / elapsedSec : 0;

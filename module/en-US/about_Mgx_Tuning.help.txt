@@ -64,6 +64,43 @@ BATCH CONSTRAINTS
     been seen for five minutes the configured rate is restored outright. Run
     Invoke-MgxBatchRequest with -Verbose to see each adjustment.
 
+WRITE COST: PACE BY WRITES, NOT ITEMS
+
+    BatchItemsPerSecond paces batch items, but Graph throttles directory
+    writes. Those are the same thing only when each item performs one write.
+    A compound item multiplies the true rate:
+
+        Item shape                                Writes per item
+        ----------                                ---------------
+        POST /users (plain create)                1
+        PATCH /users/{id}                         1
+        POST /groups with 20 members@odata.bind   ~21
+
+    At the default 20 items/sec, plain creates put ~20 writes/sec on the
+    tenant; group creates with 20 bound members put ~420 writes/sec on it.
+
+    The trap: heavy-write batches look fine at first. Graph's write throttle
+    is a sliding budget, not an instant rate check -- a burst allowance
+    absorbs the early chunks, then sustained throttle waves begin. Observed
+    on a live ~100k-object tenant: 57,000 plain user creates ran at
+    20 items/sec for 48 minutes with zero visible throttling, while group
+    creates with 20-member binds at the same item rate ran clean for several
+    thousand items and then drew 429 waves with multi-minute Retry-After
+    backoff.
+
+    Adaptive pacing recovers on its own (rates halve on 429, climb back on
+    clean chunks, restore fully after five clean minutes) and no items are
+    lost -- but recovery time is wall-clock time. For compound items, set
+    the rate for the write cost up front:
+
+        # Starting point: divide the default budget by writes-per-item
+        # e.g. ~21-write group creates:
+        Set-MgxOption -BatchItemsPerSecond 2
+
+    Then let adaptive pacing find the tenant's real ceiling from below,
+    instead of starting above it and paying for the discovery in Retry-After
+    waits. Run with -Verbose to watch the rate adjustments.
+
 POST SAFETY
     Non-idempotent methods (POST) only retry on 429 -- not on 5xx. A 500 on
     POST may mean the request was partially processed; blindly retrying could

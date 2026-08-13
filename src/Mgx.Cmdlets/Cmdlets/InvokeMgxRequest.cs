@@ -14,7 +14,8 @@ namespace Mgx.Cmdlets.Cmdlets;
 /// <summary>
 /// Invoke-MgxRequest: General-purpose resilient client for any Microsoft Graph endpoint.
 /// Supports streaming pagination, fan-out concurrency, write operations, and checkpoint/resume.
-/// For bulk writes (>10 items), consider Invoke-MgxBatchRequest which is 3-4x faster.
+/// For bulk writes (>10 items), consider Invoke-MgxBatchRequest (measured ~1.5x faster
+/// than fan-out for PATCH at 1k scale; fewer HTTP round-trips and server-side pacing).
 /// </summary>
 [Cmdlet(VerbsLifecycle.Invoke, "MgxRequest", DefaultParameterSetName = "Direct",
     SupportsShouldProcess = true)]

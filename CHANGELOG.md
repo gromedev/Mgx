@@ -1,20 +1,44 @@
 # Changelog
 
+## 1.0.5
+
+### Fixed
+
+- Export-MgxCollection no longer loses progress on interrupted first runs. Cancelled runs promote temp files to the output path with matching checkpoints, and killed or crashed runs recover on the next invocation by trimming orphaned temp files to the last checkpointed item count. The "Resume with:" hint now accurately reflects first-run states.
+- Get-MgxTelemetry now includes per-item Retry-After wait times from $batch processing into RetryDelayMs instead of incorrectly reporting zero retry delay for throttled batch sessions.
+- Count-discrepancy warnings now also trigger when an enumeration returns more items than @odata.count reported (using a 0.5% threshold with a 50-item floor) and recommend deduplicating on id downstream.
+
+### Documentation
+
+- Added write-cost pacing documentation to about_Mgx_Tuning, explaining that Graph throttles write operations rather than batch items (e.g., a group create with 20 member bindings costs ~21 writes) and how to budget BatchItemsPerSecond accordingly.
+- Updated Export-MgxCollection help with details on mid-page checkpointing, first-run recovery, and downstream id deduplication hygiene.
+- Adjusted performance claims for Invoke-MgxRequest, updating the batch-vs-fan-out speedup from 3–4x down to the measured ~1.5x for PATCH operations at 1k scale.
+- Rebuilt the README based on measured results from the new benchmark suite.
+
+
 ## 1.0.4
 
-Fixes ported from the [Microsoft365DSC fork](https://github.com/Microsoft365DSC/mgx), contributed by Fabien Tschanz.
+### Fixed
 
-- Fixed Mgx cmdlets keeping the credentials of the first `Connect-MgGraph` call in a session. The cached HTTP client was keyed on tenant id alone, so reconnecting to the same tenant with a different application, certificate, account, or scope set silently reused the previous identity and its permissions. The client is now keyed on a fingerprint of the full auth context, and a rotated client secret is caught as well
-- Fixed a JSON string passed to `-Body` being silently dropped. `-Body (@{...} | ConvertTo-Json)` arrived wrapped in a `PSObject`, missed the string branch of the serializer, and went out as `{}` — an empty write that Graph accepted without error. `IDictionary`, `PSCustomObject`, and array bodies now all serialize, including nested
-- Fixed `Enable-MgxResilience` staying bound to the pre-reconnect SDK client; resilience is now re-injected automatically when the Graph identity changes
-- Fixed `Set-MgxOption -TotalTimeoutSeconds` not reaching the HTTP client, which kept the timeout it was first built with (`HttpClient.Timeout` is immutable after the first request; the client is now rebuilt when the value changes)
-- Fixed a single 429 slowing `Invoke-MgxBatchRequest` for the rest of the session. The write pacing rate now climbs back after clean chunks and fully restores after five minutes without throttling
-- Fixed the internal type cache never invalidating when `Microsoft.Graph.Authentication` was re-imported at a different version or into a fresh load context, which left Mgx resolving a stale `GraphSession`
-- Fixed JSON integers above 2^53 losing precision (were widened to `double`)
-- Added `-Debug` request/response tracing on every cmdlet — single requests, pagination, fan-out, and `$batch` — with credential redaction and 4 KB body truncation
-- A batch item whose body is not valid JSON now fails on its own instead of aborting the whole batch; `-Body` on a GET request now warns instead of being silently ignored
-- The `SdkVersion` header is now derived from the assembly version, set once in `Directory.Build.props`, instead of a hand-maintained constant that had drifted
-- Internal: the xUnit and Pester test suites and a build-and-test CI workflow now live in the repository
+- Fixed Mgx cmdlets caching credentials from only the first Connect-MgGraph call. HTTP clients are now keyed on a fingerprint of the full authentication context so reconnecting with a different application, certificate, account, scope set, or secret properly updates the identity.
+- Fixed JSON string input to -Body being silently converted to an empty object ({}) when passed as a PSObject. IDictionary, PSCustomObject, array, and nested bodies now serialize correctly.
+- Fixed Enable-MgxResilience remaining bound to pre-reconnect SDK clients by automatically re-injecting resilience settings when the Graph identity changes.
+- Fixed Set-MgxOption -TotalTimeoutSeconds failing to update the HTTP client timeout for existing sessions by rebuilding the client on value changes.
+- Fixed temporary 429 throttling permanently slowing Invoke-MgxBatchRequest rates for the remainder of the session; write pacing now recovers after clean chunks and fully resets after five unthrottled minutes.
+- Fixed the internal type cache failing to invalidate when Microsoft.Graph.Authentication was re-imported at a different version or in a new load context.
+- Fixed JSON integers larger than 2^53 losing precision due to double-precision floating-point conversion.
+
+### Changed
+
+- Batch items with invalid JSON bodies now fail individually instead of aborting the entire batch.
+- Passing -Body on a GET request now emits a warning instead of being silently ignored.
+- SdkVersion header strings are now derived automatically from the assembly version set in Directory.Build.props.
+
+### Added
+
+- Added -Debug request and response tracing across all cmdlets (single requests, pagination, fan-out, $batch) with credential redaction and a 4 KB body truncation limit.
+- Added xUnit and Pester test suites alongside a build-and-test CI workflow to the repository.
+
 
 ## 1.0.3
 

@@ -56,6 +56,15 @@ public sealed class MgxTelemetryCollector
     public void RecordBatchItemThrottles(int count) =>
         Interlocked.Add(ref _batchItemThrottles, count);
 
+    /// <summary>
+    /// Time spent in per-item retry delays inside $batch processing. Folded into
+    /// RetryDelayMs so the session view reflects batch retry waits: without this,
+    /// a batch-heavy session reports zero retry delay while spending hours in
+    /// Retry-After sleeps that only per-call BatchTelemetry could see.
+    /// </summary>
+    public void RecordBatchRetryDelay(long ms) =>
+        Interlocked.Add(ref _retryDelayMs, ms);
+
     public void Reset()
     {
         Interlocked.Exchange(ref _totalRequests, 0);
