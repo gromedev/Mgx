@@ -47,7 +47,7 @@ LONG DESCRIPTION
 
     JSONL export
         Export-MgxCollection streams paginated results directly to a JSONL
-        file on disk, bypassing PSObject overhead. Checkpoint files allow
+        file on disk, bypassing object conversion. Checkpoint files allow
         interrupted exports to resume where they left off.
 
     Relation enrichment
@@ -181,8 +181,13 @@ EXAMPLES
         $userIds | Invoke-MgxRequest '/users/{id}/manager'
 
 REQUIREMENTS
-    PowerShell 7.5 or later (Core edition, .NET 9 runtime).
-    Microsoft.Graph.Authentication 2.10.0 or later.
+    PowerShell 7.4 or later (Core edition; targets .NET 8, runs on newer).
+
+    Microsoft.Graph.Authentication 2.10.0 or later supplies the token, but it is
+    not a declared dependency: mgx resolves auth reflectively at call time, so the
+    module imports without it and does not install a second copy beside one you
+    already load. Cmdlets that need a token report GraphAuthModuleNotLoaded when it
+    is absent.
 
 SEE ALSO
     about_Mgx_Tuning

@@ -34,7 +34,7 @@ Invoke-MgxRequest [-Uri] <String> [-Method <String>] [-Body <Object>] [-Property
 ## DESCRIPTION
 Invoke-MgxRequest is a general-purpose resilient client for any Microsoft Graph endpoint. It supports streaming pagination, fan-out concurrency, write operations (POST, PATCH, PUT, DELETE), and checkpoint/resume.
 
-Results are returned as PSObjects with properties matching the Graph API JSON response. DateTime strings are automatically parsed to DateTimeOffset, and @odata.type is preserved as an ODataType property.
+Results are returned as case-insensitive hashtables with keys matching the Graph API JSON response, the same shape Invoke-MgGraphRequest returns. DateTime strings are automatically parsed, @odata.type is preserved verbatim under its own key, and all other @odata.* metadata is stripped (including @odata.etag, which changes on every write; use -Raw when you need the If-Match tag). Key order is undefined: use Select-Object or Format-Table to pin column order. Use -Raw | ConvertFrom-Json to get PSCustomObjects instead.
 
 For bulk writes involving more than 10 items, consider using Invoke-MgxBatchRequest instead, which is 3-4x faster due to fewer HTTP round-trips.
 
@@ -392,7 +392,7 @@ Accept wildcard characters: False
 ```
 
 ### -Raw
-Return raw JSON strings instead of PSObjects. Useful for piping to ConvertFrom-Json or writing to files.
+Return raw JSON strings instead of hashtables. Useful for piping to ConvertFrom-Json or writing to files.
 
 ```yaml
 Type: SwitchParameter
@@ -547,12 +547,12 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 ## INPUTS
 
 ### System.String
-Pipeline input for fan-out operations. Each string value replaces {id} in the URI template.
+Pipeline input for fan-out operations. Accepts an id string, or an object carrying one: the id member of a hashtable or PSCustomObject is extracted and replaces {id} in the URI template.
 
 ## OUTPUTS
 
-### System.Management.Automation.PSObject
-Graph API response objects with properties matching the JSON fields.
+### System.Collections.Hashtable
+Graph API response objects as case-insensitive hashtables with keys matching the JSON fields.
 
 ### System.String
 When -Raw is specified, raw JSON strings are returned instead.

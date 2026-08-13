@@ -21,7 +21,7 @@ Export-MgxCollection [-Uri] <String> -OutputFile <String> [-Property <String[]>]
 ```
 
 ## DESCRIPTION
-Export-MgxCollection streams paginated Microsoft Graph API results directly to a JSONL (JSON Lines) file. One JSON object per line, no PSObject conversion, minimal memory pressure regardless of collection size.
+Export-MgxCollection streams paginated Microsoft Graph API results directly to a JSONL (JSON Lines) file. One JSON object per line, no object conversion, minimal memory pressure regardless of collection size.
 
 Supports checkpoint/resume: specify -CheckpointPath to save progress at page boundaries and mid-page (every 500 items). On interruption - Ctrl+C, a crash, or a killed process - re-running the same command resumes from the last checkpoint; an interrupted first run's partial temp file is recovered and trimmed to exactly the checkpointed item count, so the output never contains duplicates or torn lines. The checkpoint file is deleted on successful completion.
 

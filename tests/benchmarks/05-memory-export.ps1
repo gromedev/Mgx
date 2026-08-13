@@ -1,7 +1,7 @@
 # Benchmark 05: export every user to JSONL - the memory story.
 # Contenders:
-#   mgx-export - Export-MgxCollection: streams raw JSON to disk, no PSObject conversion
-#   mgx-pipe   - Invoke-MgxRequest -All | Out-File: streams but pays the PSObject tax
+#   mgx-export - Export-MgxCollection: streams raw JSON to disk, no object conversion
+#   mgx-pipe   - Invoke-MgxRequest -All | Out-File: streams but pays the conversion tax
 #   rest       - Invoke-RestMethod: buffers all pages in memory, then writes
 # Reports wall time, peak working set, and managed-heap delta for each. Single run per
 # contender by default (export is IO-heavy; variance is dominated by service latency).

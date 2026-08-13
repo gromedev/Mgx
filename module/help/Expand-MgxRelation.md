@@ -13,7 +13,7 @@ Enrich Graph objects with related data via concurrent fan-out.
 ## SYNTAX
 
 ```
-Expand-MgxRelation [-Uri] <String> [-As] <String> -InputObject <PSObject> [-Flatten] [-IdProperty <String>]
+Expand-MgxRelation [-Uri] <String> [-As] <String> -InputObject <Object> [-Flatten] [-IdProperty <String>]
  [-Concurrency <Int32>] [-SkipNotFound] [-SkipForbidden] [-ConsistencyLevel <String>] [-Headers <Hashtable>]
  [-ApiVersion <String>] [-Top <Int32>] [<CommonParameters>]
 ```
@@ -43,7 +43,7 @@ Invoke-MgxRequest /users -All |
     Select-Object displayName, @{N='ManagerName'; E={$_.Manager.displayName}}
 ```
 
-The /manager endpoint returns a single object, not a collection. -Flatten unwraps it from the array so Manager is a PSObject (not a one-element array). Users without a manager get $null.
+The /manager endpoint returns a single object, not a collection. -Flatten unwraps it from the array so Manager is a single object (not a one-element array). Users without a manager get $null.
 
 ### Example 3: Chain multiple expansions
 ```powershell
@@ -84,10 +84,10 @@ Fetches authentication methods (beta-only endpoint) with eventual consistency fo
 ## PARAMETERS
 
 ### -InputObject
-The object to enrich with related data. Accepts any PSObject from the pipeline. Must have a property matching -IdProperty (default: id) whose value is substituted into the -Uri template.
+The object to enrich with related data. Accepts a hashtable (what the Mgx cmdlets emit) or a PSCustomObject from the pipeline. Must have a member matching -IdProperty (default: id) whose value is substituted into the -Uri template. The relation is attached in the same shape the object arrived in.
 
 ```yaml
-Type: PSObject
+Type: Object
 Parameter Sets: (All)
 Aliases:
 
@@ -129,7 +129,7 @@ Accept wildcard characters: False
 ```
 
 ### -Flatten
-Unwrap single-value relations. When the endpoint returns exactly one item (or a singleton object like /manager), the result is attached as a single PSObject instead of a one-element array. If multiple items are returned, a warning is emitted and the array is returned as-is.
+Unwrap single-value relations. When the endpoint returns exactly one item (or a singleton object like /manager), the result is attached as a single object instead of a one-element array. If multiple items are returned, a warning is emitted and the array is returned as-is.
 
 ```yaml
 Type: SwitchParameter
@@ -268,13 +268,13 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 
 ## INPUTS
 
-### System.Management.Automation.PSObject
-Any PSObject with a property matching -IdProperty (default: id).
+### System.Object
+A hashtable or PSCustomObject with a member matching -IdProperty (default: id).
 
 ## OUTPUTS
 
-### System.Management.Automation.PSObject
-The input object with an additional property (named by -As) containing the relation data. Collection endpoints produce an array of PSObjects. Singleton endpoints produce a single PSObject when -Flatten is used, or a one-element array otherwise.
+### System.Collections.Hashtable
+The input object with an additional member (named by -As) containing the relation data, in the same shape the input arrived in. Collection endpoints produce an array of hashtables. Singleton endpoints produce a single hashtable when -Flatten is used, or a one-element array otherwise.
 
 ## NOTES
 This cmdlet buffers all pipeline input before issuing requests. Use upstream filtering (-Top, -Filter) on the source cmdlet rather than downstream Select-Object -First to control the number of HTTP requests.

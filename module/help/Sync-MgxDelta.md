@@ -238,8 +238,8 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 
 ## OUTPUTS
 
-### System.Management.Automation.PSObject
-Graph API objects with properties matching the JSON fields. Deleted items include an `@removed` property.
+### System.Collections.Hashtable
+Graph API objects as case-insensitive hashtables with keys matching the JSON fields. Deleted items include an `@removed` key.
 
 ## NOTES
 Delta queries follow all @odata.nextLink pages automatically (equivalent to -All on other cmdlets). The delta token is saved only after all pages are successfully retrieved.

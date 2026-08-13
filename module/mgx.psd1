@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '1.0.5'
+    ModuleVersion     = '2.0.0'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -51,6 +51,34 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
+v2.0.0
+Breaking release. Output shape changes to Hashtable; the floor moves DOWN to PowerShell 7.4.
+Incorporates the breaking work contributed in the Microsoft365DSC fork by Fabien Tschanz.
+- BREAKING: Invoke-MgxRequest, Invoke-MgxBatchRequest, Expand-MgxRelation and Sync-MgxDelta
+  emit case-insensitive Hashtables instead of PSObjects, matching Invoke-MgGraphRequest, so
+  results drop into scripts written for the Graph SDK. Migration for code that needs the old
+  shape: -Raw | ConvertFrom-Json
+- BREAKING: @odata.type is returned verbatim under its own key instead of as ODataType. All
+  other @odata.* metadata is stripped, including @odata.etag: it changes on every write, so
+  keeping it makes two reads of an unchanged entity compare unequal. Use -Raw for the etag
+- BREAKING: the six Graph entity format views are removed - PowerShell renders any dictionary
+  with its built-in Name/Value view, so a custom view can never apply. Key order is undefined:
+  use Select-Object or Format-Table to fix column order
+- The floor moves DOWN: targets .NET 8 and supports PowerShell 7.4 (LTS) and later, where 1.x
+  required 7.5. Nothing ever needed the newer runtime - the net9.0 target dated to 1.0.1 and was
+  never code-driven. The single .NET 9 API (LoadIntoBufferAsync(CancellationToken), in the -Debug
+  tracer) is replaced with a WaitAsync equivalent that keeps the same timeout behaviour
+- BREAKING: Microsoft.Graph.Authentication is no longer in RequiredModules. Auth was already
+  resolved reflectively at call time, so declaring it only forced the SDK onto every consumer
+  and installed a second copy beside one already loaded. mgx now imports without it; cmdlets
+  needing a token report GraphAuthModuleNotLoaded with install instructions
+- Collection envelopes are unwrapped on every response path, so an action endpoint that
+  answers a write with {"value":[...]} (for example /directoryObjects/getByIds) now emits one
+  object per element instead of the envelope
+- Pipeline input accepts the new shape end to end: fan-out reads 'id' from Hashtables and
+  PSCustomObjects instead of stringifying them into the URL, and Invoke-MgxBatchRequest
+  accepts its own output, so failed items can be piped straight back in for retry
+- Polly.Core 8.7.0, System.Threading.RateLimiting 10.0.10
 v1.0.5
 Fixes and hardening driven by a rebuilt benchmark suite run against a seeded 100k-user tenant.
 - Fixed Export-MgxCollection losing all progress when a first run was interrupted: a cancelled

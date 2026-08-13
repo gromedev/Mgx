@@ -25,7 +25,7 @@ Supports GET, POST, PATCH, PUT, and DELETE methods with optional request bodies.
 
 Source: [Combine multiple HTTP requests using JSON batching](https://learn.microsoft.com/en-us/graph/json-batching)
 
-Pipeline input can be string URLs (for GET, or combined with -Method/-Body for the same operation on all) or PSObjects with Url, Method, and Body properties for per-item control.
+Pipeline input can be string URLs (for GET, or combined with -Method/-Body for the same operation on all) or hashtables or PSCustomObjects with Url, Method, and Body members for per-item control.
 
 Failed items are surfaced as PowerShell ErrorRecords. Use -ErrorAction Stop to halt on the first failure, or inspect $Error after completion.
 
@@ -145,7 +145,7 @@ Accept wildcard characters: False
 ```
 
 ### -Body
-Request body for all requests when piping string URLs. Ignored when pipeline input contains PSObjects with their own Body property.
+Request body for all requests when piping string URLs. Ignored when pipeline input carries its own Body member.
 
 ```yaml
 Type: Object
@@ -238,7 +238,7 @@ Accept wildcard characters: False
 ```
 
 ### -Method
-HTTP method for all requests when piping string URLs. Default: GET. Ignored when pipeline input contains PSObjects with their own Method property.
+HTTP method for all requests when piping string URLs. Default: GET. Ignored when pipeline input carries its own Method member.
 
 ```yaml
 Type: String
@@ -254,7 +254,7 @@ Accept wildcard characters: False
 ```
 
 ### -Uri
-Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id) or relative URLs (/users/id). Also accepts PSObjects with Url, Method, and Body properties for per-item control.
+Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id) or relative URLs (/users/id). Also accepts hashtables or PSCustomObjects with Url, Method, and Body members for per-item control.
 
 ```yaml
 Type: Object[]
@@ -304,12 +304,12 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 ## INPUTS
 
 ### System.Object[]
-String URLs or PSObjects with Url, Method, and Body properties.
+String URLs, or hashtables or PSCustomObjects with Url, Method, and Body members.
 
 ## OUTPUTS
 
-### System.Management.Automation.PSObject
-Per-request results with Url, Status, and Body properties.
+### System.Collections.Hashtable
+Per-request results with Url, Method, Status, and Body keys. Results can be piped back into this cmdlet to retry failed items.
 
 ## NOTES
 Each batch item is retried individually on 429 (throttled) or 5xx errors (for idempotent methods). POST requests only retry on 429 because POST is non-idempotent - retrying a failed POST on 5xx could create duplicates if the server processed the request before the error. This matches the Kiota SDK retry behavior. Source: [Microsoft Graph error responses and resource types](https://learn.microsoft.com/en-us/graph/errors)
