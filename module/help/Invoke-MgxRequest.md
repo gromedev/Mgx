@@ -181,7 +181,7 @@ Accept wildcard characters: False
 ```
 
 ### -Body
-Request body for write operations (POST, PATCH, PUT). Accepts a hashtable or PSObject, which is serialized to JSON.
+Request body for write operations (POST, PATCH, PUT). Accepts a hashtable, PSObject or array, which is serialized to JSON, or a string already holding JSON, which is sent verbatim. Ignored (with a warning) on GET.
 
 ```yaml
 Type: Object

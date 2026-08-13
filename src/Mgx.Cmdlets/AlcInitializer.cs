@@ -90,5 +90,10 @@ public class AlcInitializer : IModuleAssemblyInitializer, IModuleAssemblyCleanup
         }
 
         AssemblyLoadContext.Default.Resolving -= ResolveDependency;
+
+        // After the resolver: this only detaches an event handler, needs no dependency
+        // resolution, and must not run before ResetHttpClient (which may trigger loads
+        // that the type cache should still observe).
+        Base.MgxCmdletBase.DetachAssemblyLoadHandler();
     }
 }

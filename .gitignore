@@ -1,6 +1,5 @@
 # ignore
 .vscode/
-.github/
 .DS_Store
 
 # tmp
@@ -18,5 +17,5 @@ module/*.json
 module/Dependencies/
 module/.build-hash
 
-# tests (internal only)
-tests/
+# Pester harness output
+tests/TestResults.xml

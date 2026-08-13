@@ -1,0 +1,74 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: windows-latest
+    if: github.repository == 'gromedev/mgx'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore Mgx.slnx
+
+      - name: Build module
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release
+
+      - name: Run xUnit tests
+        run: >
+          dotnet test tests/Mgx.IntegrationTests/Mgx.IntegrationTests.csproj
+          --configuration Release --no-build
+          --logger "trx;LogFileName=xunit-results.trx"
+          --results-directory TestResults
+
+      - name: Install test prerequisites
+        shell: pwsh
+        run: |
+          # Pester drives the surface tests; Microsoft.Graph.Authentication is in
+          # RequiredModules, so importing mgx fails without it.
+          Install-PSResource -Name Pester -TrustRepository -Scope AllUsers
+          Install-PSResource -Name Microsoft.Graph.Authentication -TrustRepository -Scope AllUsers
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Import-Module ./tests/TestHarness.psm1
+          $result = Invoke-TestHarness -IgnoreCodeCoverage
+          if ($result.FailedCount -gt 0) {
+              throw "$($result.FailedCount) Pester test(s) failed."
+          }
+
+      - name: Validate module manifest
+        shell: pwsh
+        run: |
+          Test-ModuleManifest -Path ./module/mgx.psd1 -ErrorAction Stop
+          $module = Import-Module ./module/mgx.psd1 -PassThru -ErrorAction Stop
+          if ($module.ExportedCmdlets.Count -eq 0) {
+              throw 'Module imported but exports no cmdlets.'
+          }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            TestResults/
+            tests/TestResults.xml
+          if-no-files-found: ignore

@@ -12,24 +12,22 @@ $DepsDir = Join-Path $ModuleRoot 'Dependencies'
 
 Write-Host "Building Mgx ($Configuration)..." -ForegroundColor Cyan
 
-# Version gate: MgxSdkVersion.Value is sent as the SdkVersion header on every Graph request,
-# so a stale value misreports the client in Microsoft's telemetry. It is a hand-maintained
-# const and drifted unnoticed for three releases - the header said 0.3.0 while the module
-# shipped 1.0.x. Checked before the compile so a mismatch fails in a second, not a minute.
+# Version gate: MgxSdkVersion derives the SdkVersion header from the assembly version set in
+# Directory.Build.props, so the header can no longer drift from the code on its own (it said
+# 0.3.0 for three releases while the module shipped 1.0.x). The manifest ModuleVersion is
+# still a separate declaration, so the one remaining mismatch - props vs manifest - is
+# checked before the compile, failing in a second instead of a minute.
 $manifestVersion = (Import-PowerShellDataFile (Join-Path $ModuleRoot 'mgx.psd1')).ModuleVersion
-$sdkVersionFile = Join-Path $PSScriptRoot 'src/Mgx.Engine/MgxSdkVersion.cs'
-$sdkVersionMatch = [regex]::Match(
-    (Get-Content $sdkVersionFile -Raw),
-    'Value\s*=\s*"mgx/(?<version>[^"]+)"')
-if (-not $sdkVersionMatch.Success) {
-    throw "Version gate failed: could not find the SDK version constant in $sdkVersionFile"
+$propsFile = Join-Path $PSScriptRoot 'Directory.Build.props'
+$propsVersion = ([xml](Get-Content $propsFile -Raw)).Project.PropertyGroup.Version
+if (-not $propsVersion) {
+    throw "Version gate failed: no <Version> found in $propsFile"
 }
-$sdkVersion = $sdkVersionMatch.Groups['version'].Value
-if ($sdkVersion -ne $manifestVersion) {
-    throw "Version gate failed: MgxSdkVersion.Value is 'mgx/$sdkVersion' but mgx.psd1 " +
-          "ModuleVersion is '$manifestVersion'. Update MgxSdkVersion.cs to match the manifest."
+if ($propsVersion -ne $manifestVersion) {
+    throw "Version gate failed: Directory.Build.props <Version> is '$propsVersion' but mgx.psd1 " +
+          "ModuleVersion is '$manifestVersion'. Update one to match the other."
 }
-Write-Host "Version gate: mgx/$sdkVersion matches manifest" -ForegroundColor DarkGray
+Write-Host "Version gate: mgx/$propsVersion matches manifest" -ForegroundColor DarkGray
 
 # Clean previous build artifacts
 if (Test-Path $DepsDir) { Remove-Item $DepsDir -Recurse -Force }

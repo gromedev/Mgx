@@ -22,6 +22,7 @@ public sealed class ResilientGraphClient : IDisposable
     private readonly TokenBucketRateLimiter? _rateLimiter;
     private readonly ConcurrentQueue<string> _pendingVerbose = new();
     private readonly ConcurrentQueue<string> _pendingWarnings = new();
+    private readonly ConcurrentQueue<string> _pendingDebug = new();
 
     /// <summary>Maximum request body size (4MB). Graph API rejects larger bodies on most endpoints.</summary>
     internal const int MaxRequestBodyBytes = 4 * 1024 * 1024;
@@ -74,6 +75,15 @@ public sealed class ResilientGraphClient : IDisposable
     // Same buffering contract as VerboseWriter.
     public Action<string>? WarningWriter { get; set; }
 
+    // Same buffering contract as VerboseWriter. Receives the -Debug request/response trace.
+    public Action<string>? DebugWriter { get; set; }
+
+    /// <summary>
+    /// Emit a request/response trace for every call. Off by default: tracing buffers the whole
+    /// response body in memory, which defeats the streaming reads the rest of the client relies on.
+    /// </summary>
+    public bool DebugEnabled { get; set; }
+
     /// <summary>Drain buffered verbose messages. Must be called on the pipeline thread.</summary>
     public void DrainVerboseMessages()
     {
@@ -97,6 +107,18 @@ public sealed class ResilientGraphClient : IDisposable
         }
         while (_pendingWarnings.TryDequeue(out var msg))
             WarningWriter(msg);
+    }
+
+    // Same threading contract as DrainVerboseMessages.
+    public void DrainDebugMessages()
+    {
+        if (DebugWriter == null)
+        {
+            while (_pendingDebug.TryDequeue(out _)) { }
+            return;
+        }
+        while (_pendingDebug.TryDequeue(out var msg))
+            DebugWriter(msg);
     }
 
     /// <summary>
@@ -158,9 +180,11 @@ public sealed class ResilientGraphClient : IDisposable
                     throw new InvalidOperationException("Rate limit exceeded. Too many concurrent requests. Reduce -Concurrency on fan-out cmdlets, increase the queue with Set-MgxOption -RateLimitQueueLimit, or disable with Set-MgxOption -NoRateLimit.");
             }
 
+            var attempt = 0;
             var result = await _pipeline.ExecuteAsync(
                 async ctx =>
                 {
+                    attempt++;
                     var request = new HttpRequestMessage(method, requestUri);
                     if (contentBytes != null)
                     {
@@ -177,10 +201,18 @@ public sealed class ResilientGraphClient : IDisposable
                     }
                     request.Headers.TryAddWithoutValidation("SdkVersion", MgxSdkVersion.Value);
                     request.Headers.TryAddWithoutValidation("client-request-id", clientRequestId);
+
+                    if (DebugEnabled)
+                        _pendingDebug.Enqueue(GraphRequestTracer.FormatRequest(request, contentBytes, attempt));
+
                     var httpSw = Stopwatch.StartNew();
                     // Stream response headers immediately instead of buffering entire body
                     var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ctx.CancellationToken);
                     MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);
+
+                    if (DebugEnabled)
+                        await TraceResponseAsync(response, httpSw.ElapsedMilliseconds, ctx.CancellationToken);
+
                     return response;
                 },
                 context);
@@ -262,6 +294,28 @@ public sealed class ResilientGraphClient : IDisposable
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(BodyReadTimeout);
         return cts;
+    }
+
+    /// <summary>
+    /// Buffer the response body and queue a trace line for it. Buffering is what makes the body
+    /// readable twice: the caller still reads it normally afterwards.
+    /// A trace must never break a request, so a failed read degrades to a headers-only line.
+    /// </summary>
+    private async Task TraceResponseAsync(HttpResponseMessage response, long elapsedMs, CancellationToken ct)
+    {
+        string? body = null;
+        try
+        {
+            using var bodyCts = CreateBodyReadCts(ct);
+            await response.Content.LoadIntoBufferAsync(bodyCts.Token);
+            body = await response.Content.ReadAsStringAsync(bodyCts.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _pendingDebug.Enqueue($"[Mgx] Response body could not be traced: {ex.Message}");
+        }
+
+        _pendingDebug.Enqueue(GraphRequestTracer.FormatResponse(response, elapsedMs, body));
     }
 
     private async Task ThrowIfGraphErrorAsync(HttpResponseMessage response, CancellationToken ct)

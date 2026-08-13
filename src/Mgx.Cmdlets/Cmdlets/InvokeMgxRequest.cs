@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Management.Automation;
 using System.Net;
 using System.Text;
@@ -217,6 +218,10 @@ public class InvokeMgxRequest : MgxCmdletBase
 
         if (httpMethod == HttpMethod.Get)
         {
+            // Graph GET has no request body, and neither GET path sends one
+            if (Body != null)
+                WriteWarning("-Body is ignored on GET requests.");
+
             if (IsCollectionMode)
                 ExecuteList(relativeUri, sourceId);
             else
@@ -463,18 +468,10 @@ public class InvokeMgxRequest : MgxCmdletBase
             var client = GetClient();
             var headers = BuildHeaders();
 
-            // Graph API requires Content-Type: application/json on write methods
-            // (POST, PATCH, PUT) even when the body is empty. DELETE does not need it.
-            HttpContent? content = null;
-            if (Body != null)
-            {
-                var json = SerializeBody(Body);
-                content = new StringContent(json, Encoding.UTF8, "application/json");
-            }
-            else if (method != HttpMethod.Delete)
-            {
-                content = new StringContent("{}", Encoding.UTF8, "application/json");
-            }
+            var serializedBody = ResolveRequestBody(method);
+            HttpContent? content = serializedBody != null
+                ? new StringContent(serializedBody, Encoding.UTF8, "application/json")
+                : null;
 
             try
             {
@@ -683,12 +680,8 @@ public class InvokeMgxRequest : MgxCmdletBase
 
         try
         {
-            // Serialize body once (shared across all operations).
-            // For non-DELETE write methods, default to empty JSON object so ConcurrentFanOut
-            // creates HttpContent with Content-Type: application/json (required by Graph API).
-            string? serializedBody = Body != null
-                ? SerializeBody(Body)
-                : (httpMethod != HttpMethod.Delete ? "{}" : null);
+            // Serialize body once (shared across all operations)
+            string? serializedBody = ResolveRequestBody(httpMethod);
 
             // Build operations list: (id, resolved URL)
             var operations = uniqueIds.Select(id =>
@@ -931,14 +924,34 @@ public class InvokeMgxRequest : MgxCmdletBase
         WriteObject(pso);
     }
 
+    /// <summary>
+    /// Serialized request body for a write method, or null when no content should be sent.
+    /// Graph requires Content-Type: application/json on POST/PATCH/PUT even with an empty body,
+    /// so those default to "{}". DELETE sends no content.
+    /// </summary>
+    private string? ResolveRequestBody(HttpMethod method)
+    {
+        var serialized = Body != null ? SerializeBody(Body) : null;
+        if (!string.IsNullOrWhiteSpace(serialized))
+            return serialized;
+
+        return method != HttpMethod.Delete ? "{}" : null;
+    }
+
+    /// <summary>
+    /// Serialize a -Body argument to the JSON that goes on the wire. A raw JSON string is passed
+    /// through verbatim, everything else is serialized.
+    /// </summary>
     internal static string SerializeBody(object body)
     {
-        if (body is string s) return s;
-        if (body is PSObject pso) return JsonSerializer.Serialize(PSOToDict(pso));
-        if (body is System.Collections.Hashtable ht) return JsonSerializer.Serialize(HashtableToDict(ht));
-        // Handle array body (e.g., object[] from PowerShell)
-        if (body is object[] arr) return JsonSerializer.Serialize(arr.Select(UnwrapValue).ToArray());
-        return JsonSerializer.Serialize(body);
+        var value = UnwrapPSObject(body);
+        if (value is string s) return s;
+        // Still a PSObject after unwrapping: a PSCustomObject, whose members live on the wrapper
+        if (value is PSObject pso) return JsonSerializer.Serialize(PSOToDict(pso));
+        if (value is IDictionary dict) return JsonSerializer.Serialize(DictionaryToDict(dict));
+        // Handle array body (object[], ArrayList, List<object>, ... from PowerShell)
+        if (value is IEnumerable seq) return JsonSerializer.Serialize(EnumerableToArray(seq));
+        return JsonSerializer.Serialize(value);
     }
 
     internal static Dictionary<string, object?> PSOToDict(PSObject pso)
@@ -952,35 +965,43 @@ public class InvokeMgxRequest : MgxCmdletBase
         return dict;
     }
 
-    internal static Dictionary<string, object?> HashtableToDict(System.Collections.Hashtable ht)
+    /// <summary>
+    /// Flatten any IDictionary (Hashtable or ordered dictionary) into a serializable
+    /// dictionary, unwrapping nested PowerShell values.
+    /// </summary>
+    internal static Dictionary<string, object?> DictionaryToDict(IDictionary source)
     {
         var dict = new Dictionary<string, object?>();
-        foreach (System.Collections.DictionaryEntry entry in ht)
+        foreach (DictionaryEntry entry in source)
             dict[entry.Key.ToString()!] = UnwrapValue(entry.Value);
         return dict;
     }
 
     /// <summary>
     /// Unwraps a PowerShell value to its underlying .NET representation.
-    /// PSCustomObject's BaseObject is the PSObject itself - check for NoteProperty members
-    /// rather than the BaseObject type to correctly identify and recurse into PS objects.
+    /// A PSCustomObject keeps its members on the PSObject (its BaseObject is an empty
+    /// marker), so it must be read through PSOToDict rather than its BaseObject.
     /// </summary>
     internal static object? UnwrapValue(object? value)
     {
         if (value is PSObject pso)
         {
-            // If BaseObject is a raw .NET type (not a PSObject itself), unwrap it
-            if (pso.BaseObject != null && pso.BaseObject is not PSObject)
-                return UnwrapValue(pso.BaseObject);
-            // PSCustomObject: recurse into its properties
-            return PSOToDict(pso);
+            var unwrapped = UnwrapPSObject(pso);
+            return ReferenceEquals(unwrapped, pso) ? PSOToDict(pso) : UnwrapValue(unwrapped);
         }
-        if (value is System.Collections.Hashtable ht)
-            return HashtableToDict(ht);
-        if (value is object[] arr)
-            return arr.Select(UnwrapValue).ToArray();
+        if (value is IDictionary dict)
+            return DictionaryToDict(dict);
+        if (value is IEnumerable seq and not string)
+            return EnumerableToArray(seq);
         return value;
     }
+
+    /// <summary>
+    /// Flatten any non-string sequence (object[], ArrayList, List&lt;object&gt;, ...) into an array of
+    /// unwrapped values.
+    /// </summary>
+    private static object?[] EnumerableToArray(IEnumerable source) =>
+        source.Cast<object?>().Select(UnwrapValue).ToArray();
 
     #endregion
 

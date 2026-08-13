@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Globalization;
 using System.Management.Automation;
 using System.Text.Json;
@@ -123,7 +124,9 @@ public abstract class MgxCmdletCore : PSCmdlet, IDisposable
 
         return element.ValueKind switch
         {
-            JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+            // The (object) cast is required: without it the conditional unifies to double,
+            // widening every integer and losing precision beyond 2^53.
+            JsonValueKind.Number => element.TryGetInt64(out var l) ? (object)l : element.GetDouble(),
             JsonValueKind.True => true,
             JsonValueKind.False => false,
             JsonValueKind.Null => null,
@@ -147,6 +150,35 @@ public abstract class MgxCmdletCore : PSCmdlet, IDisposable
 
         var pascalName = char.ToUpperInvariant(typePart[0]) + typePart.Substring(1);
         return $"Mgx.{pascalName}";
+    }
+
+    #endregion
+
+    #region Pipeline input helpers
+
+    /// <summary>
+    /// Unwrap a PSObject to the .NET value underneath (string, Hashtable, ...). A
+    /// PSCustomObject is returned as its PSObject: its members live on the PSObject,
+    /// and its BaseObject is an empty PSCustomObject marker that carries nothing.
+    /// </summary>
+    protected internal static object UnwrapPSObject(object input) =>
+        input is PSObject pso && pso.BaseObject is not PSObject and not PSCustomObject
+            ? pso.BaseObject
+            : input;
+
+    /// <summary>
+    /// Read a named member from pipeline input, whether it is a Hashtable, a
+    /// PSObject-wrapped dictionary, or a PSCustomObject.
+    /// </summary>
+    protected internal static object? TryGetMember(object? input, string name)
+    {
+        if (input is PSObject wrapper && wrapper.BaseObject is IDictionary baseDict)
+            return baseDict[name];
+        if (input is IDictionary dict)
+            return dict[name];
+        if (input is PSObject pso)
+            return pso.Properties[name]?.Value;
+        return null;
     }
 
     #endregion

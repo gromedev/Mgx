@@ -65,6 +65,33 @@ public sealed class GraphBatchClient
     // instead of resetting to the configured BatchItemsPerSecond.
     private static int s_adaptedItemsPerSecond;
 
+    // When the last 429 was seen, so the adapted rate can expire. Without an expiry a single
+    // throttling episode kept every later batch in the process at the reduced rate for the
+    // lifetime of the session, with no way to recover short of restarting PowerShell.
+    private static long s_lastThrottleTicks;
+
+    // Adaptive pacing bounds. Classic AIMD: a 429 halves the rate, and a run of clean chunks
+    // adds a fraction of the configured rate back, so the rate creeps up to the throttling
+    // threshold instead of jumping straight back into it.
+    private const int MinAdaptiveItemsPerSecond = 2;
+    private const int AdaptiveRecoveryCleanChunks = 2;
+    internal static readonly TimeSpan AdaptiveRecoveryWindow = TimeSpan.FromMinutes(5);
+
+    /// <summary>Rate to fall back to after a chunk reported throttling.</summary>
+    internal static int ReduceRate(int rate) => Math.Max(rate / 2, MinAdaptiveItemsPerSecond);
+
+    /// <summary>Rate to climb to after a run of clean chunks, capped at the configured rate.</summary>
+    internal static int RecoverRate(int rate, int configuredRate) =>
+        Math.Min(configuredRate, rate + Math.Max(1, configuredRate / 10));
+
+    /// <summary>
+    /// True when the persisted adapted rate is older than the recovery window, so the
+    /// throttling that produced it no longer describes the tenant's current state.
+    /// </summary>
+    internal static bool AdaptedRateHasExpired(long lastThrottleTicks, long nowTicks) =>
+        lastThrottleTicks > 0
+        && nowTicks - lastThrottleTicks > (long)(AdaptiveRecoveryWindow.TotalSeconds * Stopwatch.Frequency);
+
     public GraphBatchClient(ResilientGraphClient client, string graphBaseUrl = "https://graph.microsoft.com/v1.0",
         int maxRetryAfterSeconds = 120, int batchChunkConcurrency = 1, int batchItemsPerSecond = 0)
     {
@@ -82,6 +109,7 @@ public sealed class GraphBatchClient
     internal static void ResetPacingState()
     {
         Interlocked.Exchange(ref s_lastBatchCompletedTicks, 0);
+        Interlocked.Exchange(ref s_lastThrottleTicks, 0);
         Volatile.Write(ref s_lastBatchItemCount, 0);
         Volatile.Write(ref s_adaptedItemsPerSecond, 0);
     }
@@ -162,10 +190,17 @@ public sealed class GraphBatchClient
             // so that successive Invoke-MgxBatchRequest invocations in a loop don't reset
             // to the full rate and immediately get re-throttled.
             var adapted = Volatile.Read(ref s_adaptedItemsPerSecond);
+            if (adapted > 0 && AdaptedRateHasExpired(
+                    Interlocked.Read(ref s_lastThrottleTicks), Stopwatch.GetTimestamp()))
+            {
+                Volatile.Write(ref s_adaptedItemsPerSecond, 0);
+                adapted = 0;
+                _pendingVerbose.Enqueue($"Adaptive pacing: no throttling for {AdaptiveRecoveryWindow.TotalMinutes:0} min, restored configured rate ({_batchItemsPerSecond} items/sec)");
+            }
             int effectiveItemsPerSecond = (adapted > 0 && adapted < _batchItemsPerSecond)
                 ? adapted
                 : _batchItemsPerSecond;
-            const int MinAdaptiveItemsPerSecond = 2;
+            int cleanChunks = 0;
             foreach (var chunk in chunks)
             {
                 var iterSw = Stopwatch.StartNew();
@@ -205,13 +240,32 @@ public sealed class GraphBatchClient
                 telemetry.AddThrottleEncounters(chunkThrottles);
                 telemetry.AddRetryDelayMs(chunkRetryDelayMs);
 
-                // Adaptive pacing: halve rate on 429, floor at MinAdaptiveItemsPerSecond
-                if (chunkThrottles > 0 && effectiveItemsPerSecond > MinAdaptiveItemsPerSecond)
+                // Adaptive pacing: halve on 429 (floor at MinAdaptiveItemsPerSecond), and climb
+                // back after a run of clean chunks so a past throttle does not cap the rate
+                // for the rest of the session.
+                if (chunkThrottles > 0)
                 {
+                    Interlocked.Exchange(ref s_lastThrottleTicks, Stopwatch.GetTimestamp());
+                    cleanChunks = 0;
+                    if (effectiveItemsPerSecond > MinAdaptiveItemsPerSecond)
+                    {
+                        var prev = effectiveItemsPerSecond;
+                        effectiveItemsPerSecond = ReduceRate(effectiveItemsPerSecond);
+                        Volatile.Write(ref s_adaptedItemsPerSecond, effectiveItemsPerSecond);
+                        _pendingVerbose.Enqueue($"Adaptive pacing: {chunkThrottles} throttle(s) in chunk {chunkIndex}, reducing rate {prev} -> {effectiveItemsPerSecond} items/sec (persisted)");
+                    }
+                }
+                else if (effectiveItemsPerSecond < _batchItemsPerSecond
+                    && ++cleanChunks >= AdaptiveRecoveryCleanChunks)
+                {
+                    cleanChunks = 0;
                     var prev = effectiveItemsPerSecond;
-                    effectiveItemsPerSecond = Math.Max(effectiveItemsPerSecond / 2, MinAdaptiveItemsPerSecond);
-                    Volatile.Write(ref s_adaptedItemsPerSecond, effectiveItemsPerSecond);
-                    _pendingVerbose.Enqueue($"Adaptive pacing: {chunkThrottles} throttle(s) in chunk {chunkIndex}, reducing rate {prev} -> {effectiveItemsPerSecond} items/sec (persisted)");
+                    effectiveItemsPerSecond = RecoverRate(effectiveItemsPerSecond, _batchItemsPerSecond);
+                    // Persist 0 once fully recovered, so the next call starts clean instead of
+                    // pinning itself to a rate that merely equals the configured one today.
+                    Volatile.Write(ref s_adaptedItemsPerSecond,
+                        effectiveItemsPerSecond >= _batchItemsPerSecond ? 0 : effectiveItemsPerSecond);
+                    _pendingVerbose.Enqueue($"Adaptive pacing: {AdaptiveRecoveryCleanChunks} clean chunk(s), raising rate {prev} -> {effectiveItemsPerSecond} items/sec");
                 }
 
                 for (int i = 0; i < chunkResults.Count; i++)

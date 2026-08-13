@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '1.0.3'
+    ModuleVersion     = '1.0.4'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -46,6 +46,28 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
+v1.0.4
+Fixes ported from the Microsoft365DSC fork, contributed by Fabien Tschanz.
+- Fixed Mgx cmdlets keeping the credentials of the first Connect-MgGraph call: the cached
+  HTTP client was keyed on tenant id alone, so reconnecting to the same tenant with a
+  different application, certificate, account, or scope set silently reused the previous
+  identity. The client is now keyed on a fingerprint of the full auth context
+- Fixed a JSON string passed to -Body being silently dropped (sent as {}), so a piped or
+  ConvertTo-Json body now serializes correctly
+- Fixed Enable-MgxResilience staying bound to the pre-reconnect SDK client; resilience is
+  re-injected when the Graph identity changes
+- Fixed Set-MgxOption -TotalTimeoutSeconds not reaching the HTTP client
+- Fixed a single 429 slowing Invoke-MgxBatchRequest for the rest of the session; the write
+  rate now recovers after clean chunks and resets after five quiet minutes
+- Fixed the internal type cache never invalidating when Microsoft.Graph.Authentication was
+  re-imported at a different version
+- Fixed JSON integers above 2^53 losing precision
+- Added -Debug request/response tracing on all cmdlets, with credential redaction
+- A batch item with an invalid JSON body now fails on its own instead of aborting the batch;
+  -Body on GET now warns instead of being silently ignored
+- The SdkVersion header is now derived from the assembly version instead of a hand-maintained
+  constant
+
 v1.0.3
 - Fixed Remove-Module Mgx failing and leaving the module loaded (cleanup now runs before the
   ALC resolver detaches). Only triggered when no Graph request had run in the session

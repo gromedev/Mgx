@@ -1,7 +1,11 @@
+using System.Collections;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Management.Automation;
 using System.Net;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using Mgx.Engine.Http;
 using Mgx.Engine.Models;
 using Polly.CircuitBreaker;
@@ -21,7 +25,17 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     private static readonly object s_initLock = new();
     private static HttpClient? s_graphHttpClient;
     private static bool s_ownsHttpClient; // false when using SDK fallback (don't dispose SDK's client)
-    private static string? s_cachedTenantId;
+
+    // Identity the cached client was built for
+    private static volatile string? s_cachedAuthFingerprint;
+
+    // WeakReference so a disconnected AuthContext (and the X509Certificate2 it holds) is not
+    // kept alive by Mgx. A collected target can never be the current context.
+    private static volatile WeakReference<object>? s_cachedAuthContextRef;
+
+    // TotalTimeoutSeconds the cached client's HttpClient.Timeout was derived from.
+    private static int s_cachedTotalTimeoutSeconds;
+
     internal static volatile string s_graphEndpoint = "https://graph.microsoft.com";
     internal static volatile ResilientGraphClientOptions s_clientOptions = ResilientGraphClientOptions.Default;
 
@@ -33,14 +47,16 @@ public abstract class MgxCmdletBase : MgxCmdletCore
 
     /// <summary>
     /// Get the resilient Graph client with auth-only HttpClient (no Kiota retry/redirect).
-    /// Detects tenant changes and rebuilds the client when needed.
+    /// Detects auth context changes and rebuilds the client when needed, so re-running
+    /// Connect-MgGraph with a different tenant, application, or credential takes effect
+    /// without restarting the session.
     /// </summary>
     protected ResilientGraphClient GetClient()
     {
         if (_client != null) return _client;
 
-        var currentTenantId = GetCurrentTenantId(WriteVerbose);
-        if (string.IsNullOrEmpty(currentTenantId))
+        var identity = GetCurrentAuthIdentity(WriteVerbose);
+        if (string.IsNullOrEmpty(identity.Fingerprint))
         {
             ThrowTerminatingError(new ErrorRecord(
                 new InvalidOperationException("Not connected to Microsoft Graph. Run Connect-MgGraph first."),
@@ -54,21 +70,55 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         // Capture locals inside lock to prevent TOCTOU race: another thread could enter
         // the lock and replace/dispose s_graphHttpClient between lock exit and usage.
         HttpClient httpClient;
-        ResilientGraphClientOptions clientOptions;
+        var identityChanged = false;
+        var clientOptions = s_clientOptions;
         lock (s_initLock)
         {
-            if (s_graphHttpClient == null || s_cachedTenantId != currentTenantId)
+            var previousFingerprint = s_cachedAuthFingerprint;
+            var credentialChanged = !string.Equals(
+                previousFingerprint, identity.Fingerprint, StringComparison.Ordinal);
+            var contextReplaced = AuthContextInstanceChanged(identity.AuthContext);
+
+            // A client borrowed from the SDK goes stale on its own terms, e.g. after Connect-MgGraph swaps
+            // GraphSession.GraphHttpClient, and the instance we cached still carries the old auth.
+            var sessionClient = s_ownsHttpClient ? null : TryGetSessionGraphHttpClient();
+            var borrowedClientStale = sessionClient != null && s_graphHttpClient != null
+                && !ReferenceEquals(s_graphHttpClient, sessionClient);
+
+            // Set-MgxOption -TotalTimeoutSeconds only reaches HttpClient.Timeout through a
+            // rebuild. The property is immutable once the first request has gone out.
+            var timeoutStale = s_ownsHttpClient && s_graphHttpClient != null
+                && s_cachedTotalTimeoutSeconds != clientOptions.TotalTimeoutSeconds;
+
+            if (s_graphHttpClient == null || credentialChanged || contextReplaced
+                || borrowedClientStale || timeoutStale)
             {
+                if (timeoutStale)
+                {
+                    WriteVerbose($"TotalTimeoutSeconds changed ({s_cachedTotalTimeoutSeconds} -> "
+                        + $"{clientOptions.TotalTimeoutSeconds}). Rebuilding the Mgx HTTP client.");
+                }
+
+                // previousFingerprint == null is the first build of the session, not a change.
+                identityChanged = previousFingerprint != null && (credentialChanged || contextReplaced);
+                if (identityChanged)
+                {
+                    WriteVerbose($"Graph identity changed ({Shorten(previousFingerprint)} -> "
+                        + $"{Shorten(identity.Fingerprint)}). Rebuilding the Mgx HTTP client.");
+                }
+
                 // Reset-before-Build is intentional here (unlike TryPreInitHttpClient which
                 // builds first then resets). GetClient() has a fallback path (SDK client), so
                 // resetting circuit breaker state from the old tenant before attempting to build
                 // is safe: if BuildCleanHttpClient fails, GetSdkHttpClientFallback provides a
                 // working client. If both fail, ThrowTerminatingError is the correct response.
-                ResiliencePipelineFactory.Reset();
+                // Only on a real credential change: a same-identity reconnect should keep its
+                // warm rate limiter instead of earning a fresh burst allowance.
+                if (credentialChanged) ResiliencePipelineFactory.Reset();
                 // Schedule delayed disposal: in-flight ResilientGraphClient instances
                 // may still hold a reference to the old client via their constructor
-                ScheduleDelayedHttpClientDispose(s_graphHttpClient);
-                s_graphHttpClient = BuildCleanHttpClient();
+                ScheduleDelayedHttpClientDispose(s_graphHttpClient, s_ownsHttpClient);
+                s_graphHttpClient = BuildCleanHttpClient(clientOptions.TotalTimeoutSeconds);
                 if (s_graphHttpClient != null)
                 {
                     s_ownsHttpClient = true;
@@ -91,52 +141,184 @@ public abstract class MgxCmdletBase : MgxCmdletCore
                     return null!;
                 }
 
-                s_cachedTenantId = currentTenantId;
+                s_cachedAuthFingerprint = identity.Fingerprint;
+                s_cachedAuthContextRef = identity.AuthContext is null
+                    ? null
+                    : new WeakReference<object>(identity.AuthContext);
+                s_cachedTotalTimeoutSeconds = clientOptions.TotalTimeoutSeconds;
                 s_graphEndpoint = GetGraphEndpoint(WriteWarning, WriteVerbose) ?? "https://graph.microsoft.com";
             }
             httpClient = s_graphHttpClient!;
-            clientOptions = s_clientOptions;
         }
+
+        // Outside s_initLock by design. Enable-MgxResilience takes StateLock and then s_initLock
+        // (via TryPreInitHttpClient), so taking StateLock while holding s_initLock inverts the
+        // lock order and can deadlock. Never acquire StateLock inside s_initLock.
+        if (identityChanged)
+            Cmdlets.Configuration.EnableMgxResilience.RefreshInjectedClient(WriteWarning, WriteVerbose);
 
         _client = new ResilientGraphClient(httpClient, clientOptions);
         _client.BodyReadTimeout = TimeSpan.FromSeconds(clientOptions.AttemptTimeoutSeconds);
         _client.VerboseWriter = msg => WriteVerbose(msg);
         _client.WarningWriter = msg => WriteWarning(msg);
+        _client.DebugWriter = msg => WriteDebug(msg);
+        _client.DebugEnabled = IsDebugRequested();
         return _client;
     }
 
-    private static string? GetCurrentTenantId(Action<string>? verbose)
+    /// <summary>
+    /// The Graph identity a client is built for. It's a comparable fingerprint plus the AuthContext
+    /// instance it was derived from (null when only the Get-MgContext fallback could run).
+    /// An empty fingerprint means "not connected".
+    /// </summary>
+    internal readonly record struct AuthIdentity(string Fingerprint, object? AuthContext);
+
+    private static AuthIdentity GetCurrentAuthIdentity(Action<string>? verbose)
     {
+        try
+        {
+            var instance = TryGetGraphSessionInstance();
+            if (instance != null)
+            {
+                var authContext = instance.GetType().GetProperty("AuthContext")?.GetValue(instance);
+                var fingerprint = BuildAuthFingerprint(authContext, GetGraphEndpointFrom(instance));
+                // GraphSession is reachable, so its answer is authoritative - including
+                // "no context", which means disconnected.
+                return fingerprint.Length == 0 ? default : new AuthIdentity(fingerprint, authContext);
+            }
+        }
+        catch (Exception ex)
+        {
+            verbose?.Invoke($"Failed to read GraphSession.AuthContext: {ex.Message}");
+        }
+
+        // Fallback for SDK internals drift using Get-MgContext
         try
         {
             using var ps = PowerShell.Create(RunspaceMode.CurrentRunspace);
             ps.AddCommand("Get-MgContext");
             var results = ps.Invoke();
-            if (ps.HadErrors || results.Count == 0) return null;
-            return results[0].Properties["TenantId"]?.Value?.ToString();
+            if (ps.HadErrors || results.Count == 0 || results[0] == null) return default;
+
+            var context = UnwrapPSObject(results[0]);
+            var fingerprint = BuildAuthFingerprint(context, null);
+            return fingerprint.Length == 0 ? default : new AuthIdentity(fingerprint, context);
         }
         catch (Exception ex)
         {
-            verbose?.Invoke($"Failed to get tenant ID: {ex.Message}");
+            verbose?.Invoke($"Failed to get Graph auth context: {ex.Message}");
+            return default;
+        }
+    }
+
+    /// <summary>
+    /// True when the live AuthContext is a different object than the one the cached client was
+    /// built from. Connect-MgGraph replaces the object, so this catches identity changes the
+    /// value fingerprint cannot see (a rotated ClientSecret above all).
+    /// </summary>
+    private static bool AuthContextInstanceChanged(object? current)
+    {
+        var cachedRef = s_cachedAuthContextRef;
+        if (current is null || cachedRef is null) return false;
+        return !(cachedRef.TryGetTarget(out var cached) && ReferenceEquals(cached, current));
+    }
+
+    private static readonly string[] AuthFingerprintMembers =
+    [
+        "TenantId", "ClientId", "AuthType", "TokenCredentialType", "ContextScope",
+        "Environment", "Account", "AppName", "ManagedIdentityId",
+        "CertificateThumbprint", "CertificateSubjectName", "SendCertificateChain", "WamEnabled"
+    ];
+
+    /// <summary>
+    /// Builds a comparable fingerprint of the effective Graph identity.
+    /// </summary>
+    internal static string BuildAuthFingerprint(object? authContext, string? graphEndpoint)
+    {
+        if (authContext == null) return string.Empty;
+        if (Stringify(ReadAuthMember(authContext, "TenantId")).Length == 0) return string.Empty;
+
+        var sb = new StringBuilder("mgx-auth-v1");
+        foreach (var member in AuthFingerprintMembers)
+            AppendField(sb, Stringify(ReadAuthMember(authContext, member)));
+
+        // Certificate is an X509Certificate2, only its thumbprint identifies the credential.
+        AppendField(sb, Stringify(ReadAuthMember(ReadAuthMember(authContext, "Certificate"), "Thumbprint")));
+
+        // Scope order is not significant to Graph, so sort before hashing.
+        AppendField(sb, ReadAuthMember(authContext, "Scopes") is IEnumerable scopes
+            ? string.Join(",", scopes.Cast<object?>().Select(Stringify).OrderBy(s => s, StringComparer.Ordinal))
+            : string.Empty);
+
+        AppendField(sb, graphEndpoint ?? string.Empty);
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
+    }
+
+    private const char FieldSeparator = (char)0x1f;
+
+    private static void AppendField(StringBuilder sb, string value) =>
+        sb.Append(FieldSeparator).Append(value.Length).Append(':').Append(value);
+
+    /// <summary>
+    /// Reads a named member off an AuthContext-shaped object.
+    /// </summary>
+    internal static object? ReadAuthMember(object? source, string name)
+    {
+        if (source == null) return null;
+        try
+        {
+            if (source is PSObject or IDictionary) return TryGetMember(source, name);
+            return source.GetType().GetProperty(name)?.GetValue(source);
+        }
+        catch
+        {
             return null;
         }
+    }
+
+    private static string Stringify(object? value) =>
+        value == null ? string.Empty : Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+
+    private static string Shorten(string? fingerprint) =>
+        string.IsNullOrEmpty(fingerprint) ? "none" : fingerprint[..Math.Min(8, fingerprint.Length)];
+
+    internal static object? TryGetGraphSessionInstance()
+    {
+        var graphSessionType = FindType("Microsoft.Graph.PowerShell.Authentication.GraphSession");
+        return graphSessionType?.GetProperty("Instance",
+            BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+    }
+
+    /// <summary>
+    /// The HttpClient the Microsoft.Graph SDK is currently using, or null when it is not
+    /// initialized. Used to detect that a borrowed SDK client has been replaced underneath us.
+    /// </summary>
+    internal static HttpClient? TryGetSessionGraphHttpClient()
+    {
+        try
+        {
+            var instance = TryGetGraphSessionInstance();
+            return instance?.GetType().GetProperty("GraphHttpClient")?.GetValue(instance) as HttpClient;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? GetGraphEndpointFrom(object instance)
+    {
+        var env = instance.GetType().GetProperty("Environment")?.GetValue(instance);
+        return env?.GetType().GetProperty("GraphEndpoint")?.GetValue(env)?.ToString();
     }
 
     internal static string? GetGraphEndpoint(Action<string>? warn, Action<string>? verbose)
     {
         try
         {
-            var graphSessionType = FindType("Microsoft.Graph.PowerShell.Authentication.GraphSession");
-            if (graphSessionType == null) return null;
-
-            var instance = graphSessionType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-            if (instance == null) return null;
-
-            var env = instance.GetType().GetProperty("Environment")?.GetValue(instance);
-            if (env == null) return null;
-
-            return env.GetType().GetProperty("GraphEndpoint")?.GetValue(env)?.ToString();
+            var instance = TryGetGraphSessionInstance();
+            return instance == null ? null : GetGraphEndpointFrom(instance);
         }
         catch (Exception ex)
         {
@@ -154,17 +336,15 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     /// transparent as long as the Connect-MgGraph session remains valid and the
     /// refresh token has not been revoked.
     /// </summary>
-    private HttpClient? BuildCleanHttpClient() => BuildCleanHttpClient(WriteWarning, WriteVerbose);
+    private HttpClient? BuildCleanHttpClient(int totalTimeoutSeconds) =>
+        BuildCleanHttpClient(WriteWarning, WriteVerbose, totalTimeoutSeconds);
 
-    private static HttpClient? BuildCleanHttpClient(Action<string> warn, Action<string> verbose)
+    private static HttpClient? BuildCleanHttpClient(
+        Action<string> warn, Action<string> verbose, int totalTimeoutSeconds)
     {
         try
         {
-            var graphSessionType = FindType("Microsoft.Graph.PowerShell.Authentication.GraphSession");
-            if (graphSessionType == null) return null;
-
-            var instance = graphSessionType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            var instance = TryGetGraphSessionInstance();
             if (instance == null) return null;
 
             var authContext = instance.GetType().GetProperty("AuthContext")?.GetValue(instance);
@@ -264,7 +444,7 @@ public abstract class MgxCmdletBase : MgxCmdletCore
                 // edge cases where a connection bypasses Polly (pool exhaustion, DNS hang,
                 // stale TLS). Set above Polly's TotalTimeoutSeconds so Polly fires first;
                 // 60s of headroom prevents HttpClient from cancelling before Polly can react.
-                Timeout = TimeSpan.FromSeconds(s_clientOptions.TotalTimeoutSeconds + 60)
+                Timeout = TimeSpan.FromSeconds(totalTimeoutSeconds + 60)
             };
         }
         catch (Exception ex)
@@ -284,43 +464,53 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     /// </summary>
     internal static void TryPreInitHttpClient(Action<string> warn, Action<string> verbose)
     {
-        // Quick early exit: avoid PS runspace overhead on hot path (idempotent Enable calls).
+        var identity = GetCurrentAuthIdentity(verbose);
+        if (string.IsNullOrEmpty(identity.Fingerprint)) return;
+
+        var options = s_clientOptions;
+
+        // Quick early exit on the hot path (idempotent Enable calls).
         // Volatile.Read ensures ARM64 memory visibility - without it, non-volatile statics
         // read outside a lock have no acquire barrier and may return stale values.
-        if (Volatile.Read(ref s_graphHttpClient) != null &&
-            Volatile.Read(ref s_cachedTenantId) != null) return;
-
-        var tenantId = GetCurrentTenantId(verbose);
-        if (string.IsNullOrEmpty(tenantId)) return;
+        if (Volatile.Read(ref s_graphHttpClient) != null && !ClientIsStale(identity, options)) return;
 
         lock (s_initLock)
         {
-            if (s_graphHttpClient != null && s_cachedTenantId == tenantId) return;
+            if (s_graphHttpClient != null && !ClientIsStale(identity, options)) return;
 
             // Build first. Only dispose/reset after we have a confirmed replacement.
             // If BuildCleanHttpClient fails, the existing s_graphHttpClient must remain valid
             // and callers fall back via GetClient() on first use.
-            var client = BuildCleanHttpClient(warn, verbose);
+            var client = BuildCleanHttpClient(warn, verbose, options.TotalTimeoutSeconds);
             if (client == null) return; // BuildCleanHttpClient already warned with ex.Message
 
             ResiliencePipelineFactory.Reset();
-            ScheduleDelayedHttpClientDispose(s_graphHttpClient);
+            ScheduleDelayedHttpClientDispose(s_graphHttpClient, s_ownsHttpClient);
             s_graphHttpClient = client;
             s_ownsHttpClient = true;
-            s_cachedTenantId = tenantId;
+            s_cachedAuthFingerprint = identity.Fingerprint;
+            s_cachedAuthContextRef = identity.AuthContext is null
+                ? null
+                : new WeakReference<object>(identity.AuthContext);
+            s_cachedTotalTimeoutSeconds = options.TotalTimeoutSeconds;
             s_graphEndpoint = GetGraphEndpoint(warn, verbose) ?? "https://graph.microsoft.com";
         }
     }
+
+    /// <summary>
+    /// True when the cached client no longer matches the given identity (by either signal) or
+    /// the timeout it was built with. Callers must hold s_initLock, or accept a benign rebuild.
+    /// </summary>
+    private static bool ClientIsStale(AuthIdentity identity, ResilientGraphClientOptions options) =>
+        !string.Equals(s_cachedAuthFingerprint, identity.Fingerprint, StringComparison.Ordinal)
+        || AuthContextInstanceChanged(identity.AuthContext)
+        || s_cachedTotalTimeoutSeconds != options.TotalTimeoutSeconds;
 
     private HttpClient? GetSdkHttpClientFallback()
     {
         try
         {
-            var graphSessionType = FindType("Microsoft.Graph.PowerShell.Authentication.GraphSession");
-            if (graphSessionType == null) return null;
-
-            var instance = graphSessionType.GetProperty("Instance",
-                BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            var instance = TryGetGraphSessionInstance();
             if (instance == null) return null;
 
             var httpClient = instance.GetType().GetProperty("GraphHttpClient")
@@ -386,6 +576,26 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     // so a miss now may succeed after the user imports additional modules.
     private static readonly ConcurrentDictionary<string, Type> s_typeCache = new();
 
+    static MgxCmdletBase()
+    {
+        AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
+    }
+
+    // A cached Type carries the identity of the assembly that defined it. Re-importing
+    // Microsoft.Graph.Authentication - a different version, or into a fresh load context -
+    // produces a second GraphSession type whose Instance is a different singleton, so a stale
+    // entry would silently point Mgx at a session nobody else is using. Assemblies only ever
+    // appear, never disappear, so any load is the signal to re-resolve. Clearing an almost
+    // always tiny dictionary is cheaper than validating entries on the hot path.
+    private static void OnAssemblyLoad(object? sender, AssemblyLoadEventArgs args) => s_typeCache.Clear();
+
+    /// <summary>
+    /// Detaches the assembly-load hook. Called on module removal so the handler does not
+    /// root this type after the module is gone.
+    /// </summary>
+    internal static void DetachAssemblyLoadHandler() =>
+        AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoad;
+
     internal static Type? FindType(string fullName)
     {
         if (s_typeCache.TryGetValue(fullName, out var cached))
@@ -409,9 +619,11 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     {
         lock (s_initLock)
         {
-            ScheduleDelayedHttpClientDispose(s_graphHttpClient);
+            ScheduleDelayedHttpClientDispose(s_graphHttpClient, s_ownsHttpClient);
             s_graphHttpClient = null;
-            s_cachedTenantId = null;
+            s_ownsHttpClient = false;
+            s_cachedAuthFingerprint = null;
+            s_cachedAuthContextRef = null;
             ResiliencePipelineFactory.Reset();
         }
     }
@@ -422,11 +634,12 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     /// window to ensure all in-flight requests complete before disposing.
     /// Same pattern as ResiliencePipelineFactory.ScheduleDelayedDispose for rate limiters.
     /// </summary>
-    private static void ScheduleDelayedHttpClientDispose(HttpClient? client)
+    private static void ScheduleDelayedHttpClientDispose(HttpClient? client, bool owned)
     {
-        // Only dispose clients we own. SDK fallback clients are owned by GraphSession;
-        // disposing them would break the SDK's own HTTP pipeline.
-        if (client == null || !s_ownsHttpClient) return;
+        // Ownership is passed in rather than read off the static. Callers replace the static
+        // right after this call, so reading it here would silently follow whichever edit lands
+        // first - and disposing a borrowed SDK client kills Invoke-MgGraphRequest session-wide.
+        if (client == null || !owned) return;
         var delaySeconds = s_clientOptions.TotalTimeoutSeconds;
         _ = Task.Delay(TimeSpan.FromSeconds(delaySeconds)).ContinueWith(_ =>
         {
@@ -444,6 +657,24 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     {
         _client?.DrainVerboseMessages();
         _client?.DrainWarningMessages();
+        _client?.DrainDebugMessages();
+    }
+
+    /// <summary>
+    /// Whether the caller asked for the HTTP trace, via -Debug on this invocation or a
+    /// $DebugPreference that would display the messages anyway.
+    /// </summary>
+    protected bool IsDebugRequested()
+    {
+        if (MyInvocation.BoundParameters.TryGetValue("Debug", out var debug)
+            && debug is SwitchParameter { IsPresent: true })
+        {
+            return true;
+        }
+
+        return GetVariableValue("DebugPreference") is ActionPreference preference
+            && preference != ActionPreference.SilentlyContinue
+            && preference != ActionPreference.Ignore;
     }
 
     internal static void SetClientOptions(ResilientGraphClientOptions options)

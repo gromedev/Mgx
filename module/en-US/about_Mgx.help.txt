@@ -114,6 +114,21 @@ RESILIENCE
     The pipeline is shared across all cmdlet invocations within a session.
     Use Set-MgxOption to tune parameters at runtime.
 
+AUTHENTICATION
+    Mgx has no connect cmdlet of its own. It follows the context established
+    by Connect-MgGraph and builds its HTTP client from it.
+
+    That client is cached for the session and rebuilt automatically whenever
+    the effective identity changes - a different tenant, application, account,
+    certificate, credential type, scope set, or cloud. Re-running
+    Connect-MgGraph with another service principal therefore takes effect on
+    the next Mgx call, with no need to restart PowerShell. Run any cmdlet with
+    -Verbose to see the rebuild reported.
+
+    If Enable-MgxResilience is active when the identity changes, Mgx
+    re-injects resilience into the Microsoft.Graph SDK client as well. When it
+    cannot, it warns and asks you to run Enable-MgxResilience again.
+
 CONFIGURATION
     Use Get-MgxOption to inspect the current resilience settings and
     Set-MgxOption to change them. Only explicitly passed parameters are
@@ -127,6 +142,25 @@ CONFIGURATION
     maximum retry count, circuit breaker failure ratio and sampling duration,
     per-request and total timeout values, and batch item pacing rate
     (BatchItemsPerSecond, default 20 items/sec).
+
+TRACING REQUESTS
+    Run any cmdlet with -Debug to see the HTTP traffic it produces: method and
+    absolute URL, request headers and body, response status, elapsed time, and
+    the Graph diagnostic headers (request-id, x-ms-ags-diagnostic, Retry-After,
+    throttle and rate limit headers). Retries are traced individually, so a
+    throttled call shows every attempt.
+
+        Invoke-MgxRequest /directoryObjects/getByIds -Method POST -Body @{
+            ids = @('<id>')
+        } -Debug
+
+    The trace covers pagination, fan-out and $batch as well. Authorization and
+    credential-looking JSON fields (password, secret, credential, token, key)
+    are redacted, and bodies are truncated at 4 KB. Tracing buffers each
+    response body in memory, so leave -Debug off for large exports.
+
+    Use -Verbose instead for the higher-level story: retries, throttle
+    proximity, pacing changes and client rebuilds.
 
 EXAMPLES
     Example 1: List all users with streaming pagination

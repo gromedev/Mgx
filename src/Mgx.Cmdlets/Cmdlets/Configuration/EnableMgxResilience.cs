@@ -107,7 +107,7 @@ public class EnableMgxResilience : PSCmdlet
             // Save the current SDK client AFTER we know build will be attempted
             OriginalSdkClient = currentClient;
 
-            var resilientClient = BuildResilientSdkClient(currentClient);
+            var resilientClient = BuildResilientSdkClient(currentClient, WriteWarning);
             if (resilientClient == null)
             {
                 // Rollback: don't leave stale OriginalSdkClient on failure
@@ -160,7 +160,74 @@ public class EnableMgxResilience : PSCmdlet
         return clientProp?.GetValue(instance) as HttpClient;
     }
 
-    private HttpClient? BuildResilientSdkClient(HttpClient sdkClient)
+    /// <summary>
+    /// Re-injects resilience after the Graph identity changed. Connect-MgGraph builds a new
+    /// SDK HttpClient, so the wrapper installed by Enable-MgxResilience is left bridging to a
+    /// client that still carries the previous credentials. Called by MgxCmdletBase.GetClient()
+    /// once it detects a new identity, which keeps SDK cmdlets (Get-MgUser and friends) both
+    /// resilient and correctly authenticated without a second Enable-MgxResilience call.
+    ///
+    /// Lock ordering: never call this while holding MgxCmdletBase's init lock. ProcessRecord
+    /// takes StateLock and then that lock via TryPreInitHttpClient, so the reverse order can
+    /// deadlock.
+    /// </summary>
+    internal static void RefreshInjectedClient(Action<string> warn, Action<string> verbose)
+    {
+        lock (StateLock)
+        {
+            if (!IsEnabled) return;
+
+            var instance = MgxCmdletBase.TryGetGraphSessionInstance();
+            var clientProp = instance?.GetType().GetProperty("GraphHttpClient");
+            if (instance == null || clientProp == null)
+            {
+                IsEnabled = false;
+                warn("Graph identity changed but GraphSession is unavailable, so Mgx resilience "
+                    + "could not be re-injected. Run Enable-MgxResilience again.");
+                return;
+            }
+
+            var currentClient = clientProp.GetValue(instance) as HttpClient;
+            if (ReferenceEquals(currentClient, ResilientSdkClient))
+            {
+                // The SDK kept our wrapper, so it still bridges to the pre-reconnect client.
+                // Clear it and let the SDK rebuild lazily against the new AuthContext.
+                clientProp.SetValue(instance, null);
+                currentClient = null;
+            }
+
+            ResilientSdkClient?.Dispose();
+            ResilientSdkClient = null;
+            ActiveHandler = null;
+            OriginalSdkClient = null;
+            ResiliencePipelineFactory.Reset();
+
+            if (currentClient == null)
+            {
+                IsEnabled = false;
+                warn("Graph identity changed. Mgx resilience was removed from the Microsoft.Graph "
+                    + "SDK client; run Enable-MgxResilience again to re-inject it.");
+                return;
+            }
+
+            var refreshed = BuildResilientSdkClient(currentClient, warn);
+            if (refreshed == null)
+            {
+                IsEnabled = false;
+                warn("Graph identity changed but resilience could not be re-injected into the "
+                    + "Microsoft.Graph SDK client. Run Enable-MgxResilience again.");
+                return;
+            }
+
+            OriginalSdkClient = currentClient;
+            clientProp.SetValue(instance, refreshed);
+            ResilientSdkClient = refreshed;
+            verbose("Re-injected Mgx resilience into the Microsoft.Graph SDK client "
+                + "after the Graph identity changed.");
+        }
+    }
+
+    private static HttpClient? BuildResilientSdkClient(HttpClient sdkClient, Action<string> warn)
     {
         try
         {
@@ -193,7 +260,7 @@ public class EnableMgxResilience : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteWarning($"Failed to build resilient client: {ex.Message}");
+            warn($"Failed to build resilient client: {ex.Message}");
             return null;
         }
     }

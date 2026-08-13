@@ -56,6 +56,14 @@ BATCH CONSTRAINTS
     Sequential chunk execution (default) paces at 20 items/sec to stay under
     Graph's write throttle ceiling.
 
+    Pacing adapts to what the tenant actually tolerates. A 429 halves the write
+    rate, down to a floor of 2 items/sec, and the reduced rate carries across
+    Invoke-MgxBatchRequest calls so a loop of small batches does not immediately
+    get throttled again. It also climbs back: every two consecutive chunks
+    without a 429 add a tenth of the configured rate, and once no throttling has
+    been seen for five minutes the configured rate is restored outright. Run
+    Invoke-MgxBatchRequest with -Verbose to see each adjustment.
+
 POST SAFETY
     Non-idempotent methods (POST) only retry on 429 -- not on 5xx. A 500 on
     POST may mean the request was partially processed; blindly retrying could
