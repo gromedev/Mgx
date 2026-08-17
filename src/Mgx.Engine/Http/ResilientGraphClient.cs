@@ -141,7 +141,8 @@ public sealed class ResilientGraphClient : IDisposable
         Dictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default,
         int permitCount = 1,
-        bool paceGate = true)
+        bool paceGate = true,
+        bool traceResponseBody = true)
     {
         // Buffer content bytes before pipeline so retries reconstruct fresh HttpContent.
         // Snapshot ALL content headers (not just ContentType) to preserve
@@ -229,7 +230,18 @@ public sealed class ResilientGraphClient : IDisposable
                     AdaptiveRequestPacer.RecordLatency(bucket, httpSw.ElapsedMilliseconds);
 
                     if (DebugEnabled)
-                        await TraceResponseAsync(response, httpSw.ElapsedMilliseconds, ctx.CancellationToken);
+                    {
+                        if (traceResponseBody)
+                        {
+                            await TraceResponseAsync(response, httpSw.ElapsedMilliseconds, ctx.CancellationToken);
+                        }
+                        else
+                        {
+                            // Content path: buffering a multi-megabyte download to trace it
+                            // would defeat the streaming read. Headers-only line instead.
+                            _pendingDebug.Enqueue(GraphRequestTracer.FormatResponse(response, httpSw.ElapsedMilliseconds, null));
+                        }
+                    }
 
                     return response;
                 },
@@ -284,6 +296,19 @@ public sealed class ResilientGraphClient : IDisposable
         int permitCount = 1,
         bool paceGate = true)
         => SendAsync(HttpMethod.Post, requestUri, content, headers, cancellationToken, permitCount, paceGate);
+
+    /// <summary>
+    /// Fetch content bytes ($value / /content endpoints), optionally a byte range.
+    /// Two hops: the authenticated Graph request through the full pipeline, then - when Graph
+    /// 302s to a pre-authenticated download host - a token-free fetch through
+    /// GraphContentClient. See GraphContentClient for the transport preconditions.
+    /// </summary>
+    public Task<GraphContentResult> GetContentAsync(
+        string requestUri,
+        System.Net.Http.Headers.RangeHeaderValue? range = null,
+        Dictionary<string, string>? headers = null,
+        CancellationToken cancellationToken = default)
+        => GraphContentClient.GetContentAsync(this, requestUri, range, headers, cancellationToken);
 
     /// <summary>
     /// Fetch a collection page and deserialize.

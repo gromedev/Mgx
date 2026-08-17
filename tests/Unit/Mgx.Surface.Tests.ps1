@@ -19,6 +19,7 @@ $script:ExpectedCmdlets = @(
     'Get-MgxResilience'
     'Get-MgxTelemetry'
     'Sync-MgxDelta'
+    'Get-MgxContent'
 )
 
 BeforeAll {
@@ -41,6 +42,7 @@ BeforeAll {
         'Get-MgxResilience'
         'Get-MgxTelemetry'
         'Sync-MgxDelta'
+        'Get-MgxContent'
     )
 }
 

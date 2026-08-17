@@ -42,6 +42,7 @@ public class GetMgxTelemetry : PSCmdlet
             AdaptivePacingActivations = summary.AdaptivePacingActivations,
             LastThrottlePercentage = summary.LastThrottlePercentage,
             PacingState = summary.PacingState,
+            ContentBytesDownloaded = summary.ContentBytesDownloaded,
         });
     }
 }

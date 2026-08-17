@@ -114,6 +114,14 @@ Invoke-MgxRequest /users -Top 50 |
 
 # Delta sync with automatic token handling
 Sync-MgxDelta /users/delta -DeltaPath ./delta.json -Property displayName,mail
+
+# Enumerate a whole drive, resumable mid-run; later runs return only changes
+Sync-MgxDelta /me/drive/root/delta -DeltaPath ./drive.json -CheckpointPath ./drive.cp -OutputFile drive.jsonl
+
+# Ranged reads: first 256 KB of each file instead of the whole thing
+Invoke-MgxRequest "/me/drive/items/$folderId/children" -All |
+    Where-Object { $_.file } |
+    Get-MgxContent -First 262144
 ```
 
 See [`examples/`](examples/) for additional examples.
@@ -171,7 +179,8 @@ Invoke-MgxRequest /users -All -Raw | ConvertFrom-Json
 | `Invoke-MgxBatchRequest`                         | Batches up to 20 requests into a single HTTP POST call                                                    |
 | `Export-MgxCollection`                           | Streams paginated API results directly to JSONL with checkpointing                                        |
 | `Expand-MgxRelation`                             | Performs concurrent fan-out lookups to expand related object attributes                                   |
-| `Sync-MgxDelta`                                  | Manages stateful delta queries and state token storage                                                    |
+| `Sync-MgxDelta`                                  | Manages stateful delta queries and state token storage, with mid-run crash resume                         |
+| `Get-MgxContent`                                 | Downloads content bytes (whole or ranged) with a token-free, host-validated download path                 |
 | `Set-MgxOption` / `Get-MgxOption`                | Configures global limits, retry counts, timeouts, and circuit-breaker thresholds                          |
 | `Enable-MgxResilience` / `Disable-MgxResilience` | Injects or removes Mgx resilience policies from native Microsoft.Graph SDK cmdlets                        |
 | `Get-MgxTelemetry`                               | Outputs execution statistics including HTTP duration, rate-limit delays, retry counts, and resource units |

@@ -119,6 +119,7 @@
               <ListItem><Label>Pacing Activations</Label><PropertyName>AdaptivePacingActivations</PropertyName></ListItem>
               <ListItem><Label>Last Throttle %</Label><ScriptBlock>if ($_.LastThrottlePercentage -lt 0) { 'never seen' } else { '{0:P0}' -f $_.LastThrottlePercentage }</ScriptBlock></ListItem>
               <ListItem><Label>Pacing State</Label><ScriptBlock>if ($null -eq $_.PacingState) { 'idle' } else { $_.PacingState }</ScriptBlock></ListItem>
+              <ListItem><Label>Content Bytes</Label><PropertyName>ContentBytesDownloaded</PropertyName></ListItem>
             </ListItems>
           </ListEntry>
         </ListEntries>

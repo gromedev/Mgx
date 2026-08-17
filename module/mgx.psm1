@@ -49,6 +49,6 @@ $script:UriCompleter = {
     }
 }
 
-foreach ($cmd in 'Invoke-MgxRequest', 'Invoke-MgxBatchRequest', 'Export-MgxCollection', 'Expand-MgxRelation', 'Sync-MgxDelta') {
+foreach ($cmd in 'Invoke-MgxRequest', 'Invoke-MgxBatchRequest', 'Export-MgxCollection', 'Expand-MgxRelation', 'Sync-MgxDelta', 'Get-MgxContent') {
     Register-ArgumentCompleter -CommandName $cmd -ParameterName Uri -ScriptBlock $script:UriCompleter
 }

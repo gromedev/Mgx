@@ -23,6 +23,7 @@ public sealed class MgxTelemetryCollector
     private long _batchItemThrottles; // Per-item 429s inside $batch responses (distinct from Polly-level _throttleRetries)
     private long _pacingWaitMs;      // Time spent in the adaptive pacer's proactive gate
     private long _pacingActivations; // Requests the pacer actually delayed (wait > 0)
+    private long _contentBytes;      // Bytes downloaded via Get-MgxContent (both hops)
 
     public void RecordRequest(bool succeeded, long elapsedMs)
     {
@@ -74,6 +75,9 @@ public sealed class MgxTelemetryCollector
         Interlocked.Add(ref _pacingWaitMs, ms);
     }
 
+    public void RecordContentBytes(long bytes) =>
+        Interlocked.Add(ref _contentBytes, bytes);
+
     public void Reset()
     {
         Interlocked.Exchange(ref _totalRequests, 0);
@@ -90,6 +94,7 @@ public sealed class MgxTelemetryCollector
         Interlocked.Exchange(ref _batchItemThrottles, 0);
         Interlocked.Exchange(ref _pacingWaitMs, 0);
         Interlocked.Exchange(ref _pacingActivations, 0);
+        Interlocked.Exchange(ref _contentBytes, 0);
         // Pacer control state (adapted rates, slow start) is deliberately NOT cleared here:
         // it describes the tenant's current throttle regime, not accumulated statistics.
     }
@@ -110,7 +115,8 @@ public sealed class MgxTelemetryCollector
         AdaptivePacingWaitMs: Interlocked.Read(ref _pacingWaitMs),
         AdaptivePacingActivations: Interlocked.Read(ref _pacingActivations),
         LastThrottlePercentage: AdaptiveRequestPacer.LastThrottlePercentage,
-        PacingState: AdaptiveRequestPacer.DescribeState());
+        PacingState: AdaptiveRequestPacer.DescribeState(),
+        ContentBytesDownloaded: Interlocked.Read(ref _contentBytes));
 }
 
 /// <summary>
@@ -132,4 +138,5 @@ public sealed record MgxTelemetrySummary(
     long AdaptivePacingWaitMs,
     long AdaptivePacingActivations,
     double LastThrottlePercentage,
-    string? PacingState);
+    string? PacingState,
+    long ContentBytesDownloaded);

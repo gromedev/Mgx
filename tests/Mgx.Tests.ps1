@@ -26,7 +26,7 @@ Describe 'Module Loading' {
         $module.Version | Should -Be $manifest.ModuleVersion
     }
 
-    It 'Should export exactly 11 cmdlets' {
+    It 'Should export exactly 12 cmdlets' {
         # Filtered to -CommandType Cmdlet on purpose: Get-Command -Module also counts
         # exported functions, so an unfiltered count would drift for reasons that have
         # nothing to do with the compiled surface.
@@ -36,13 +36,14 @@ Describe 'Module Loading' {
         $commands | Should -Contain 'Export-MgxCollection'
         $commands | Should -Contain 'Expand-MgxRelation'
         $commands | Should -Contain 'Sync-MgxDelta'
+        $commands | Should -Contain 'Get-MgxContent'
         $commands | Should -Contain 'Set-MgxOption'
         $commands | Should -Contain 'Get-MgxOption'
         $commands | Should -Contain 'Enable-MgxResilience'
         $commands | Should -Contain 'Disable-MgxResilience'
         $commands | Should -Contain 'Get-MgxResilience'
         $commands | Should -Contain 'Get-MgxTelemetry'
-        $commands | Should -HaveCount 11
+        $commands | Should -HaveCount 12
     }
 
     It 'Should unload cleanly when no Graph request ever ran' {

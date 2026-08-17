@@ -76,7 +76,8 @@ internal static partial class GraphRequestTracer
         {
             sb.AppendLine().Append("  Headers:");
             foreach (var header in headers)
-                sb.AppendLine().Append("    ").Append(header.Key).Append(": ").Append(Join(header.Value));
+                sb.AppendLine().Append("    ").Append(header.Key).Append(": ")
+                  .Append(RedactHeaderValue(header.Key, Join(header.Value)));
         }
 
         if (!string.IsNullOrEmpty(body))
@@ -94,6 +95,19 @@ internal static partial class GraphRequestTracer
         || name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase);
 
     private static string Join(IEnumerable<string> values) => string.Join(", ", values);
+
+    /// <summary>
+    /// A content 302's Location carries a pre-authenticated URL: its query string
+    /// (tempauth/SAS token) is a bearer-free capability for the file bytes, so tracing it
+    /// verbatim is a credential leak. Keep the host+path (the diagnostic value), drop the
+    /// query. The JSON-value redaction regex cannot catch header URLs, hence this hook.
+    /// </summary>
+    private static string RedactHeaderValue(string name, string value)
+    {
+        if (!name.Equals("Location", StringComparison.OrdinalIgnoreCase)) return value;
+        var cut = value.IndexOf('?');
+        return cut < 0 ? value : value[..cut] + "?<redacted>";
+    }
 
     /// <summary>Redact credential-looking JSON properties, then truncate.</summary>
     private static string Sanitize(string body)

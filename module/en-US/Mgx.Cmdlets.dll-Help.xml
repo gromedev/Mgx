@@ -3616,4 +3616,288 @@ Write-Host "$($changed.Count) changed, $($removed.Count) removed"</dev:code>
       </maml:navigationLink>
     </command:relatedLinks>
   </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-MgxContent</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>MgxContent</command:noun>
+      <maml:description>
+        <maml:para>Fetch content bytes from Graph $value / /content endpoints, whole or as a byte range.</maml:para>
+      </maml:description>
+    </command:details>
+    <maml:description>
+      <maml:para>Get-MgxContent downloads file content from Microsoft Graph content endpoints - drive items, mail attachments, profile photos. Ranged reads are the point: -First 262144 pulls the first 256 KB of a file (format sniffing, EXIF, partial hashing) instead of the whole thing.</maml:para>
+      <maml:para>Drive content is a two-hop flow: the authenticated Graph request (full resilience pipeline, adaptive pacing, rate limiting) answers with a redirect to a short-lived pre-authenticated download URL, which mgx fetches with a separate token-free HTTP client. The bearer token never reaches the download host, and the host is validated against a Microsoft-hosts allowlist before any bytes move - including on every mid-download redirect.</maml:para>
+      <maml:para>Output is a single byte[] to the pipeline (guarded at 100 MB - use -OutFile beyond that), or a file written via temp-plus-atomic-move. Piped DriveItems use their @microsoft.graph.downloadUrl directly when present, falling back to /drives/{driveId}/items/{id}/content. Endpoints that ignore Range and answer 200 with the full body are truncated to the requested bytes.</maml:para>
+    </maml:description>
+    <command:syntax>
+      <command:syntaxItem>
+        <maml:name>Get-MgxContent</maml:name>
+        <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="0" aliases="Resource">
+          <maml:name>Uri</maml:name>
+          <maml:description>
+            <maml:para>Relative Graph path to a content endpoint (e.g., /me/drive/items/{id}/content).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>First</maml:name>
+          <maml:description>
+            <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Offset</maml:name>
+          <maml:description>
+            <maml:para>Range start in bytes; requires -Length.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Length</maml:name>
+          <maml:description>
+            <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>OutFile</maml:name>
+          <maml:description>
+            <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>ApiVersion</maml:name>
+          <maml:description>
+            <maml:para>Graph API version. Default: v1.0.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>v1.0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Headers</maml:name>
+          <maml:description>
+            <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
+          <dev:type>
+            <maml:name>Hashtable</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+      </command:syntaxItem>
+      <command:syntaxItem>
+        <maml:name>Get-MgxContent</maml:name>
+        <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
+          <maml:name>InputObject</maml:name>
+          <maml:description>
+            <maml:para>A DriveItem-shaped object from the pipeline.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
+          <dev:type>
+            <maml:name>Object</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+      </command:syntaxItem>
+    </command:syntax>
+    <command:parameters>
+      <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="0" aliases="Resource">
+        <maml:name>Uri</maml:name>
+        <maml:description>
+          <maml:para>Relative Graph path to a content endpoint (e.g., /me/drive/items/{id}/content). Warns when the path does not look like a content endpoint (/content or /$value).</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
+        <maml:name>InputObject</maml:name>
+        <maml:description>
+          <maml:para>A DriveItem-shaped object from the pipeline. Uses @microsoft.graph.downloadUrl when present (validated against the download-host allowlist), else /drives/{parentReference.driveId}/items/{id}/content.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
+        <dev:type>
+          <maml:name>Object</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>First</maml:name>
+        <maml:description>
+          <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+        <dev:type>
+          <maml:name>Int64</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Offset</maml:name>
+        <maml:description>
+          <maml:para>Range start in bytes; requires -Length.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+        <dev:type>
+          <maml:name>Int64</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>0</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Length</maml:name>
+        <maml:description>
+          <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+        <dev:type>
+          <maml:name>Int64</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>OutFile</maml:name>
+        <maml:description>
+          <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>ApiVersion</maml:name>
+        <maml:description>
+          <maml:para>Graph API version. Default: v1.0.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>v1.0</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Headers</maml:name>
+        <maml:description>
+          <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
+        <dev:type>
+          <maml:name>Hashtable</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+    </command:parameters>
+    <command:inputTypes>
+      <command:inputType>
+        <dev:type>
+          <maml:name>System.Object</maml:name>
+        </dev:type>
+        <maml:description>
+          <maml:para>DriveItem-shaped Hashtables or PSCustomObjects (from Invoke-MgxRequest or Sync-MgxDelta).</maml:para>
+        </maml:description>
+      </command:inputType>
+    </command:inputTypes>
+    <command:returnValues>
+      <command:returnValue>
+        <dev:type>
+          <maml:name>System.Byte[]</maml:name>
+        </dev:type>
+        <maml:description>
+          <maml:para>The content bytes as a single array (not enumerated). Nothing is emitted when -OutFile is used.</maml:para>
+        </maml:description>
+      </command:returnValue>
+    </command:returnValues>
+    <maml:alertSet>
+      <maml:alert>
+        <maml:para>Content downloads require the mgx-owned HTTP transport; on the SDK fallback client the cmdlet refuses with ContentRequiresOwnedTransport. Graph reports quickXorHash in base64 while rclone prints hex - convert before comparing. Intune report exports are not a /content flow: download the completed job's url property directly with Invoke-WebRequest.</maml:para>
+      </maml:alert>
+    </maml:alertSet>
+    <command:examples>
+      <command:example>
+        <maml:title>------------------ Example 1: Download a file ------------------</maml:title>
+        <dev:code>Get-MgxContent "/me/drive/items/01ABC/content" -OutFile ./report.xlsx</dev:code>
+        <dev:remarks>
+          <maml:para>Downloads the drive item to a local file.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>------- Example 2: First 256 KB of every file in a folder -------</maml:title>
+        <dev:code>Invoke-MgxRequest "/me/drive/items/01FOLDER/children" -All |
+    Where-Object { $_.file } |
+    ForEach-Object {
+        $bytes = $_ | Get-MgxContent -First 262144
+        [PSCustomObject]@{ name = $_.name; header = [BitConverter]::ToString($bytes[0..7]) }
+    }</dev:code>
+        <dev:remarks>
+          <maml:para>Moves kilobytes per file instead of the full content - the metadata-extraction economy case.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>---------------- Example 3: A specific byte range ----------------</maml:title>
+        <dev:code>Get-MgxContent "/me/drive/items/01ABC/content" -Offset 1048576 -Length 65536</dev:code>
+        <dev:remarks>
+          <maml:para>Returns bytes 1,048,576 through 1,114,111 (Range: bytes=1048576-1114111).</maml:para>
+        </dev:remarks>
+      </command:example>
+    </command:examples>
+    <command:relatedLinks>
+      <maml:navigationLink>
+        <maml:linkText>Online Version:</maml:linkText>
+        <maml:uri>https://github.com/gromedev/mgx/blob/main/module/help/Get-MgxContent.md</maml:uri>
+      </maml:navigationLink>
+      <maml:navigationLink>
+        <maml:linkText>Invoke-MgxRequest</maml:linkText>
+        <maml:uri></maml:uri>
+      </maml:navigationLink>
+      <maml:navigationLink>
+        <maml:linkText>Sync-MgxDelta</maml:linkText>
+        <maml:uri></maml:uri>
+      </maml:navigationLink>
+    </command:relatedLinks>
+  </command:command>
 </helpItems>

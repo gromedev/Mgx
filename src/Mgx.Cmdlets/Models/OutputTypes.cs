@@ -29,6 +29,9 @@ public sealed class MgxTelemetryOutput
     /// <summary>Human-readable per-workload pacing state (adapted caps, slow start,
     /// proximity, latency vs baseline); null when nothing is active.</summary>
     public string? PacingState { get; set; }
+
+    /// <summary>Bytes downloaded through Get-MgxContent (both hops).</summary>
+    public long ContentBytesDownloaded { get; set; }
 }
 
 /// <summary>

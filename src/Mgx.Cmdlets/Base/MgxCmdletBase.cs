@@ -691,6 +691,14 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     }
 
     /// <summary>
+    /// Whether the active transport is the mgx-owned clean client (AllowAutoRedirect off)
+    /// rather than the borrowed SDK client. The content path requires ownership: the SDK
+    /// client ships a RedirectHandler that auto-follows a content 302 to a host mgx never
+    /// validated, so Get-MgxContent fails closed when this is false.
+    /// </summary>
+    protected static bool TransportIsOwned => s_ownsHttpClient;
+
+    /// <summary>
     /// Drain buffered verbose messages from the resilience pipeline.
     /// Must be called on the pipeline thread (after .GetAwaiter().GetResult() returns).
     /// OnRetry fires on thread pool threads after Task.Delay, so WriteVerbose cannot

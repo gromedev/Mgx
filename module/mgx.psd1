@@ -39,6 +39,7 @@
         'Get-MgxResilience'
         'Get-MgxTelemetry'
         'Sync-MgxDelta'
+        'Get-MgxContent'
     )
 
     FunctionsToExport = @()
