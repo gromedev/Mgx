@@ -321,6 +321,21 @@ Query parameters ($select, $filter) are encoded into the delta token on the firs
 
 Supported delta endpoints include: /users/delta, /groups/delta, /applications/delta, /servicePrincipals/delta, /devices/delta, /directoryRoles/delta, and many others. Source: [Use delta query to track changes in Microsoft Graph data](https://learn.microsoft.com/en-us/graph/delta-query-overview)
 
+### Duplicate objects across pages
+
+Graph does not guarantee that an object appears only once in a delta response: it "can't ensure that entities are unified in a single response." Deduplicate by `id` before treating emitted objects as change events.
+
+This is most visible on an initial full enumeration. Measured against a tenant with 15,779 groups, `/groups/delta` emitted 156,413 objects across all pages - a replay factor of roughly 10x - with every object accounted for by a repeat rather than a distinct group. Incremental rounds off an established token are typically clean, but nothing in the contract promises that, so the dedup belongs in the consumer either way.
+
+Two consequences worth designing around:
+
+- For a change feed, baseline with `-Latest` so the initial enumeration never happens. It records a sync-from-now token and returns nothing, and every later run reports only real changes.
+- When counting, count distinct ids. An object that changed twice inside one window is one object; keeping the last occurrence gives its current state.
+
+`-CheckpointPath` writes item counts as emitted, not deduplicated, so a resumed run's progress figures reflect the same replay.
+
+Source: [Use delta query to track changes](https://learn.microsoft.com/en-us/graph/delta-query-overview#other-considerations)
+
 ## RELATED LINKS
 [Export-MgxCollection](Export-MgxCollection.md)
 [Invoke-MgxRequest](Invoke-MgxRequest.md)

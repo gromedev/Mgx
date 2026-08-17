@@ -13,14 +13,35 @@ $stateDir = "./tenant-feed"
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 
 # --- groups: membership and lifecycle changes ---
-$groupChanges = Sync-MgxDelta /groups/delta `
-    -DeltaPath "$stateDir/groups.delta" `
-    -CheckpointPath "$stateDir/groups.checkpoint"
-# First ever run? Baseline from now instead of enumerating everything:
-#   Sync-MgxDelta /groups/delta -DeltaPath "$stateDir/groups.delta" -Latest
+#
+# Baseline with -Latest on the very first run. This matters more than it looks: without it
+# the first call enumerates every group in the tenant, and Graph does not promise one
+# response per object. Measured on a 15,779-group tenant, a full enumeration emitted
+# 156,413 objects - the same groups repeated ~10x across pages, which is explicitly allowed
+# ("can't ensure that entities are unified in a single response"). -Latest skips all of it
+# and starts the feed from now, which is what a change feed actually wants.
+$groupState = "$stateDir/groups.delta"
+if (-not (Test-Path $groupState)) {
+    Write-Host "First run: baselining groups from now (no initial enumeration)."
+    $null = Sync-MgxDelta /groups/delta -DeltaPath $groupState -Latest
+}
 
-foreach ($g in $groupChanges) {
+$groupChanges = Sync-MgxDelta /groups/delta `
+    -DeltaPath $groupState `
+    -CheckpointPath "$stateDir/groups.checkpoint"
+
+# Dedup by id, last write wins. Incremental rounds are usually clean, but the replay above
+# is a property of delta itself, not of the initial page - so anything that treats one
+# emitted object as one change event needs this. Keep the LAST occurrence: for an object
+# that changed twice in one window, that is the current state.
+$latestById = [ordered]@{}
+foreach ($g in $groupChanges) { $latestById[[string]$g.id] = $g }
+foreach ($g in $latestById.Values) {
     $g | ConvertTo-Json -Compress -Depth 10 | Add-Content "$stateDir/groups-feed.jsonl"
+}
+if ($groupChanges.Count -ne $latestById.Count) {
+    Write-Host ("  collapsed {0} emitted objects into {1} distinct groups" -f `
+        $groupChanges.Count, $latestById.Count)
 }
 
 # --- service principals: the security variant - new app registrations,
