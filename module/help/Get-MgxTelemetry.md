@@ -19,6 +19,8 @@ Get-MgxTelemetry [-Reset] [<CommonParameters>]
 ## DESCRIPTION
 Get-MgxTelemetry returns accumulated telemetry from the current session's resilience pipeline. Reports request counts, retry/throttle breakdown, and timing per category so you can determine whether the bottleneck is throttling, retry backoff, rate-limiter queuing, or network latency.
 
+Adaptive pacing surfaces here too: AdaptivePacingWaitMs / AdaptivePacingActivations count proactive waits, LastThrottlePercentage is the most recent x-ms-throttle-limit-percentage Graph reported (-1 = never seen), and PacingState is a per-workload line showing active rate caps, slow start, throttle proximity, and current latency against the session baseline. -Reset clears the counters but deliberately not the pacer's learned rate caps - those describe the tenant's current throttle regime, not accumulated statistics.
+
 ## EXAMPLES
 
 ### Example 1: View session telemetry
@@ -42,6 +44,13 @@ $t = Get-MgxTelemetry
 ```
 
 Calculates the percentage of requests that were throttled.
+
+### Example 4: Watch adaptive pacing during a fan-out
+```powershell
+Get-MgxTelemetry | Select-Object AdaptivePacingWaitMs, AdaptivePacingActivations, LastThrottlePercentage, PacingState
+```
+
+Shows how much proactive pacing has happened and the current per-workload pacing state.
 
 ## PARAMETERS
 

@@ -29,6 +29,9 @@ public class SetMgxOption : PSCmdlet
     public int RateLimitQueueLimit { get; set; }
 
     [Parameter]
+    public SwitchParameter NoAdaptivePacing { get; set; }
+
+    [Parameter]
     [ValidateRange(1, 600)]
     public int MaxRetryAfterSeconds { get; set; }
 
@@ -114,6 +117,9 @@ public class SetMgxOption : PSCmdlet
             RateLimitBurst = bound.ContainsKey(nameof(RateLimitBurst)) ? RateLimitBurst : current.RateLimitBurst,
             RateLimitPerSecond = bound.ContainsKey(nameof(RateLimitPerSecond)) ? RateLimitPerSecond : current.RateLimitPerSecond,
             NoRateLimit = noRateLimit,
+            NoAdaptivePacing = bound.ContainsKey(nameof(NoAdaptivePacing))
+                ? NoAdaptivePacing.IsPresent
+                : current.NoAdaptivePacing,
             RateLimitQueueLimit = bound.ContainsKey(nameof(RateLimitQueueLimit)) ? RateLimitQueueLimit : current.RateLimitQueueLimit,
             MaxRetryAfterSeconds = bound.ContainsKey(nameof(MaxRetryAfterSeconds)) ? MaxRetryAfterSeconds : current.MaxRetryAfterSeconds,
             MaxRetryAttempts = bound.ContainsKey(nameof(MaxRetryAttempts)) ? MaxRetryAttempts : current.MaxRetryAttempts,
@@ -136,7 +142,8 @@ public class SetMgxOption : PSCmdlet
 
         MgxCmdletBase.SetClientOptions(options);
         WriteVerbose($"Mgx options updated: Burst={options.RateLimitBurst}, Rate={options.RateLimitPerSecond}/s, " +
-                    $"NoRateLimit={options.NoRateLimit}, QueueLimit={options.RateLimitQueueLimit}, " +
+                    $"NoRateLimit={options.NoRateLimit}, NoAdaptivePacing={options.NoAdaptivePacing}, " +
+                    $"QueueLimit={options.RateLimitQueueLimit}, " +
                     $"MaxRetry={options.MaxRetryAttempts}, TotalTimeout={options.TotalTimeoutSeconds}s, " +
                     $"AttemptTimeout={options.AttemptTimeoutSeconds}s, CBDuration={options.CircuitBreakerDurationSeconds}s, " +
                     $"CBFailureRatio={options.CircuitBreakerFailureRatio}, CBMinThroughput={options.CircuitBreakerMinThroughput}, " +

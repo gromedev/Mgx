@@ -2856,6 +2856,17 @@ Import-Csv ./users.csv |
           <dev:defaultValue>False</dev:defaultValue>
         </command:parameter>
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>NoAdaptivePacing</maml:name>
+          <maml:description>
+            <maml:para>Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit. See about_Mgx_Tuning "ADAPTIVE PACING".</maml:para>
+          </maml:description>
+          <dev:type>
+            <maml:name>SwitchParameter</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>False</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>RateLimitBurst</maml:name>
           <maml:description>
             <maml:para>Maximum burst capacity for the token bucket rate limiter. Range: 1-10,000. Default: 200.</maml:para>
@@ -3017,6 +3028,18 @@ Import-Csv ./users.csv |
         <maml:name>NoRateLimit</maml:name>
         <maml:description>
           <maml:para>Disable the client-side rate limiter entirely.</maml:para>
+        </maml:description>
+        <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
+        <dev:type>
+          <maml:name>SwitchParameter</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>False</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>NoAdaptivePacing</maml:name>
+        <maml:description>
+          <maml:para>Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit. See about_Mgx_Tuning "ADAPTIVE PACING".</maml:para>
         </maml:description>
         <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
         <dev:type>

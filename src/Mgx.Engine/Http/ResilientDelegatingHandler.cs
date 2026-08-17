@@ -50,8 +50,19 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
         context.Properties.Set(ResiliencePipelineFactory.IsIdempotentKey, request.Method != HttpMethod.Post);
         context.Properties.Set(ResiliencePipelineFactory.VerboseWriterKey,
             (Action<string>)(msg => _pendingVerbose.Enqueue(msg)));
+        var bucket = AdaptivePacing.Classify(request.RequestUri?.ToString());
         try
         {
+            // Same proactive gate as ResilientGraphClient.SendAsync. This is the
+            // Enable-MgxResilience path: SDK cmdlet traffic bypasses ResilientGraphClient
+            // entirely, so pacing hooked only there would skip SDK-wrapped workloads.
+            var pacedMs = await AdaptiveRequestPacer.WaitAsync(bucket, cancellationToken);
+            if (pacedMs > 0)
+            {
+                MgxTelemetryCollector.Current.RecordPacingWait(pacedMs);
+                _pendingVerbose.Enqueue($"Adaptive pacing: waited {pacedMs}ms before sending ({bucket} workload)");
+            }
+
             if (_rateLimiter != null)
             {
                 lease = await _rateLimiter.AcquireAsync(1, cancellationToken);
@@ -59,7 +70,7 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
                     throw new InvalidOperationException("Rate limit exceeded. Too many concurrent requests. Reduce -Concurrency on fan-out cmdlets, increase the queue with Set-MgxOption -RateLimitQueueLimit, or disable with Set-MgxOption -NoRateLimit.");
             }
 
-            return await _pipeline.ExecuteAsync(
+            var result = await _pipeline.ExecuteAsync(
                 async ctx =>
                 {
                     // Clone on every attempt, including the first. On the SDK bridge path
@@ -93,6 +104,12 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
                     return await base.SendAsync(clone, ctx.CancellationToken);
                 },
                 context);
+
+            // Feed the pacer's signal state (proximity percentage, final 429). Latency is
+            // not recorded on this path: timing here would include retry delays inside
+            // ExecuteAsync, which would pollute the network-time baseline.
+            AdaptiveRequestPacer.RecordResponse(bucket, result);
+            return result;
         }
         finally
         {

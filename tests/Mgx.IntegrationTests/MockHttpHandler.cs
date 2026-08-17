@@ -73,7 +73,9 @@ public class MockHttpHandler : HttpMessageHandler
         if (mock.Exception != null)
             return Task.FromException<HttpResponseMessage>(mock.Exception);
 
-        var response = new HttpResponseMessage(mock.StatusCode);
+        // Real transports (SocketsHttpHandler) set RequestMessage on the response; consumers
+        // like the pacer's OnRetry hook read the request URI off it. Mirror that here.
+        var response = new HttpResponseMessage(mock.StatusCode) { RequestMessage = request };
         if (mock.Body != null)
             response.Content = new StringContent(mock.Body, Encoding.UTF8, "application/json");
 

@@ -75,6 +75,7 @@
               <ListItem><Label>Rate Limit Burst</Label><PropertyName>RateLimitBurst</PropertyName></ListItem>
               <ListItem><Label>Rate Limit/sec</Label><PropertyName>RateLimitPerSecond</PropertyName></ListItem>
               <ListItem><Label>No Rate Limit</Label><PropertyName>NoRateLimit</PropertyName></ListItem>
+              <ListItem><Label>No Adaptive Pacing</Label><PropertyName>NoAdaptivePacing</PropertyName></ListItem>
               <ListItem><Label>Queue Limit</Label><PropertyName>RateLimitQueueLimit</PropertyName></ListItem>
               <ListItem><Label>Max Retry Attempts</Label><PropertyName>MaxRetryAttempts</PropertyName></ListItem>
               <ListItem><Label>Max Retry-After (s)</Label><PropertyName>MaxRetryAfterSeconds</PropertyName></ListItem>
@@ -114,6 +115,10 @@
               <ListItem><Label>Total Elapsed (ms)</Label><PropertyName>TotalElapsedMs</PropertyName></ListItem>
               <ListItem><Label>Resource Units</Label><PropertyName>ResourceUnitsConsumed</PropertyName></ListItem>
               <ListItem><Label>Batch Item Throttles</Label><PropertyName>BatchItemThrottles</PropertyName></ListItem>
+              <ListItem><Label>Pacing Wait (ms)</Label><PropertyName>AdaptivePacingWaitMs</PropertyName></ListItem>
+              <ListItem><Label>Pacing Activations</Label><PropertyName>AdaptivePacingActivations</PropertyName></ListItem>
+              <ListItem><Label>Last Throttle %</Label><ScriptBlock>if ($_.LastThrottlePercentage -lt 0) { 'never seen' } else { '{0:P0}' -f $_.LastThrottlePercentage }</ScriptBlock></ListItem>
+              <ListItem><Label>Pacing State</Label><ScriptBlock>if ($null -eq $_.PacingState) { 'idle' } else { $_.PacingState }</ScriptBlock></ListItem>
             </ListItems>
           </ListEntry>
         </ListEntries>

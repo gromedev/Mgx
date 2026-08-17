@@ -21,6 +21,8 @@ public sealed class MgxTelemetryCollector
     private long _elapsedMs;         // Total wall-clock time in SendAsync (all phases)
     private long _resourceUnits;     // x-ms-resource-unit sum across all responses
     private long _batchItemThrottles; // Per-item 429s inside $batch responses (distinct from Polly-level _throttleRetries)
+    private long _pacingWaitMs;      // Time spent in the adaptive pacer's proactive gate
+    private long _pacingActivations; // Requests the pacer actually delayed (wait > 0)
 
     public void RecordRequest(bool succeeded, long elapsedMs)
     {
@@ -65,6 +67,13 @@ public sealed class MgxTelemetryCollector
     public void RecordBatchRetryDelay(long ms) =>
         Interlocked.Add(ref _retryDelayMs, ms);
 
+    /// <summary>A request the adaptive pacer held before sending.</summary>
+    public void RecordPacingWait(long ms)
+    {
+        Interlocked.Increment(ref _pacingActivations);
+        Interlocked.Add(ref _pacingWaitMs, ms);
+    }
+
     public void Reset()
     {
         Interlocked.Exchange(ref _totalRequests, 0);
@@ -79,6 +88,10 @@ public sealed class MgxTelemetryCollector
         Interlocked.Exchange(ref _elapsedMs, 0);
         Interlocked.Exchange(ref _resourceUnits, 0);
         Interlocked.Exchange(ref _batchItemThrottles, 0);
+        Interlocked.Exchange(ref _pacingWaitMs, 0);
+        Interlocked.Exchange(ref _pacingActivations, 0);
+        // Pacer control state (adapted rates, slow start) is deliberately NOT cleared here:
+        // it describes the tenant's current throttle regime, not accumulated statistics.
     }
 
     public MgxTelemetrySummary GetSummary() => new(
@@ -93,7 +106,11 @@ public sealed class MgxTelemetryCollector
         HttpMs: Interlocked.Read(ref _httpMs),
         ElapsedMs: Interlocked.Read(ref _elapsedMs),
         ResourceUnitsConsumed: Interlocked.Read(ref _resourceUnits),
-        BatchItemThrottles: Interlocked.Read(ref _batchItemThrottles));
+        BatchItemThrottles: Interlocked.Read(ref _batchItemThrottles),
+        AdaptivePacingWaitMs: Interlocked.Read(ref _pacingWaitMs),
+        AdaptivePacingActivations: Interlocked.Read(ref _pacingActivations),
+        LastThrottlePercentage: AdaptiveRequestPacer.LastThrottlePercentage,
+        PacingState: AdaptiveRequestPacer.DescribeState());
 }
 
 /// <summary>
@@ -111,4 +128,8 @@ public sealed record MgxTelemetrySummary(
     long HttpMs,
     long ElapsedMs,
     long ResourceUnitsConsumed,
-    long BatchItemThrottles);
+    long BatchItemThrottles,
+    long AdaptivePacingWaitMs,
+    long AdaptivePacingActivations,
+    double LastThrottlePercentage,
+    string? PacingState);

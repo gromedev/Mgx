@@ -140,7 +140,8 @@ public sealed class ResilientGraphClient : IDisposable
         HttpContent? content = null,
         Dictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default,
-        int permitCount = 1)
+        int permitCount = 1,
+        bool paceGate = true)
     {
         // Buffer content bytes before pipeline so retries reconstruct fresh HttpContent.
         // Snapshot ALL content headers (not just ContentType) to preserve
@@ -169,8 +170,22 @@ public sealed class ResilientGraphClient : IDisposable
 
         var totalSw = Stopwatch.StartNew();
         bool succeeded = false;
+        var bucket = AdaptivePacing.Classify(requestUri);
         try
         {
+            // Proactive gate ahead of the bucket lease: the pacer spaces requests, the token
+            // bucket stays the hard backstop. Batch outer POSTs pass paceGate: false -
+            // GraphBatchClient owns batch throughput - but their responses still feed signals.
+            if (paceGate)
+            {
+                var pacedMs = await AdaptiveRequestPacer.WaitAsync(bucket, cancellationToken);
+                if (pacedMs > 0)
+                {
+                    MgxTelemetryCollector.Current.RecordPacingWait(pacedMs);
+                    _pendingVerbose.Enqueue($"Adaptive pacing: waited {pacedMs}ms before sending ({bucket} workload)");
+                }
+            }
+
             if (_rateLimiter != null)
             {
                 var limiterSw = Stopwatch.StartNew();
@@ -209,6 +224,9 @@ public sealed class ResilientGraphClient : IDisposable
                     // Stream response headers immediately instead of buffering entire body
                     var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ctx.CancellationToken);
                     MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);
+                    // Per-attempt network time feeds the latency baseline (telemetry-only:
+                    // makes the SPO soft-clamp visible; not a pacing input in 2.1).
+                    AdaptiveRequestPacer.RecordLatency(bucket, httpSw.ElapsedMilliseconds);
 
                     if (DebugEnabled)
                         await TraceResponseAsync(response, httpSw.ElapsedMilliseconds, ctx.CancellationToken);
@@ -221,6 +239,10 @@ public sealed class ResilientGraphClient : IDisposable
             // Log throttle proximity and diagnostic headers to verbose.
             // These headers warn that requests are approaching throttle limits before 429s hit.
             LogThrottleHeaders(result);
+
+            // Feed the pacer's signal state: throttle-proximity percentage, and a final 429
+            // that exhausted retries (OnRetry never fires for the last attempt).
+            AdaptiveRequestPacer.RecordResponse(bucket, result);
 
             // Track x-ms-resource-unit for telemetry (Identity/Access uses RU-based throttling).
             // Safe to record here: _pipeline.ExecuteAsync returns only the final response;
@@ -259,8 +281,9 @@ public sealed class ResilientGraphClient : IDisposable
         HttpContent content,
         CancellationToken cancellationToken = default,
         Dictionary<string, string>? headers = null,
-        int permitCount = 1)
-        => SendAsync(HttpMethod.Post, requestUri, content, headers, cancellationToken, permitCount);
+        int permitCount = 1,
+        bool paceGate = true)
+        => SendAsync(HttpMethod.Post, requestUri, content, headers, cancellationToken, permitCount, paceGate);
 
     /// <summary>
     /// Fetch a collection page and deserialize.

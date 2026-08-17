@@ -13,7 +13,7 @@ Configure resilience options for all Mgx cmdlets.
 ## SYNTAX
 
 ```
-Set-MgxOption [-RateLimitBurst <Int32>] [-RateLimitPerSecond <Int32>] [-NoRateLimit]
+Set-MgxOption [-RateLimitBurst <Int32>] [-RateLimitPerSecond <Int32>] [-NoRateLimit] [-NoAdaptivePacing]
  [-RateLimitQueueLimit <Int32>] [-MaxRetryAfterSeconds <Int32>] [-MaxRetryAttempts <Int32>]
  [-TotalTimeoutSeconds <Int32>] [-AttemptTimeoutSeconds <Int32>] [-CircuitBreakerDurationSeconds <Int32>]
  [-CircuitBreakerFailureRatio <Double>] [-CircuitBreakerMinThroughput <Int32>]
@@ -179,6 +179,21 @@ Accept wildcard characters: False
 
 ### -NoRateLimit
 Disable the client-side rate limiter entirely.
+
+```yaml
+Type: SwitchParameter
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: None
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -NoAdaptivePacing
+Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit: the token bucket is the hard backstop, the pacer is the proactive layer in front of it. See about_Mgx_Tuning "ADAPTIVE PACING".
 
 ```yaml
 Type: SwitchParameter

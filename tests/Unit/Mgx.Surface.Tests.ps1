@@ -127,6 +127,25 @@ Describe 'Cmdlet safety attributes' {
     }
 }
 
+Describe 'Adaptive pacing surface' {
+    It 'Set-MgxOption exposes -NoAdaptivePacing' {
+        (Get-Command -Name Set-MgxOption).Parameters.Keys | Should -Contain 'NoAdaptivePacing'
+    }
+
+    It 'Get-MgxOption reports pacing enabled by default' {
+        (Get-MgxOption).NoAdaptivePacing | Should -BeFalse
+    }
+
+    It 'Get-MgxTelemetry reports the pacing counters and state' {
+        $telemetry = Get-MgxTelemetry
+        $names = $telemetry.PSObject.Properties.Name
+        $names | Should -Contain 'AdaptivePacingWaitMs'
+        $names | Should -Contain 'AdaptivePacingActivations'
+        $names | Should -Contain 'LastThrottlePercentage'
+        $names | Should -Contain 'PacingState'
+    }
+}
+
 Describe 'Help' {
     It 'ships help content for <_>' -ForEach $script:ExpectedCmdlets {
         $help = Get-Help -Name $_ -ErrorAction SilentlyContinue

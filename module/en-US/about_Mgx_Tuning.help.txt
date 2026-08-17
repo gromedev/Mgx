@@ -23,6 +23,43 @@ CLIENT-SIDE RATE LIMITING (ON BY DEFAULT)
 
     Disable explicitly with Set-MgxOption -NoRateLimit.
 
+ADAPTIVE PACING (ON BY DEFAULT)
+
+    A proactive gate ahead of the token bucket. The bucket enforces a hard
+    request-rate ceiling; the pacer slows down BEFORE Graph throttles, based
+    on what the tenant is signaling. Independent of -NoRateLimit; disable
+    explicitly with Set-MgxOption -NoAdaptivePacing.
+
+    State is kept per workload (drive/SharePoint, directory, other), so a
+    throttle on one service never slows an unrelated workload in the same
+    session. Three mechanisms, all inactive (zero delay) in steady state:
+
+    - AIMD back-off. A 429 caps the workload's request rate (4 req/sec on
+      the first throttle, halving on repeat, floor 2). The cap climbs back
+      a tenth of the ceiling per clean second and expires outright after
+      five quiet minutes. A server Retry-After additionally holds ALL
+      requests for that workload, not just the throttled one.
+
+    - Slow start. A workload that is cold (first use, or idle five minutes)
+      opens with a 4 req/sec rate cap that doubles each clean second until
+      it reaches the ceiling. The first request is never delayed; the cap
+      only bites when demand exceeds it, i.e. fan-outs -- the pattern that
+      otherwise throttles before completing a single item.
+
+    - Throttle-proximity damping. When Graph reports
+      x-ms-throttle-limit-percentage (documented to appear above 80% of
+      budget), requests are spaced with a delay that ramps from 0ms at 0.8
+      to 2000ms at 1.2, while the report stays fresh (30s).
+
+    Batch outer /$batch POSTs are exempt from the gate -- batch throughput
+    is owned by BatchItemsPerSecond and its item-level pacing above -- but
+    their responses still feed the pacer's signals.
+
+    Watch it work: Get-MgxTelemetry shows total pacing wait, activation
+    count, the last reported throttle percentage, and a per-workload state
+    line (active caps, slow start, latency vs. baseline). Run any cmdlet
+    with -Verbose to see individual pacing waits.
+
 RETRY BUDGET CAPS
 
     Setting                Default     Hard Max    Purpose
