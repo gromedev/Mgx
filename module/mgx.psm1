@@ -36,6 +36,10 @@ $script:UriCompletions = @(
     @{ Text = 'drives';                      Tip = 'OneDrive drives' }
     @{ Text = 'auditLogs/signIns';           Tip = 'Sign-in logs' }
     @{ Text = 'auditLogs/directoryAudits';   Tip = 'Directory audit logs' }
+    @{ Text = 'me/drive/root/delta';         Tip = 'Drive delta: your OneDrive' }
+    @{ Text = 'users/delta';                 Tip = 'Delta: user changes' }
+    @{ Text = 'groups/delta';                Tip = 'Delta: group changes' }
+    @{ Text = 'servicePrincipals/delta';     Tip = 'Delta: service principal changes' }
 )
 
 $script:UriCompleter = {

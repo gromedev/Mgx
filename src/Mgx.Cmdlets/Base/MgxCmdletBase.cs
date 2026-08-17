@@ -725,6 +725,57 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         s_clientOptions = options ?? ResilientGraphClientOptions.Default;
     }
 
+    /// <summary>
+    /// Recovers a fresh-run JSONL job that was interrupted before its temp file was
+    /// promoted (kill/crash: the temp survives; the checkpoint reflects the last
+    /// flush). Copies exactly <paramref name="itemCount"/> lines from the newest
+    /// matching temp file to the output path - content beyond the last flush may
+    /// be absent or torn - then removes the temp. Returns false when nothing
+    /// usable exists, leaving the caller to the stale-checkpoint path.
+    /// Shared by Export-MgxCollection and Sync-MgxDelta (both write
+    /// <c>output.{guid}.tmp</c> on fresh runs).
+    /// </summary>
+    protected static bool TryAdoptOrphanedTemp(string outputPath, long itemCount)
+    {
+        try
+        {
+            if (itemCount <= 0) return false;
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+            var temp = Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp")
+                .Select(p => new FileInfo(p))
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .FirstOrDefault();
+            if (temp == null) return false;
+
+            long copied = 0;
+            var adoptPath = outputPath + ".adopt";
+            using (var reader = new StreamReader(temp.FullName))
+            using (var writer = new StreamWriter(adoptPath, append: false))
+            {
+                string? line;
+                while (copied < itemCount && (line = reader.ReadLine()) != null)
+                {
+                    writer.WriteLine(line);
+                    copied++;
+                }
+            }
+            if (copied < itemCount)
+            {
+                // Temp holds less than the checkpoint promises - unusable.
+                File.Delete(adoptPath);
+                return false;
+            }
+            File.Move(adoptPath, outputPath, overwrite: true);
+            temp.Delete();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     #region Shared URL and header builders
 
     protected static string NormalizePath(string path)

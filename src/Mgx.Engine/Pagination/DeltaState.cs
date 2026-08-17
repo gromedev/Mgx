@@ -23,6 +23,11 @@ public sealed class DeltaState
     [JsonPropertyName("filter")]
     public string? Filter { get; set; }
 
+    // Normalized Prefer tokens the enumeration was taken with (2.1 additive: state files
+    // written before this property deserialize to null - no migration needed).
+    [JsonPropertyName("prefer")]
+    public string? Prefer { get; set; }
+
     [JsonPropertyName("resource")]
     public string Resource { get; set; } = string.Empty;
 

@@ -16,6 +16,10 @@ namespace Mgx.Cmdlets.Cmdlets.Delta;
 /// First run performs a full sync and saves the delta token.
 /// Subsequent runs retrieve only items changed since the last sync.
 /// Delta state persists across successful completions (unlike CheckpointPath which is ephemeral).
+/// -CheckpointPath adds mid-run crash resume: the enumeration position is saved at page
+/// boundaries (and mid-page in JSONL mode), so a killed sync continues where it stopped
+/// instead of re-enumerating from scratch. Resume is at-least-once: in pipeline mode the
+/// page in flight at the crash is re-emitted in full.
 /// </summary>
 [Cmdlet(VerbsData.Sync, "MgxDelta")]
 [OutputType(typeof(Hashtable))]
@@ -34,6 +38,16 @@ public class SyncMgxDelta : MgxCmdletBase
     [Parameter]
     public string? Filter { get; set; }
 
+    /// <summary>
+    /// Prefer-header tokens joined into a single Prefer header (drive delta behaviors such as
+    /// deltashowremovedasdeleted). A change against the stored state forces a full re-sync,
+    /// like -Property and -Filter. Note: deltaExcludeParent is a standalone request header,
+    /// not a Prefer token - pass it via -Headers.
+    /// </summary>
+    [Parameter]
+    [ArgumentCompleter(typeof(DeltaPreferCompleter))]
+    public string[]? Prefer { get; set; }
+
     [Parameter]
     [ValidateRange(1, 999)]
     public int Top { get; set; }
@@ -43,6 +57,23 @@ public class SyncMgxDelta : MgxCmdletBase
 
     [Parameter]
     public SwitchParameter FullSync { get; set; }
+
+    /// <summary>
+    /// Baseline without enumerating: request only the latest delta token ("sync from now").
+    /// Drive resources take ?token=latest; directory and other resources take
+    /// $deltatoken=latest - the form is chosen automatically from the URI shape.
+    /// Ignored (with a warning) when usable delta state already exists.
+    /// </summary>
+    [Parameter]
+    public SwitchParameter Latest { get; set; }
+
+    /// <summary>
+    /// Path for the ephemeral mid-run resume checkpoint. Deleted on successful completion;
+    /// any event that invalidates the enumeration (410 Gone, -FullSync, a -Property/-Filter/
+    /// -Prefer change) deletes it too, so a stale position can never be resumed.
+    /// </summary>
+    [Parameter]
+    public string? CheckpointPath { get; set; }
 
     [Parameter]
     [ValidateSet("v1.0", "beta")]
@@ -57,6 +88,7 @@ public class SyncMgxDelta : MgxCmdletBase
     /// <summary>
     /// Normalize $select for stable comparison: sort, deduplicate, trim, case-insensitive.
     /// Saved to DeltaState.Select so future comparisons are order-independent.
+    /// Also used for Prefer tokens - the same normalization semantics apply.
     /// </summary>
     private static string NormalizeSelect(string? s) =>
         string.IsNullOrEmpty(s) ? "" : string.Join(",",
@@ -83,9 +115,10 @@ public class SyncMgxDelta : MgxCmdletBase
         DeltaState.ValidateWriteAccess(resolvedDeltaPath);
 
         // Validate -OutputFile writability before HTTP calls
+        string? resolvedOutputPath = null;
         if (OutputFile != null)
         {
-            var resolvedOutputPath = GetUnresolvedProviderPathFromPSPath(OutputFile);
+            resolvedOutputPath = GetUnresolvedProviderPathFromPSPath(OutputFile);
             if (string.Equals(resolvedDeltaPath, resolvedOutputPath, StringComparison.OrdinalIgnoreCase))
             {
                 ThrowTerminatingError(new ErrorRecord(
@@ -94,6 +127,28 @@ public class SyncMgxDelta : MgxCmdletBase
                 return;
             }
             DeltaState.ValidateWriteAccess(resolvedOutputPath);
+        }
+
+        // The checkpoint must not collide with either state file: sharing a path would
+        // corrupt both the position and the data it describes.
+        if (CheckpointPath != null)
+        {
+            var resolvedCheckpointPath = GetUnresolvedProviderPathFromPSPath(CheckpointPath);
+            if (string.Equals(resolvedCheckpointPath, resolvedDeltaPath, StringComparison.OrdinalIgnoreCase))
+            {
+                ThrowTerminatingError(new ErrorRecord(
+                    new ArgumentException("-CheckpointPath and -DeltaPath must be different files."),
+                    "CheckpointDeltaPathCollision", ErrorCategory.InvalidArgument, CheckpointPath));
+                return;
+            }
+            if (resolvedOutputPath != null
+                && string.Equals(resolvedCheckpointPath, resolvedOutputPath, StringComparison.OrdinalIgnoreCase))
+            {
+                ThrowTerminatingError(new ErrorRecord(
+                    new ArgumentException("-CheckpointPath and -OutputFile must be different files."),
+                    "CheckpointOutputCollision", ErrorCategory.InvalidArgument, CheckpointPath));
+                return;
+            }
         }
 
         // Warn if URI doesn't look like a delta endpoint
@@ -112,23 +167,32 @@ public class SyncMgxDelta : MgxCmdletBase
         var resolvedOutputPath = OutputFile != null
             ? GetUnresolvedProviderPathFromPSPath(OutputFile)
             : null;
+        var resolvedCheckpointPath = CheckpointPath != null
+            ? GetUnresolvedProviderPathFromPSPath(CheckpointPath)
+            : null;
 
-        // Handle -FullSync: delete existing delta state
-        if (FullSync.IsPresent && File.Exists(resolvedDeltaPath))
+        // Handle -FullSync: delete existing delta state and any resume checkpoint - the
+        // position it describes belongs to the enumeration being discarded.
+        if (FullSync.IsPresent)
         {
-            if (DeltaState.Delete(resolvedDeltaPath))
+            if (File.Exists(resolvedDeltaPath))
             {
-                WriteVerbose("Full sync requested. Deleted existing delta state.");
+                if (DeltaState.Delete(resolvedDeltaPath))
+                {
+                    WriteVerbose("Full sync requested. Deleted existing delta state.");
+                }
+                else
+                {
+                    WriteWarning($"Full sync requested but could not delete '{DeltaPath}' (file may be locked). " +
+                        "The existing delta state will be ignored and a full sync will proceed.");
+                }
             }
-            else
-            {
-                WriteWarning($"Full sync requested but could not delete '{DeltaPath}' (file may be locked). " +
-                    "The existing delta state will be ignored and a full sync will proceed.");
-            }
+            DeleteCheckpoint(resolvedCheckpointPath, "full sync requested");
         }
 
-        // Normalize $select for order-independent comparison
+        // Normalize $select and Prefer for order-independent comparison
         var normalizedSelect = NormalizeSelect(Property != null ? string.Join(",", Property) : null);
+        var normalizedPrefer = NormalizeSelect(Prefer != null ? string.Join(",", Prefer) : null);
         var currentFilter = Filter;
         string requestUrl;
 
@@ -176,7 +240,26 @@ public class SyncMgxDelta : MgxCmdletBase
                     + " Starting full re-sync to capture all selected properties.");
                 if (!DeltaState.Delete(resolvedDeltaPath))
                     WriteVerbose($"Could not delete old delta state at '{DeltaPath}' (file may be locked). It will be overwritten.");
+                DeleteCheckpoint(resolvedCheckpointPath, "property selection changed");
                 existingState = null;
+            }
+
+            // Detect Prefer change between runs: the tokens shape what the enumeration
+            // returns (removed facets, sharing annotations), so mixing states is unsound.
+            if (existingState != null)
+            {
+                var storedPrefer = NormalizeSelect(existingState.Prefer);
+                if (!string.Equals(storedPrefer, normalizedPrefer, StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteWarning(
+                        "Prefer headers changed since last sync "
+                        + $"(was: '{(string.IsNullOrEmpty(storedPrefer) ? "(none)" : storedPrefer)}', now: '{(string.IsNullOrEmpty(normalizedPrefer) ? "(none)" : normalizedPrefer)}')."
+                        + " Starting full re-sync.");
+                    if (!DeltaState.Delete(resolvedDeltaPath))
+                        WriteVerbose($"Could not delete old delta state at '{DeltaPath}' (file may be locked). It will be overwritten.");
+                    DeleteCheckpoint(resolvedCheckpointPath, "Prefer headers changed");
+                    existingState = null;
+                }
             }
 
             // Detect filter change between runs
@@ -189,6 +272,7 @@ public class SyncMgxDelta : MgxCmdletBase
                     + " Starting full re-sync.");
                 if (!DeltaState.Delete(resolvedDeltaPath))
                     WriteVerbose($"Could not delete old delta state at '{DeltaPath}' (file may be locked). It will be overwritten.");
+                DeleteCheckpoint(resolvedCheckpointPath, "filter changed");
                 existingState = null;
             }
         }
@@ -228,6 +312,13 @@ public class SyncMgxDelta : MgxCmdletBase
                 return;
             }
 
+            if (Latest.IsPresent)
+            {
+                WriteWarning(
+                    $"-Latest ignored: usable delta state already exists at '{DeltaPath}'. "
+                    + "Delete it or use -FullSync to re-baseline from now.");
+            }
+
             requestUrl = validated;
             WriteVerbose($"Resuming delta sync from {existingState.LastSync:u} ({existingState.ItemCount} items in previous sync).");
         }
@@ -235,13 +326,39 @@ public class SyncMgxDelta : MgxCmdletBase
         {
             requestUrl = BuildListUrl(VersionedBaseUrl, Uri,
                 new ODataListParams(false, Top, Top > 0 ? Top : 999, Filter, Property, null, null, 0, null));
-            WriteVerbose("No existing delta state. Performing full initial sync.");
+
+            if (Latest.IsPresent)
+            {
+                // "Sync from now": returns an empty page plus a deltaLink; the existing
+                // empty-page-still-saves-token path persists the baseline. The token form
+                // differs by service: OneDrive/SharePoint take token=latest, directory and
+                // everything else $deltatoken=latest.
+                var tokenParam = AdaptivePacing.Classify(Uri) == WorkloadBucket.Drive
+                    ? "token=latest"
+                    : "$deltatoken=latest";
+                requestUrl += (requestUrl.Contains('?') ? "&" : "?") + tokenParam;
+                WriteVerbose($"No existing delta state. Requesting latest delta token only ({tokenParam}).");
+            }
+            else
+            {
+                WriteVerbose("No existing delta state. Performing full initial sync.");
+            }
         }
 
         // GetClient() after validation so delta state errors surface without Graph connection
         var client = GetClient();
         ExecuteDeltaSync(client, requestUrl, resolvedDeltaPath, resolvedOutputPath,
-            normalizedSelect, currentFilter, sw);
+            resolvedCheckpointPath, normalizedSelect, normalizedPrefer, currentFilter, sw);
+    }
+
+    private void DeleteCheckpoint(string? checkpointPath, string reason)
+    {
+        if (checkpointPath == null || !File.Exists(checkpointPath)) return;
+        if (PaginationCheckpoint.Delete(checkpointPath))
+            WriteVerbose($"Deleted resume checkpoint ({reason}).");
+        else
+            WriteWarning($"Could not delete resume checkpoint at '{checkpointPath}' ({reason}). " +
+                "Delete it manually before the next run.");
     }
 
     private void ExecuteDeltaSync(
@@ -249,7 +366,9 @@ public class SyncMgxDelta : MgxCmdletBase
         string requestUrl,
         string deltaPath,
         string? outputPath,
+        string? checkpointPath,
         string? select,
+        string? prefer,
         string? filter,
         Stopwatch sw)
     {
@@ -260,37 +379,177 @@ public class SyncMgxDelta : MgxCmdletBase
             try
             {
                 var headers = BuildRequestHeaders(null, Headers);
+                if (Prefer is { Length: > 0 })
+                {
+                    // Dedicated parameter wins over a Prefer key in -Headers (matches the
+                    // ConsistencyLevel convention in BuildRequestHeaders).
+                    headers ??= new Dictionary<string, string>();
+                    headers["Prefer"] = string.Join(",", Prefer);
+                }
+
+                // --- resume from checkpoint, when one exists for THIS enumeration ---
+                ResumeState? resume = null;
+                long resumedItemCount = 0;
+                var currentFetchUrl = requestUrl;
+                var appendOutput = false;
+
+                if (checkpointPath != null && File.Exists(checkpointPath))
+                {
+                    // JSONL fresh-run crash: the checkpoint survives but the output was never
+                    // promoted from its temp file. Adopt the temp (trimmed to the checkpointed
+                    // count) so resume appends to real data instead of declaring staleness.
+                    if (outputPath != null && !File.Exists(outputPath))
+                    {
+                        var orphanCp = PaginationCheckpoint.Load(checkpointPath);
+                        if (orphanCp?.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))
+                        {
+                            WriteWarning($"Recovered {orphanCp.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
+                        }
+                        else
+                        {
+                            WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                            PaginationCheckpoint.Delete(checkpointPath);
+                        }
+                    }
+
+                    if (File.Exists(checkpointPath))
+                    {
+                        var checkpoint = PaginationCheckpoint.Load(checkpointPath);
+                        if (checkpoint?.NextLink == null)
+                        {
+                            WriteVerbose("Checkpoint is stale (corrupt or completed). Deleting.");
+                            PaginationCheckpoint.Delete(checkpointPath);
+                        }
+                        else if (!string.Equals(checkpoint.Resource, requestUrl, StringComparison.Ordinal))
+                        {
+                            // A checkpoint from a different enumeration (different deltaLink,
+                            // different parameters, a completed sync in between).
+                            WriteWarning("Checkpoint belongs to a different enumeration. Deleting checkpoint and starting fresh.");
+                            PaginationCheckpoint.Delete(checkpointPath);
+                        }
+                        else
+                        {
+                            // SSRF validation: the checkpoint nextLink is untrusted (a file on disk)
+                            var expectedHost = new System.Uri(requestUrl);
+                            var validatedLink = NextLinkValidator.Validate(checkpoint.NextLink, expectedHost);
+                            if (validatedLink != null
+                                && checkpoint.ItemsCollected >= 0
+                                && checkpoint.PageItemsAlreadyWritten >= 0)
+                            {
+                                resume = new ResumeState(
+                                    validatedLink,
+                                    checkpoint.PageItemsAlreadyWritten,
+                                    checkpoint.ItemsCollected);
+                                currentFetchUrl = validatedLink;
+                                resumedItemCount = checkpoint.ItemsCollected;
+                                appendOutput = outputPath != null && File.Exists(outputPath);
+                                WriteVerbose($"Resuming delta enumeration from checkpoint: {resumedItemCount} items already processed"
+                                    + (checkpoint.PageItemsAlreadyWritten > 0
+                                        ? $", skipping {checkpoint.PageItemsAlreadyWritten} items on first page."
+                                        : "."));
+                            }
+                            else
+                            {
+                                WriteWarning("Checkpoint nextLink failed validation. Deleting checkpoint and starting fresh.");
+                                PaginationCheckpoint.Delete(checkpointPath);
+                            }
+                        }
+                    }
+                }
+
                 var iterator = new PageIterator(client);
                 string? capturedDeltaLink = null;
                 long itemCount = 0;
+                long removedCount = 0;
+                long totalProcessed = resumedItemCount;
+                int pageItemsWritten = 0;
 
-                var enumerable = iterator.StreamAllWithCountAsync(
-                    requestUrl,
-                    maxItems: 0,
-                    onCount: null,
-                    headers: headers,
-                    onDeltaLink: dl => capturedDeltaLink = dl,
-                    cancellationToken: CancellationToken);
+                void OnPageComplete(PageCompletedInfo info)
+                {
+                    if (info.NextPageUrl != null)
+                        currentFetchUrl = info.NextPageUrl;
+                    pageItemsWritten = 0;
+                }
+
+                void SaveBoundaryCheckpoint(PageCompletedInfo info)
+                {
+                    if (checkpointPath == null || info.NextPageUrl == null) return;
+                    try
+                    {
+                        new PaginationCheckpoint
+                        {
+                            Resource = requestUrl,
+                            NextLink = info.NextPageUrl,
+                            ItemsCollected = totalProcessed,
+                            PageItemsAlreadyWritten = 0
+                        }.Save(checkpointPath);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        WriteWarning($"Checkpoint save failed (page boundary): {ex.Message}");
+                    }
+                }
 
                 if (outputPath != null)
                 {
-                    // JSONL output mode
-                    var writePath = $"{outputPath}.{Guid.NewGuid():N}.tmp";
+                    // JSONL output mode. Fresh runs write to a temp file and promote on
+                    // success; checkpointed resumes append to the already-promoted output.
+                    var writePath = appendOutput ? outputPath : $"{outputPath}.{Guid.NewGuid():N}.tmp";
                     try
                     {
-                        using (var writer = new StreamWriter(writePath, append: false))
+                        using (var writer = new StreamWriter(writePath, appendOutput))
                         {
+                            var enumerable = iterator.StreamAllWithCountAsync(
+                                requestUrl,
+                                maxItems: 0,
+                                onCount: null,
+                                headers: headers,
+                                resume: resume,
+                                onPageComplete: info =>
+                                {
+                                    writer.Flush();
+                                    SaveBoundaryCheckpoint(info);
+                                    OnPageComplete(info);
+                                },
+                                onDeltaLink: dl => capturedDeltaLink = dl,
+                                cancellationToken: CancellationToken);
+
                             var enumerator = enumerable.GetAsyncEnumerator(CancellationToken);
                             try
                             {
                                 while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                                 {
                                     writer.WriteLine(enumerator.Current.GetRawText());
+                                    if (enumerator.Current.TryGetProperty("@removed", out _))
+                                        removedCount++;
                                     itemCount++;
+                                    pageItemsWritten++;
+                                    totalProcessed++;
                                     DrainClientMessages();
 
-                                    if (itemCount % 500 == 0)
+                                    if (totalProcessed % 500 == 0)
+                                    {
                                         writer.Flush();
+                                        // Mid-page checkpoint: tracks items written from the
+                                        // current page so crash resume skips them (no dupes).
+                                        if (checkpointPath != null)
+                                        {
+                                            try
+                                            {
+                                                new PaginationCheckpoint
+                                                {
+                                                    Resource = requestUrl,
+                                                    NextLink = currentFetchUrl,
+                                                    ItemsCollected = totalProcessed,
+                                                    PageItemsAlreadyWritten = pageItemsWritten
+                                                }.Save(checkpointPath);
+                                            }
+                                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                            {
+                                                WriteWarning($"Mid-page checkpoint save failed: {ex.Message}");
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             finally
@@ -298,25 +557,78 @@ public class SyncMgxDelta : MgxCmdletBase
                                 enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
                             }
                         }
-                        File.Move(writePath, outputPath, overwrite: true);
+                        if (!appendOutput)
+                            File.Move(writePath, outputPath, overwrite: true);
                     }
-                    catch
+                    catch (Exception attemptEx)
                     {
-                        try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                        if (!appendOutput)
+                        {
+                            // User cancellation of a checkpointed fresh run: promote the temp
+                            // file (the using block already flushed it on unwind) and save a
+                            // checkpoint matching its exact content, so resume works on first
+                            // runs too. Otherwise clean the temp up as before.
+                            var cancelled = attemptEx is OperationCanceledException
+                                && CancellationToken.IsCancellationRequested;
+                            var promoted = false;
+                            if (cancelled && checkpointPath != null && itemCount > 0)
+                            {
+                                try
+                                {
+                                    new PaginationCheckpoint
+                                    {
+                                        Resource = requestUrl,
+                                        NextLink = currentFetchUrl,
+                                        ItemsCollected = totalProcessed,
+                                        PageItemsAlreadyWritten = pageItemsWritten
+                                    }.Save(checkpointPath);
+                                    File.Move(writePath, outputPath, overwrite: true);
+                                    promoted = true;
+                                }
+                                catch (Exception promoteEx) when (promoteEx is IOException or UnauthorizedAccessException)
+                                {
+                                    // Promotion is best-effort; fall back to the old cleanup.
+                                }
+                            }
+                            if (!promoted)
+                            {
+                                try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                            }
+                        }
                         throw;
                     }
                 }
                 else
                 {
-                    // Pipeline output mode
+                    // Pipeline output mode. Checkpoints save at page boundaries only:
+                    // emitted objects cannot be un-emitted, so resume re-emits the page in
+                    // flight at the crash (at-least-once, documented).
+                    var enumerable = iterator.StreamAllWithCountAsync(
+                        requestUrl,
+                        maxItems: 0,
+                        onCount: null,
+                        headers: headers,
+                        resume: resume,
+                        onPageComplete: info =>
+                        {
+                            SaveBoundaryCheckpoint(info);
+                            OnPageComplete(info);
+                        },
+                        onDeltaLink: dl => capturedDeltaLink = dl,
+                        cancellationToken: CancellationToken);
+
                     var enumerator = enumerable.GetAsyncEnumerator(CancellationToken);
                     try
                     {
                         while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                         {
+                            if (enumerator.Current.TryGetProperty("@removed", out _))
+                                removedCount++;
                             var ht = JsonToHashtable(enumerator.Current);
                             WriteObject(ht);
                             itemCount++;
+                            pageItemsWritten++;
+                            totalProcessed++;
                             DrainClientMessages();
                         }
                     }
@@ -325,6 +637,11 @@ public class SyncMgxDelta : MgxCmdletBase
                         enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
                     }
                 }
+
+                // Success: the checkpoint's job is done - delete it BEFORE saving delta
+                // state, so a crash between the two leaves a fresh incremental (correct)
+                // rather than a resumable position into a completed enumeration (wrong).
+                DeleteCheckpoint(checkpointPath, "sync completed");
 
                 // Save delta state ONLY after successful completion (Architect P0).
                 // Zero-item responses still save the token (Adversarial P0).
@@ -335,8 +652,9 @@ public class SyncMgxDelta : MgxCmdletBase
                         DeltaLink = capturedDeltaLink,
                         Select = select, // Normalized value for stable future comparisons
                         Filter = filter,
+                        Prefer = prefer, // Normalized, like Select
                         Resource = Uri,
-                        ItemCount = itemCount,
+                        ItemCount = totalProcessed,
                         GraphEndpoint = s_graphEndpoint
                     }.Save(deltaPath);
                     WriteVerbose($"Delta state saved to '{deltaPath}'.");
@@ -350,7 +668,10 @@ public class SyncMgxDelta : MgxCmdletBase
                 sw.Stop();
 
                 WriteVerbose(
-                    $"Delta sync complete: {itemCount} items in {sw.Elapsed.TotalSeconds:F1}s"
+                    $"Delta sync complete: {itemCount} items"
+                    + (removedCount > 0 ? $" ({removedCount} removed)" : "")
+                    + $" in {sw.Elapsed.TotalSeconds:F1}s"
+                    + (resumedItemCount > 0 ? $" (resumed after {resumedItemCount})" : "")
                     + (isFullResync ? " (full re-sync after 410 Gone)" : "")
                     + (outputPath != null ? $". Output: {outputPath}" : "."));
 
@@ -361,11 +682,13 @@ public class SyncMgxDelta : MgxCmdletBase
                 && ex.StatusCode == HttpStatusCode.Gone)
             {
                 // 410 Gone: delta token expired (>7 days for directory objects).
-                // Delete delta state and restart with full sync.
+                // Delete delta state AND any checkpoint - both describe the dead
+                // enumeration - and restart with full sync.
                 // Second attempt builds fresh URL (no delta token), so 410 won't recur.
                 DrainClientMessages();
                 if (!DeltaState.Delete(deltaPath))
                     WriteVerbose("Could not delete expired delta state (file may be locked). It will be overwritten.");
+                DeleteCheckpoint(checkpointPath, "delta token expired (410 Gone)");
                 isFullResync = true;
                 requestUrl = BuildListUrl(VersionedBaseUrl, Uri,
                     new ODataListParams(false, Top, Top > 0 ? Top : 999, Filter, Property, null, null, 0, null));
@@ -377,7 +700,11 @@ public class SyncMgxDelta : MgxCmdletBase
             catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
             {
                 DrainClientMessages();
-                WriteWarning("Delta sync cancelled.");
+                var resumeHint = checkpointPath != null
+                    ? $" Resume with: Sync-MgxDelta '{Uri}' -DeltaPath '{DeltaPath}' -CheckpointPath '{CheckpointPath}'"
+                      + (OutputFile != null ? $" -OutputFile '{OutputFile}'" : "")
+                    : " Use -CheckpointPath to enable mid-run resume.";
+                WriteWarning($"Delta sync cancelled.{resumeHint}");
                 return;
             }
             catch (Exception ex) when (ex is GraphServiceException or BrokenCircuitException or HttpRequestException)

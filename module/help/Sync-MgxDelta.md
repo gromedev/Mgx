@@ -13,19 +13,24 @@ Incremental sync via Microsoft Graph delta queries.
 ## SYNTAX
 
 ```
-Sync-MgxDelta [-Uri] <String> -DeltaPath <String> [-Property <String[]>] [-Filter <String>] [-Top <Int32>]
- [-OutputFile <String>] [-FullSync] [-ApiVersion <String>] [-Headers <Hashtable>]
+Sync-MgxDelta [-Uri] <String> -DeltaPath <String> [-Property <String[]>] [-Filter <String>]
+ [-Prefer <String[]>] [-Top <Int32>] [-OutputFile <String>] [-FullSync] [-Latest]
+ [-CheckpointPath <String>] [-ApiVersion <String>] [-Headers <Hashtable>]
  [-ProgressAction <ActionPreference>] [<CommonParameters>]
 ```
 
 ## DESCRIPTION
 Sync-MgxDelta retrieves incremental changes from Microsoft Graph delta endpoints. On the first run, it performs a full sync and saves a delta token. Subsequent runs retrieve only items that changed since the last sync.
 
-Delta tokens are saved to the file specified by -DeltaPath and persist across successful completions. This is different from -CheckpointPath (used by Export-MgxCollection) which is ephemeral and deleted on success.
+Delta tokens are saved to the file specified by -DeltaPath and persist across successful completions. -CheckpointPath is different: it is an ephemeral mid-run resume position, saved at page boundaries while an enumeration is in flight and deleted the moment it completes. Use both on long enumerations - a killed 3-hour drive sync resumes where it stopped instead of starting over.
 
-Items that no longer match the query appear with an `@removed` property containing `{"reason": "changed"}` (item moved out of scope or soft-deleted) or `{"reason": "deleted"}` (permanently deleted). Filter these with `Where-Object { -not $_.'@removed' }`.
+Drive delta is fully supported: `/me/drive/root/delta`, `/drives/{id}/root/delta`, `/users/{id}/drive/root/delta`, and `/groups/{id}/drive/root/delta` all work, including drive-specific `-Prefer` behaviors and the drive form of `-Latest`.
 
-Delta tokens expire after approximately 7 days for directory objects (users, groups, applications). When a token expires, Graph returns HTTP 410 Gone. Sync-MgxDelta handles this automatically by deleting the stale token and performing a full re-sync with a warning.
+Items that no longer match the query appear with an `@removed` property containing `{"reason": "changed"}` (item moved out of scope or soft-deleted) or `{"reason": "deleted"}` (permanently deleted). Filter these with `Where-Object { -not $_.'@removed' }`. The completion message counts them separately.
+
+Delta tokens expire after approximately 7 days for directory objects (users, groups, applications). When a token expires, Graph returns HTTP 410 Gone. Sync-MgxDelta handles this automatically by deleting the stale token (and any resume checkpoint) and performing a full re-sync with a warning.
+
+Resume semantics are at-least-once: in pipeline mode the page in flight at a crash is re-emitted in full on resume; in JSONL mode mid-page checkpoints keep the window to at most 500 items. Deduplicate on `id` downstream if exact-once matters.
 
 Source: [Use delta query to track changes in Microsoft Graph data](https://learn.microsoft.com/en-us/graph/delta-query-overview)
 
@@ -76,6 +81,29 @@ Write-Host "$($changed.Count) changed, $($removed.Count) removed"
 
 Suitable for scheduled tasks. If the delta token expires (>7 days since last run), Sync-MgxDelta automatically performs a full re-sync and warns.
 
+### Example 7: Enumerate a whole drive, resumable
+```powershell
+Sync-MgxDelta /me/drive/root/delta -DeltaPath drive.delta -CheckpointPath drive.checkpoint -OutputFile drive.jsonl
+```
+
+First run enumerates the entire drive to JSONL. If the run is killed at any point, re-running the identical command resumes from the last checkpointed page instead of starting over. Subsequent runs after completion return only changed items.
+
+### Example 8: Baseline from now, then track changes only
+```powershell
+Sync-MgxDelta /groups/delta -DeltaPath groups.delta -Latest   # instant baseline, no data
+# ...later...
+Sync-MgxDelta /groups/delta -DeltaPath groups.delta           # only what changed since
+```
+
+-Latest skips the initial full enumeration and stores a "from now" token. The form is chosen automatically: drive resources use `?token=latest`, directory and everything else `$deltatoken=latest`.
+
+### Example 9: Drive delta with Prefer behaviors
+```powershell
+Sync-MgxDelta /me/drive/root/delta -DeltaPath drive.delta -Prefer deltashowremovedasdeleted
+```
+
+Removed drive items carry the `deleted` facet instead of appearing as bare deletions. Note: `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it as `-Headers @{ deltaExcludeParent = "true" }`.
+
 ## PARAMETERS
 
 ### -ApiVersion
@@ -90,6 +118,21 @@ Accepted values: v1.0, beta
 Required: False
 Position: Named
 Default value: v1.0
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -CheckpointPath
+Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode) while an enumeration is in flight; deleted on successful completion. Any event that invalidates the enumeration - HTTP 410 Gone, -FullSync, or a -Property/-Filter/-Prefer change - deletes it too. Must differ from -DeltaPath and -OutputFile.
+
+```yaml
+Type: String
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: None
 Accept pipeline input: False
 Accept wildcard characters: False
 ```
@@ -135,6 +178,36 @@ Aliases:
 Required: False
 Position: Named
 Default value: False
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -Latest
+Baseline without enumerating: request only the latest delta token ("sync from now"). Returns no data; the next run returns everything that changed since. Drive resources take `?token=latest`, directory and other resources `$deltatoken=latest` - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists (delete it or use -FullSync to re-baseline).
+
+```yaml
+Type: SwitchParameter
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: False
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -Prefer
+Prefer-header tokens joined into a single Prefer header on every page request. Tab completion offers the documented drive delta tokens: `deltashowremovedasdeleted`, `deltatraversepermissiongaps`, `deltashowsharingchanges` (requires the other two and Sites.FullControl.All), and `hierarchicalsharing`. A change against the stored state forces a full re-sync, like -Property and -Filter. `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it via -Headers.
+
+```yaml
+Type: String[]
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: None
 Accept pipeline input: False
 Accept wildcard characters: False
 ```

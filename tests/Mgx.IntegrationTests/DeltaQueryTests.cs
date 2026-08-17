@@ -1134,4 +1134,452 @@ public class DeltaQueryTests
 
         Assert.ThrowsAny<Exception>(() => DeltaState.ValidateWriteAccess(unwritablePath));
     }
+
+    // --- 2.1 Phase A: -Prefer / -Latest / -CheckpointPath ---
+
+    [Fact]
+    public void DeltaState_RoundTrips_Prefer_And_OldSchemaLoadsNull()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"delta-prefer-{Guid.NewGuid()}.json");
+        try
+        {
+            new DeltaState
+            {
+                DeltaLink = "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=abc",
+                Resource = "/me/drive/root/delta",
+                GraphEndpoint = "https://graph.microsoft.com",
+                Prefer = "deltashowremovedasdeleted,hierarchicalsharing"
+            }.Save(path);
+
+            var loaded = DeltaState.Load(path);
+            Assert.Equal("deltashowremovedasdeleted,hierarchicalsharing", loaded!.Prefer);
+
+            // A 2.0-era state file has no "prefer" property: it must load with null, so an
+            // unchanged run (no -Prefer) does not trigger a phantom drift resync.
+            File.WriteAllText(path, """
+            {
+                "deltaLink": "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=old",
+                "resource": "/users/delta",
+                "lastSync": "2026-08-01T00:00:00+00:00",
+                "itemCount": 5,
+                "graphEndpoint": "https://graph.microsoft.com"
+            }
+            """);
+            var (oldState, result) = DeltaState.LoadWithResult(path);
+            Assert.Equal(DeltaLoadResult.Ok, result);
+            Assert.Null(oldState!.Prefer);
+        }
+        finally
+        {
+            DeltaState.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_Prefer_SentOnEveryPage_AndPersistedNormalized()
+    {
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPage1);
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPage2WithToken);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-prefer-{Guid.NewGuid()}.json");
+
+        try
+        {
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("Prefer", new[] { "hierarchicalsharing", "deltashowremovedasdeleted" });
+            var results = ps.Invoke();
+
+            Assert.Equal(3, results.Count);
+            // The joined header goes out on every page request, not just the first.
+            Assert.Equal(2, handler.RequestCount);
+            foreach (var request in handler.Requests)
+            {
+                Assert.True(request.Headers.Contains("Prefer"), "every page request must carry Prefer");
+                Assert.Equal("hierarchicalsharing,deltashowremovedasdeleted",
+                    request.Headers.GetValues("Prefer").Single());
+            }
+            // Stored normalized (sorted, case-insensitive) for order-independent drift checks.
+            var state = DeltaState.Load(deltaPath);
+            Assert.Equal("deltashowremovedasdeleted,hierarchicalsharing", state!.Prefer);
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_PreferDrift_ForcesFullResync_AndDeletesCheckpoint()
+    {
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPage2WithToken);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-preferdrift-{Guid.NewGuid()}.json");
+        var cpPath = Path.Combine(Path.GetTempPath(), $"cmdlet-preferdrift-{Guid.NewGuid()}.checkpoint");
+
+        try
+        {
+            new DeltaState
+            {
+                DeltaLink = "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=stale",
+                Resource = "/users/delta",
+                GraphEndpoint = "https://graph.microsoft.com",
+                Select = "",
+                Prefer = "deltashowremovedasdeleted"
+            }.Save(deltaPath);
+            // A leftover checkpoint from the drifted enumeration must not survive the resync.
+            new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=stale",
+                NextLink = "https://graph.microsoft.com/v1.0/users/delta?$skiptoken=page9",
+                ItemsCollected = 42
+            }.Save(cpPath);
+
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("CheckpointPath", cpPath);
+            ps.Invoke(); // no -Prefer: drift against the stored tokens
+
+            Assert.Contains(ps.Streams.Warning, w => w.Message.Contains("Prefer headers changed"));
+            // Full resync, not the stale incremental link
+            Assert.DoesNotContain("deltatoken=stale", handler.Requests[0].RequestUri!.ToString());
+            Assert.False(File.Exists(cpPath), "checkpoint from the drifted enumeration must be deleted");
+            // New state carries the new (empty) Prefer
+            var state = DeltaState.Load(deltaPath);
+            Assert.True(string.IsNullOrEmpty(state!.Prefer));
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            PaginationCheckpoint.Delete(cpPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_Latest_UsesDeltatokenForm_ForDirectoryResources()
+    {
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, EmptyDeltaWithToken);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-latest-dir-{Guid.NewGuid()}.json");
+
+        try
+        {
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("Latest", true);
+            var results = ps.Invoke();
+
+            Assert.Empty(results); // baseline only, no data
+            var url = handler.Requests[0].RequestUri!.ToString();
+            Assert.Contains("$deltatoken=latest", url);
+            // The empty-page-still-saves-token path persists the baseline.
+            var state = DeltaState.Load(deltaPath);
+            Assert.Contains("$deltatoken=empty789", state!.DeltaLink);
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_Latest_UsesTokenForm_ForDrives()
+    {
+        // Drive resources take ?token=latest; $deltatoken=latest is directory-only.
+        // (Verified against driveitem-delta and delta-query-overview docs.)
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, """
+        {
+            "value": [],
+            "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=drivebaseline"
+        }
+        """);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-latest-drive-{Guid.NewGuid()}.json");
+
+        try
+        {
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/me/drive/root/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("Latest", true);
+            ps.Invoke();
+
+            var url = handler.Requests[0].RequestUri!.ToString();
+            Assert.Contains("&token=latest", url);
+            Assert.DoesNotContain("$deltatoken", url);
+            var state = DeltaState.Load(deltaPath);
+            Assert.Contains("token=drivebaseline", state!.DeltaLink);
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_Latest_IgnoredWhenStateExists()
+    {
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, EmptyDeltaWithToken);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-latest-ignored-{Guid.NewGuid()}.json");
+
+        try
+        {
+            new DeltaState
+            {
+                DeltaLink = "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=stale",
+                Resource = "/users/delta",
+                GraphEndpoint = "https://graph.microsoft.com",
+                Select = ""
+            }.Save(deltaPath);
+
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("Latest", true);
+            ps.Invoke();
+
+            Assert.Contains(ps.Streams.Warning, w => w.Message.Contains("-Latest ignored"));
+            // The stored incremental link is used, not a re-baseline.
+            Assert.Contains("deltatoken=stale", handler.Requests[0].RequestUri!.ToString());
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_Checkpoint_SurvivesCrash_ThenResumesAndDeletesOnSuccess()
+    {
+        // Run 1 (pipeline mode): page 1 succeeds, page 2 dies on 500s. The page-boundary
+        // checkpoint must survive. Run 2: resumes from page 2's link (not from scratch),
+        // completes, deletes the checkpoint, and saves delta state.
+        var handler = new MockHttpHandler();
+        var errorBody = """{"error":{"code":"InternalServerError","message":"boom"}}""";
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPage1);
+        handler.QueueResponse(HttpStatusCode.InternalServerError, errorBody);
+        handler.QueueResponse(HttpStatusCode.InternalServerError, errorBody);
+
+        InjectMockHttpClient(handler);
+        var optField = typeof(MgxCmdletBase).GetField("s_clientOptions", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!;
+        optField.SetValue(null, new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
+        ResiliencePipelineFactory.Reset();
+
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-cp-resume-{Guid.NewGuid()}.json");
+        var cpPath = Path.Combine(Path.GetTempPath(), $"cmdlet-cp-resume-{Guid.NewGuid()}.checkpoint");
+
+        try
+        {
+            using (var ps = CreateTestShell())
+            {
+                ps.AddCommand("Sync-MgxDelta")
+                  .AddParameter("Uri", "/users/delta")
+                  .AddParameter("DeltaPath", deltaPath)
+                  .AddParameter("CheckpointPath", cpPath);
+                var run1 = ps.Invoke();
+
+                Assert.True(ps.HadErrors, "run 1 should fail on the 500s");
+                Assert.Equal(2, run1.Count); // page 1 was emitted before the crash
+            }
+
+            Assert.True(File.Exists(cpPath), "page-boundary checkpoint must survive the crash");
+            Assert.False(File.Exists(deltaPath), "delta state must NOT be saved on failure");
+            var checkpoint = PaginationCheckpoint.Load(cpPath);
+            Assert.Contains("skiptoken=page2", checkpoint!.NextLink);
+            Assert.Equal(2, checkpoint.ItemsCollected);
+
+            // Heal the transport and resume.
+            handler.QueueResponse(HttpStatusCode.OK, DeltaPage2WithToken);
+            using (var ps = CreateTestShell())
+            {
+                ps.AddCommand("Sync-MgxDelta")
+                  .AddParameter("Uri", "/users/delta")
+                  .AddParameter("DeltaPath", deltaPath)
+                  .AddParameter("CheckpointPath", cpPath);
+                var run2 = ps.Invoke();
+
+                Assert.False(ps.HadErrors);
+                Assert.Single(run2); // only page 2 - no re-enumeration of page 1
+            }
+
+            // Run 2's single request went straight to the checkpointed position.
+            Assert.Contains("skiptoken=page2", handler.Requests[^1].RequestUri!.ToString());
+            Assert.False(File.Exists(cpPath), "checkpoint must be deleted on success");
+            var state = DeltaState.Load(deltaPath);
+            Assert.Contains("$deltatoken=abc123", state!.DeltaLink);
+            Assert.Equal(3, state.ItemCount); // 2 resumed + 1 from page 2
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            PaginationCheckpoint.Delete(cpPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_Checkpoint_JsonlOrphanedTemp_IsAdopted()
+    {
+        // A killed JSONL fresh run leaves the checkpoint plus a GUID-named temp and no
+        // output file. The next run must adopt the temp (trimmed to the checkpointed count)
+        // and resume appending - the same recovery Export-MgxCollection ships.
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPage2WithToken);
+
+        InjectMockHttpClient(handler);
+        var stem = $"cmdlet-cp-adopt-{Guid.NewGuid()}";
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"{stem}.json");
+        var cpPath = Path.Combine(Path.GetTempPath(), $"{stem}.checkpoint");
+        var outputPath = Path.Combine(Path.GetTempPath(), $"{stem}.jsonl");
+        var tempPath = $"{outputPath}.deadbeefdeadbeefdeadbeefdeadbeef.tmp";
+
+        try
+        {
+            // Simulate the kill: checkpoint at page-1 boundary, temp holding page 1's items.
+            // Resource must equal the URL the cmdlet rebuilds for this parameter set.
+            new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users/delta?$top=999",
+                NextLink = "https://graph.microsoft.com/v1.0/users/delta?$skiptoken=page2",
+                ItemsCollected = 2,
+                PageItemsAlreadyWritten = 0
+            }.Save(cpPath);
+            File.WriteAllLines(tempPath,
+            [
+                """{"id": "user1", "displayName": "User One"}""",
+                """{"id": "user2", "displayName": "User Two"}"""
+            ]);
+
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("OutputFile", outputPath)
+              .AddParameter("CheckpointPath", cpPath);
+            ps.Invoke();
+
+            Assert.False(ps.HadErrors);
+            Assert.Contains(ps.Streams.Warning, w => w.Message.Contains("Recovered 2 items"));
+            var lines = File.ReadAllLines(outputPath);
+            Assert.Equal(3, lines.Length); // 2 adopted + 1 from the resumed page
+            Assert.Contains("user3", lines[2]);
+            Assert.False(File.Exists(tempPath), "adopted temp must be removed");
+            Assert.False(File.Exists(cpPath), "checkpoint must be deleted on success");
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            PaginationCheckpoint.Delete(cpPath);
+            if (File.Exists(outputPath)) File.Delete(outputPath);
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_410Gone_DeletesCheckpointToo()
+    {
+        // 410 invalidates the whole enumeration: delta state AND checkpoint describe a dead
+        // position. A surviving checkpoint would resume into the expired enumeration.
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.Gone,
+            """{"error":{"code":"deltaTokenExpired","message":"Delta token has expired"}}""");
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPage2WithToken);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-410cp-{Guid.NewGuid()}.json");
+        var cpPath = Path.Combine(Path.GetTempPath(), $"cmdlet-410cp-{Guid.NewGuid()}.checkpoint");
+
+        try
+        {
+            new DeltaState
+            {
+                DeltaLink = "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=stale",
+                Resource = "/users/delta",
+                GraphEndpoint = "https://graph.microsoft.com",
+                Select = ""
+            }.Save(deltaPath);
+            new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=stale",
+                NextLink = "https://graph.microsoft.com/v1.0/users/delta?$skiptoken=dead",
+                ItemsCollected = 7
+            }.Save(cpPath);
+
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("CheckpointPath", cpPath);
+            var results = ps.Invoke();
+
+            Assert.True(results.Count > 0, "re-sync after 410 should return items");
+            Assert.False(File.Exists(cpPath), "410 must delete the checkpoint with the delta state");
+            var state = DeltaState.Load(deltaPath);
+            Assert.Contains("$deltatoken=abc123", state!.DeltaLink);
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            PaginationCheckpoint.Delete(cpPath);
+            CleanupMockHttpClient();
+        }
+    }
+
+    [Fact]
+    public void Cmdlet_RemovedItems_AreCountedAndPassedThrough()
+    {
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, DeltaPageWithRemoved);
+
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"cmdlet-removed-{Guid.NewGuid()}.json");
+
+        try
+        {
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("Verbose", true);
+            var results = ps.Invoke();
+
+            // Raw passthrough: the @removed item is emitted, not filtered.
+            Assert.Equal(2, results.Count);
+            var removed = results.Select(r => (System.Collections.Hashtable)r.BaseObject)
+                .Single(ht => ht.ContainsKey("@removed"));
+            Assert.Equal("user5", removed["id"]);
+            // Accounting reaches the completion message.
+            Assert.Contains(ps.Streams.Verbose, v => v.Message.Contains("(1 removed)"));
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            CleanupMockHttpClient();
+        }
+    }
 }

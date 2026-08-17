@@ -3269,6 +3269,41 @@ Import-Csv ./users.csv |
           <dev:defaultValue>False</dev:defaultValue>
         </command:parameter>
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Latest</maml:name>
+          <maml:description>
+            <maml:para>Baseline without enumerating: request only the latest delta token ("sync from now"). Drive resources take ?token=latest, directory and other resources $deltatoken=latest - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists.</maml:para>
+          </maml:description>
+          <dev:type>
+            <maml:name>SwitchParameter</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>False</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Prefer</maml:name>
+          <maml:description>
+            <maml:para>Prefer-header tokens joined into a single Prefer header on every page request (e.g. deltashowremovedasdeleted). A change against the stored state forces a full re-sync, like -Property and -Filter. deltaExcludeParent is a standalone request header, not a Prefer token - pass it via -Headers.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String[]</command:parameterValue>
+          <dev:type>
+            <maml:name>String[]</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>CheckpointPath</maml:name>
+          <maml:description>
+            <maml:para>Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode); deleted on successful completion, on 410 Gone, on -FullSync, and on any -Property/-Filter/-Prefer change. Must differ from -DeltaPath and -OutputFile. Resume is at-least-once.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Headers</maml:name>
           <maml:description>
             <maml:para>Custom request headers applied to each page request.</maml:para>
@@ -3378,6 +3413,42 @@ Import-Csv ./users.csv |
           <maml:uri />
         </dev:type>
         <dev:defaultValue>False</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Latest</maml:name>
+        <maml:description>
+          <maml:para>Baseline without enumerating: request only the latest delta token ("sync from now"). Drive resources take ?token=latest, directory and other resources $deltatoken=latest - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists.</maml:para>
+        </maml:description>
+        <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
+        <dev:type>
+          <maml:name>SwitchParameter</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>False</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Prefer</maml:name>
+        <maml:description>
+          <maml:para>Prefer-header tokens joined into a single Prefer header on every page request (e.g. deltashowremovedasdeleted). A change against the stored state forces a full re-sync, like -Property and -Filter. deltaExcludeParent is a standalone request header, not a Prefer token - pass it via -Headers.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String[]</command:parameterValue>
+        <dev:type>
+          <maml:name>String[]</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>CheckpointPath</maml:name>
+        <maml:description>
+          <maml:para>Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode); deleted on successful completion, on 410 Gone, on -FullSync, and on any -Property/-Filter/-Prefer change. Must differ from -DeltaPath and -OutputFile. Resume is at-least-once.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
       </command:parameter>
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Headers</maml:name>
