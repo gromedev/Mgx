@@ -293,4 +293,23 @@ public class GraphContentClientTests : IDisposable
 
         Assert.Equal(8, MgxTelemetryCollector.Current.GetSummary().ContentBytesDownloaded);
     }
+
+    [Fact]
+    public async Task Redirect_on_the_content_path_is_not_counted_as_a_failed_request()
+    {
+        // Graph answers /content with a 302 to a pre-authenticated download host. That is the
+        // documented success path, not an error - but IsSuccessStatusCode is 2xx-only, so
+        // classifying on it alone made every successful two-hop download register as a
+        // failure. Observed live: five successful downloads reported as Succeeded=1 Failed=5.
+        QueueRedirectToCdn();
+        _cdnHandler.QueueResponse(HttpStatusCode.OK, "payload!");
+        MgxTelemetryCollector.Current.Reset();
+
+        using var result = await _client.GetContentAsync(GraphContentUrl);
+        await ReadAllAsync(result);
+
+        var summary = MgxTelemetryCollector.Current.GetSummary();
+        Assert.Equal(0, summary.Failed);
+        Assert.True(summary.Succeeded >= 1, $"expected a success, got {summary.Succeeded}");
+    }
 }

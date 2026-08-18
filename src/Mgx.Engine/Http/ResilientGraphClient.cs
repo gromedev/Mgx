@@ -246,7 +246,11 @@ public sealed class ResilientGraphClient : IDisposable
                     return response;
                 },
                 context);
-            succeeded = result.IsSuccessStatusCode;
+            // A redirect is not a failure. Graph answers /content with a 302 to a
+            // pre-authenticated download host, so counting 3xx as failed made every
+            // successful two-hop download register as a failure in telemetry.
+            succeeded = result.IsSuccessStatusCode
+                || ((int)result.StatusCode >= 300 && (int)result.StatusCode < 400);
 
             // Log throttle proximity and diagnostic headers to verbose.
             // These headers warn that requests are approaching throttle limits before 429s hit.
