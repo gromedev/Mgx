@@ -1,26 +1,34 @@
 # Changelog
 
-## 2.0.0
+## 2.0.1
 
-Breaking release. The Graph-data cmdlets change output shape. The platform floor moves *down* to PowerShell 7.4 (LTS). The breaking work was contributed in the [Microsoft365DSC fork](https://github.com/Microsoft365DSC/mgx) by Fabien Tschanz.
-
-### Breaking
-
-- Invoke-MgxRequest, Invoke-MgxBatchRequest, Expand-MgxRelation and Sync-MgxDelta now emit case-insensitive Hashtables instead of PSObjects, matching the shape Invoke-MgGraphRequest returns so results drop into scripts written for the Graph SDK without adaptation. Code that needs the previous shape can use `-Raw | ConvertFrom-Json`.
-- @odata.type is returned verbatim under its own key rather than renamed to ODataType, which keeps the type annotation Graph expects on read-modify-write round-trips. All other @odata.* transport metadata is stripped, including @odata.etag: the etag changes on every write, so preserving it would make two reads of an unchanged entity compare unequal and surface as phantom drift in state-comparison consumers. Callers that need the If-Match tag can read it from the raw payload (-Raw | ConvertFrom-Json).
-- The six Graph entity format views (Mgx.User, Mgx.Group, Mgx.Application, Mgx.ServicePrincipal, Mgx.DirectoryRole, Mgx.BatchResult) were removed. PowerShell always renders a dictionary with its built-in Name/Value view, so a custom view can never be selected for the new output. Key enumeration order is undefined; use Select-Object or Format-Table to pin column order.
-- The platform floor moves **down**, not up: the module now targets .NET 8 and supports PowerShell 7.4 (LTS) and later, where 1.x required 7.5. Nothing in mgx ever needed the newer runtime — the `net9.0` target dated to 1.0.1 and was never driven by the code. The one .NET 9 API in the tree (`HttpContent.LoadIntoBufferAsync(CancellationToken)`, in the `-Debug` tracer) is replaced with a `WaitAsync` equivalent that keeps the same timeout behaviour.
-- Microsoft.Graph.Authentication is no longer declared in RequiredModules. Auth was already resolved reflectively at call time, so the declaration only forced the SDK onto every consumer — including hosts that supply their own Graph auth and want nothing but the resilience layer — and installed a second copy alongside whatever they already loaded. The module now imports without it; cmdlets that need a token report GraphAuthModuleNotLoaded with install instructions instead of pointing at Connect-MgGraph, which would name a cmdlet the session does not have.
+Patch release. Three fixes; no feature or API changes.
 
 ### Fixed
 
-- Action endpoints that answer a write with a collection envelope, such as /directoryObjects/getByIds, emitted the envelope as a single object with a value property instead of one object per element. Envelope unwrapping is now applied on every response path, including fan-out bulk writes, with the same truncation warning when the response carries @odata.nextLink.
-- Piping an object to a fan-out request (`-Uri '/users/{id}'`) bound it to a string parameter, putting the literal type name into the request URL with no error. Fan-out now reads the id member from Hashtables and PSCustomObjects, and reports a MissingPipelineId error when input carries neither.
-- Invoke-MgxBatchRequest could not consume its own output, because per-item input parsing only read PSObject properties. It now reads members from Hashtables and PSCustomObjects alike, so failed items can be piped straight back in for retry.
+- The rate limiter was disposed on a timer while live clients still held it, so any Set-MgxOption call left Enable-MgxResilience sessions throwing ObjectDisposedException minutes later. It is now retired by dropping the reference rather than disposed.
+- Enable-MgxResilience and Disable-MgxResilience disposed the injected HTTP client synchronously, cancelling SDK requests still in flight. Restoring the SDK's own client already stops new traffic.
+- Sync-MgxDelta -Uri with a query string or trailing slash failed on the second run with a DeltaLinkPathMismatch error. The resource-path check now compares paths to paths.
+
+## 2.0.0
+
+### Breaking
+
+- Output shape changed for Invoke-MgxRequest, Invoke-MgxBatchRequest, Expand-MgxRelation, and Sync-MgxDelta to emit case-insensitive Hashtables instead of PSObjects, matching Invoke-MgGraphRequest output. Raw JSON output is still accessible via -Raw | ConvertFrom-Json.
+- Preserved @odata.type verbatim under its own key for read-modify-write round-trips while stripping all other @odata.- transport metadata (including @odata.etag to prevent phantom drift in state comparisons).
+- Removed custom Graph entity format views (Mgx.User, Mgx.Group, Mgx.Application, Mgx.ServicePrincipal, Mgx.DirectoryRole, Mgx.BatchResult) since dictionaries render using PowerShell's built-in Name/Value view.
+- Lowered the platform floor to target .NET 8, adding support for PowerShell 7.4 (LTS) and later (down from 7.5). Replaced the .NET 9 API in the -Debug tracer with a WaitAsync equivalent.
+- Removed Microsoft.Graph.Authentication from RequiredModules to decouple the module from the full Graph SDK. Cmdlets needing authentication now report a GraphAuthModuleNotLoaded error with installation instructions if the module is missing.
+
+### Fixed
+
+- Action endpoints returning collection envelopes (e.g., /directoryObjects/getByIds) now correctly unwrap and emit individual items across all response paths, including fan-out bulk writes, with truncation warnings if @odata.nextLink is present.
+- Fan-out requests piped to endpoints like '/users/{id}' now extract id members from both Hashtables and PSCustomObjects, throwing a MissingPipelineId error if neither is found instead of embedding literal type names in the URL.
+- Invoke-MgxBatchRequest now parses input items from both Hashtables and PSCustomObjects, enabling failed items to be piped directly back in for retries.
 
 ### Changed
 
-- Polly.Core 8.7.0 and System.Threading.RateLimiting 10.0.10.
+- Updated dependencies to Polly.Core 8.7.0 and System.Threading.RateLimiting 10.0.10.
 
 ## 1.0.5
 

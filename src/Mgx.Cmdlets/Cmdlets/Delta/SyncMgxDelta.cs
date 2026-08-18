@@ -211,9 +211,14 @@ public class SyncMgxDelta : MgxCmdletBase
             // Resource path validation: verify the deltaLink's path contains the expected
             // resource. Prevents a tampered delta file from redirecting queries to a different
             // Graph resource (e.g., /me/messages instead of /users/delta).
-            var expectedPath = NormalizePath(Uri); // e.g., "/users/delta"
+            // Compare paths to paths. NormalizePath keeps any query, while AbsolutePath never
+            // has one, so "/users/delta?$select=id" - the shape Microsoft's delta docs show -
+            // guaranteed a mismatch: run 1 saved state, run 2 died with a SecurityError accusing
+            // that state file of tampering. A trailing slash failed identically.
+            var expectedPath = NormalizePath(Uri).Split('?')[0].TrimEnd('/');
             if (System.Uri.TryCreate(validated, UriKind.Absolute, out var parsedDelta)
-                && !parsedDelta.AbsolutePath.Contains(expectedPath, StringComparison.OrdinalIgnoreCase))
+                && !parsedDelta.AbsolutePath.TrimEnd('/')
+                        .Contains(expectedPath, StringComparison.OrdinalIgnoreCase))
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new InvalidOperationException(

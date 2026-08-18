@@ -214,7 +214,7 @@ public class ConfigurableOptionsTests
     }
 
     [Fact]
-    public async Task GetOrCreate_DisposesOldRateLimiter_AfterDelay()
+    public async Task GetOrCreate_LeavesTheOldRateLimiterUsable()
     {
         ResiliencePipelineFactory.Reset();
 
@@ -246,14 +246,22 @@ public class ConfigurableOptionsTests
         // Wait for delayed dispose to fire (TotalTimeoutSeconds + buffer)
         await Task.Delay(TimeSpan.FromSeconds(3.5));
 
-        // Now the old limiter should be disposed
-        Assert.Throws<ObjectDisposedException>(() => rateLimiter1.AttemptAcquire());
+        // The old limiter must STILL work. This test previously asserted the opposite, and in
+        // doing so pinned a defect: every ResilientGraphClient built from a limiter captures it
+        // as a readonly field, and the handler Enable-MgxResilience injects into the SDK is not
+        // rebuilt when options change. Disposing on a timer meant any Set-MgxOption call left
+        // SDK cmdlets throwing ObjectDisposedException minutes later. Retirement is now dropping
+        // the reference, so holders keep working and the instance is collected when they let go.
+        using (var stillWorks = rateLimiter1.AttemptAcquire())
+        {
+            Assert.NotNull(stillWorks);
+        }
 
         ResiliencePipelineFactory.Reset();
     }
 
     [Fact]
-    public async Task Reset_DisposesOldRateLimiter_AfterDelay()
+    public async Task Reset_LeavesTheOldRateLimiterUsable()
     {
         ResiliencePipelineFactory.Reset();
 
@@ -275,8 +283,12 @@ public class ConfigurableOptionsTests
         // Wait for dispose
         await Task.Delay(TimeSpan.FromSeconds(3.5));
 
-        // Now disposed
-        Assert.Throws<ObjectDisposedException>(() => rateLimiter.AttemptAcquire());
+        // Still usable after Reset, for the same reason as the GetOrCreate case above: in-flight
+        // clients hold this instance and disposing it would break them mid-request.
+        using (var stillWorks = rateLimiter.AttemptAcquire())
+        {
+            Assert.NotNull(stillWorks);
+        }
 
         ResiliencePipelineFactory.Reset();
     }

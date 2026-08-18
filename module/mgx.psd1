@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '2.0.0'
+    ModuleVersion     = '2.0.1'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -51,6 +51,13 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
+v2.0.1
+Patch release. Three fixes for defects that break live sessions; no feature or API changes.
+
+- The rate limiter was disposed on a timer while live clients still held it. Any Set-MgxOption call left every Enable-MgxResilience session throwing ObjectDisposedException minutes later, recoverable only by disabling and re-enabling resilience. The delay came from TotalTimeoutSeconds, a per-request timeout used as a resource lifetime.
+- Enable-MgxResilience and Disable-MgxResilience disposed the injected HTTP client synchronously, cancelling SDK requests that were still in flight - including a paged read running when the user disabled resilience. Re-injection is not always user-initiated: an identity change triggers it, and the check compares the auth context by instance, so a same-tenant Connect-MgGraph re-run is enough.
+- Sync-MgxDelta -Uri with a query string broke incremental sync. The resource-path check compared a value that keeps the query against one that never has it, so the first run succeeded and saved state while the second terminated with a SecurityError accusing that state file of tampering. "/users/delta?$select=id" is the shape Microsoft's delta documentation shows.
+
 v2.0.0
 Breaking release. Output shape changes to Hashtable; the floor moves DOWN to PowerShell 7.4.
 Incorporates the breaking work contributed in the Microsoft365DSC fork by Fabien Tschanz.

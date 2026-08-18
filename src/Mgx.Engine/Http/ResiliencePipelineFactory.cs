@@ -51,7 +51,18 @@ public static class ResiliencePipelineFactory
             // Schedule delayed disposal of the old rate limiter. It may still be
             // referenced by in-flight ResilientGraphClient instances, so we wait
             // TotalTimeoutSeconds to ensure all in-flight requests have completed.
-            ScheduleDelayedDispose(s_rateLimiter, options.TotalTimeoutSeconds);
+            // Not disposed. The limiter is captured as a readonly field by every
+            // ResilientGraphClient already built from it, and by the handler
+            // Enable-MgxResilience injects into the SDK - and that handler is not rebuilt when
+            // options change. Disposing on a timer therefore broke live sessions: any
+            // Set-MgxOption call left every SDK cmdlet throwing "Cannot access a disposed
+            // object. Object name: 'TokenBucketRateLimiter'" once the delay elapsed, recoverable
+            // only by Disable-MgxResilience; Enable-MgxResilience.
+            //
+            // The delay was TotalTimeoutSeconds - a per-REQUEST timeout used as a resource
+            // lifetime. No such bound is correct: a client may hold its limiter for a multi-hour
+            // export. Dropping the reference is enough; the limiter owns no unmanaged handle and
+            // its replenishment timer is rooted only by the limiter itself.
 
             TokenBucketRateLimiter? rateLimiter = null;
             if (!options.NoRateLimit)
@@ -86,7 +97,7 @@ public static class ResiliencePipelineFactory
             s_pipeline = null;
             // Dispose after delay: in-flight clients may still reference the old limiter.
             // Default 300s covers the maximum total timeout window.
-            ScheduleDelayedDispose(s_rateLimiter, s_cachedOptions?.TotalTimeoutSeconds ?? 300);
+            // Not disposed, for the reason documented in GetOrCreate.
             s_rateLimiter = null;
             s_cachedOptions = null;
         }
@@ -98,14 +109,6 @@ public static class ResiliencePipelineFactory
     /// cause ObjectDisposedException in in-flight clients, so we wait for the total
     /// timeout window to expire before disposing.
     /// </summary>
-    private static void ScheduleDelayedDispose(TokenBucketRateLimiter? limiter, int delaySeconds)
-    {
-        if (limiter == null) return;
-        _ = Task.Delay(TimeSpan.FromSeconds(delaySeconds)).ContinueWith(_ =>
-        {
-            try { limiter.Dispose(); } catch { /* best-effort cleanup */ }
-        }, TaskScheduler.Default);
-    }
 
     private static ResiliencePipeline<HttpResponseMessage> BuildPipeline(ResilientGraphClientOptions options)
     {

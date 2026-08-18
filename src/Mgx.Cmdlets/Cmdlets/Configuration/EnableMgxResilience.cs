@@ -94,7 +94,11 @@ public class EnableMgxResilience : PSCmdlet
                 // Our client was replaced (e.g., by Connect-MgGraph or Set-MgRequestContext).
                 // Dispose the old wrapped client to release its handler chain and sockets.
                 WriteVerbose("MgxResilience was reset by SDK. Re-injecting resilience...");
-                ResilientSdkClient?.Dispose();
+                // Not disposed: HttpClient.Dispose cancels its pending-request token source and
+                // the bridge handler forwards that token inward, so SDK requests already in
+                // flight die. Restoring GraphSession.GraphHttpClient stops new traffic; the old
+                // client is collected once the requests still using it finish.
+                _ = ResilientSdkClient;
                 ResilientSdkClient = null;
                 // Reset circuit breaker / rate limiter state from the previous tenant
                 ResiliencePipelineFactory.Reset();
@@ -196,7 +200,8 @@ public class EnableMgxResilience : PSCmdlet
                 currentClient = null;
             }
 
-            ResilientSdkClient?.Dispose();
+            // Not disposed - see the note above; in-flight SDK requests would be cancelled.
+            _ = ResilientSdkClient;
             ResilientSdkClient = null;
             ActiveHandler = null;
             OriginalSdkClient = null;

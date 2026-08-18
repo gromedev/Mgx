@@ -83,7 +83,10 @@ public class DisableMgxResilience : PSCmdlet
             EnableMgxResilience.IsEnabled = false;
             EnableMgxResilience.OriginalSdkClient = null;
             EnableMgxResilience.ResilientSdkClient = null;
-            resilientClient?.Dispose();
+            // Not disposed. Restoring GraphSession.GraphHttpClient already stops new traffic;
+            // disposing would cancel SDK requests still in flight - a paged read running when the
+            // user types Disable-MgxResilience would die mid-enumeration rather than finish.
+            _ = resilientClient;
 
             WriteVerbose("MgxResilience disabled. SDK cmdlets restored to original behavior.");
         }

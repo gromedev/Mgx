@@ -111,7 +111,24 @@ jobs:
         shell: pwsh
         run: ./build.ps1 -Configuration Release
 
+      # Written to a file and invoked with -File rather than passed to -Command. The previous
+      # form nested a double-quoted PowerShell command inside a YAML run block and escaped its
+      # dollars as \$, which is bash escaping - PowerShell uses a backtick. This step is also the
+      # only one in the job that omitted `shell: pwsh`, so the backslashes reached the inner
+      # pwsh literally and it died with "The term '\$r.FailedCount' is not recognized" before a
+      # single test ran. Every leg of this matrix had been failing that way since 2.0.0, so the
+      # 7.4 floor was never actually verified despite the job appearing to test it.
       - name: Import and run surface tests on ${{ matrix.psversion }}
+        shell: pwsh
         run: |
-          pwsh -NoProfile -Command "@(\$PSVersionTable.PSVersion.ToString()) | Write-Host"
-          pwsh -NoProfile -Command "Install-PSResource -Name Pester -TrustRepository -Scope CurrentUser; Import-Module ./module/mgx.psd1 -ErrorAction Stop; \$r = Invoke-Pester -Path ./tests/Unit -PassThru; if (\$r.FailedCount -gt 0) { throw \"\$(\$r.FailedCount) failed on PowerShell ${{ matrix.psversion }}\" }"
+          $probe = @'
+          "running on PowerShell $($PSVersionTable.PSVersion.ToString())" | Write-Host
+          Install-PSResource -Name Pester -TrustRepository -Scope CurrentUser
+          Import-Module ./module/mgx.psd1 -ErrorAction Stop
+          $r = Invoke-Pester -Path ./tests/Unit -PassThru
+          "$($r.PassedCount) passed, $($r.FailedCount) failed" | Write-Host
+          if ($r.FailedCount -gt 0) { throw "$($r.FailedCount) test(s) failed" }
+          '@
+          Set-Content -Path compat-surface-tests.ps1 -Value $probe -Encoding utf8
+          pwsh -NoProfile -File ./compat-surface-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "surface tests failed on PowerShell ${{ matrix.psversion }}" }
