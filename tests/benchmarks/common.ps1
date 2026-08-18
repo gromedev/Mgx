@@ -215,8 +215,36 @@ function Write-BenchResult {
     $file = Join-Path $dir "$Benchmark.json"
     $entries = @()
     if (Test-Path $file) { $entries = @(Get-Content $file -Raw | ConvertFrom-Json) }
+    # Resource units are the currency Graph actually throttles directory workloads in, so a
+    # benchmark that records only wall time describes half the cost. Captured from session
+    # telemetry, which accumulates x-ms-resource-unit across every response.
+    $telemetry = $null
+    try {
+        $t = Get-MgxTelemetry -ErrorAction Stop
+        $telemetry = [pscustomobject]@{
+            ResourceUnits    = $t.ResourceUnitsConsumed
+            TotalRequests    = $t.TotalRequests
+            Succeeded        = $t.Succeeded
+            Failed           = $t.Failed
+            ThrottleRetries  = $t.ThrottleRetries
+            OtherRetries     = $t.OtherRetries
+            PacingWaitMs     = $t.AdaptivePacingWaitMs
+            PacingActivations= $t.AdaptivePacingActivations
+            RateLimiterWaitMs= $t.RateLimiterWaitMs
+            RuPerRequest     = $(if ($t.TotalRequests -gt 0) {
+                                    [math]::Round($t.ResourceUnitsConsumed / $t.TotalRequests, 2)
+                                } else { 0 })
+        }
+    }
+    catch {
+        # A benchmark that does not load Mgx (the bare-SDK comparison arms) has no telemetry.
+        # That is expected; record its absence rather than failing the run.
+        $telemetry = $null
+    }
+
     $meta = [pscustomobject]@{
         Result     = $Result
+        Telemetry  = $telemetry
         MgxVersion = (Get-Module Mgx -ErrorAction SilentlyContinue)?.Version?.ToString()
         SdkVersion = (Get-Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue)?.Version?.ToString()
         PSVersion  = $PSVersionTable.PSVersion.ToString()

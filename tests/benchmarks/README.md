@@ -2,6 +2,18 @@
 
 Reproduces every number in the main README's Benchmarks section. Each script is self-contained; `run.ps1` runs the full suite and regenerates the README tables.
 
+## Resource units
+
+Every result now carries a `Telemetry` block alongside the timing: resource units consumed,
+request counts, throttle retries, and pacing waits. Wall time alone describes half the cost -
+Graph throttles directory workloads on a resource-unit budget, so two runs with identical
+durations can sit very differently against that budget.
+
+`RuPerRequest` is the figure to watch when comparing query shapes: adding `$select` measurably
+lowers it. Arms that do not load Mgx (the bare-SDK comparisons) record `Telemetry: null`, since
+there is no session telemetry to read - expected, not a failure.
+
+
 ## Prerequisites
 
 - PowerShell 7.5+, `Microsoft.Graph.Authentication`, `Microsoft.Graph.Users`

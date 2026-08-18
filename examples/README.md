@@ -69,6 +69,10 @@ Connect-MgGraph -Scopes "User.Read.All", "Group.Read.All"   # adjust scopes per 
 | [11-beta-endpoint.ps1](11-beta-endpoint.ps1) | Access beta endpoints without installing extra modules | `User.Read.All` |
 | [18-tune-rate-limits.ps1](18-tune-rate-limits.ps1) | Tune rate limiter, retry count, and timeouts at runtime | `User.Read.All` |
 | [23-benchmark-resilience.ps1](23-benchmark-resilience.ps1) | Benchmark: bare SDK vs MgxResilience vs Invoke-MgxRequest vs Export | `User.Read.All` |
+| [24-drive-delta-resumable.ps1](24-drive-delta-resumable.ps1) | Resumable OneDrive/SharePoint delta sync with checkpointing | `Files.Read.All` |
+| [25-partial-content-hash.ps1](25-partial-content-hash.ps1) | Identify files by hashing a byte range instead of downloading them whole | `Files.Read.All` |
+| [26-tenant-change-feed.ps1](26-tenant-change-feed.ps1) | A resumable tenant-wide change feed, baselined with `-Latest` | `Group.Read.All`, `Application.Read.All` |
+| [27-resource-unit-budgeting.ps1](27-resource-unit-budgeting.ps1) | Measure what query shapes cost in resource units, and size a fan-out from the measurement | `Group.Read.All`, `User.Read.All` |
 
 ## Cmdlet Coverage
 
@@ -80,10 +84,11 @@ Every Mgx cmdlet is demonstrated in at least one script:
 | `Invoke-MgxBatchRequest` | 06, 09, 22 |
 | `Export-MgxCollection` | 02, 08, 23 |
 | `Expand-MgxRelation` | 07, 19 |
-| `Sync-MgxDelta` | 05 |
+| `Sync-MgxDelta` | 05, 24, 26 |
 | `Enable-MgxResilience` | 04, 21, 23 |
 | `Disable-MgxResilience` | 21 |
 | `Get-MgxResilience` | 21 |
 | `Set-MgxOption` | 18 |
 | `Get-MgxOption` | 18 |
-| `Get-MgxTelemetry` | 10, 23 |
+| `Get-MgxTelemetry` | 10, 23, 27 |
+| `Get-MgxContent` | 25 |

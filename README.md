@@ -19,7 +19,7 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 ## Key Capabilities
 
 * **Performance:** Streaming pagination, concurrent fan-out, and batched writes of up to 20 sub-requests per HTTP call.
-* **Resilience:** Proactive rate limiting, exponential backoff with jitter, circuit breakers, adaptive write pacing, body-read timeouts, and connection recycling.
+* **Resilience:** Proactive rate limiting, exponential backoff with jitter, circuit breakers, adaptive per-workload request pacing, body-read timeouts, and connection recycling.
 * **Operations:** Streamed JSONL exports with checkpoint/resume, delta sync token management, and resilience injection for existing Graph SDK scripts through `Enable-MgxResilience`.
 * **Observability:** Execution metrics via `Get-MgxTelemetry`, including HTTP timing, throttle waits, retries, and resource consumption.
 
@@ -27,7 +27,7 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 
 ## Benchmarks
 
-> **Environment:** Entra ID test tenant with 100k users, 15.4k groups, and 705 service principals. PowerShell 7.4 with Microsoft.Graph SDK 2.34.
+> **Environment:** Entra ID test tenant with 100k users, 15.4k groups, and 705 service principals. PowerShell 7.5.4 with Microsoft.Graph SDK 2.34; the batch-create run and one kill-resume run used 7.6.4. The module's supported floor is 7.4, but these figures were not measured there.
 
 ### Performance & Throughput
 
@@ -51,7 +51,7 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 * **Bare SDK:** Completed **1,000 / 1,000** in **211.7s**.
 * **Naive REST:** Completed in **0.9s**, but silently dropped **180 items**.
 * **SDK + `Enable-MgxResilience`:** 100% completion with the same wall time as the bare SDK when no faults occur.
-* **Adaptive write pacing:** Dynamically adjusts throughput during throttling. In a 77,000-object seeding campaign, Mgx executed 3,710 requests with **0 lost objects** and **0 circuit-breaker trips**.
+* **Adaptive pacing:** Dynamically adjusts throughput during throttling, per workload, across every request. In a 77,000-object seeding campaign, Mgx executed 3,710 requests with **0 lost objects** and **0 circuit-breaker trips**.
 * **Connection recovery:** Per-request body-read timeouts and periodic connection recycling prevent long-running operations from remaining stuck on dead sockets.
 
 ### Memory Efficiency & Recovery
@@ -196,7 +196,55 @@ All HTTP operations pass through four layered [Polly 8.x](https://github.com/App
 3. **Circuit breaker:** Opens when error rates exceed 10%, with a half-open probe after 15 seconds.
 4. **Timeout:** 30-second per-request limit and 300-second cumulative ceiling across retries.
 
-Batch writes additionally use an adaptive AIMD pacing engine to adjust throughput during throttling.
+### Resource units: what queries actually cost
+
+Graph throttles directory workloads on a **resource-unit budget**, not on request count or
+bandwidth. Mgx reads `x-ms-resource-unit` on every response and accumulates it, so
+`Get-MgxTelemetry` reports what a session actually spent - see
+[examples/27-resource-unit-budgeting.ps1](examples/27-resource-unit-budgeting.ps1).
+
+Measured against a 15,779-group test tenant:
+
+| Query shape | RU |
+|---|---|
+| `transitiveMembers?$top=5` | 4 |
+| `transitiveMembers?$top=5&$select=id` | **3** |
+| `groups/{id}` (single read) | 1 |
+
+Both figures match the [documented cost table](https://learn.microsoft.com/en-us/graph/throttling-limits)
+exactly: `transitiveMembers` is published at 5 RU, `$select` takes one off, and `$top` under 20
+takes another. Cost is a property of the query *shape*, not the number of objects returned. On a
+per-group fan-out across that tenant, `$select` alone is the difference between 47,337 and
+63,116 resource units.
+
+Three findings from pushing a single client until the tenant pushed back:
+
+- **The budget behaves like the documented token bucket.** The published limit for a tenant of
+  this size is 8,000 RU per 10 s per *application + tenant pair* (800 RU/s). A single client
+  sustained **882 RU/s with zero throttling** - about 10 % over, consistent with bucket burst
+  capacity draining - and the first 429s appeared around **1,200 RU/s**, roughly 50 % over.
+- **`x-ms-throttle-limit-percentage` was never emitted** - not at 1.5x the documented budget, and
+  not while the tenant was actively returning 429s. Mgx therefore treats it as opportunistic and
+  paces on 429 + `Retry-After` and latency drift, which are reliable.
+- **Batching does not buy cheaper units.** Unbatched requests sustained a *higher* RU/s before
+  throttling than the same requests inside `$batch`. Batching saves round-trips, not budget.
+
+Limits are scoped per **application + tenant pair**, and separately per service - Intune, Excel,
+Education and the rest each carry their own quota. That is why pacing state is partitioned by
+workload rather than pooled: a throttled directory fan-out says nothing about the budget
+remaining for Teams.
+
+A failed request costs 0 RU - so a fan-out that fails uniformly consumes no budget, triggers no
+throttling, and finishes fast while measuring nothing. Check status codes, not duration.
+
+Ahead of those four, an **adaptive pacing gate** spaces requests before they are sent. It is on by
+default and applies to *every* request, on both the `Invoke-Mgx*` path and the
+`Enable-MgxResilience` SDK-bridge path. It learns a per-workload rate from throttling signals
+(additive increase, multiplicative decrease), keeps Drive, Directory and other workloads in
+separate buckets so one throttled workload does not slow the rest, and starts conservatively on
+a cold session. Batch outer POSTs are the one exemption - `GraphBatchClient` runs its own
+item-level AIMD, and stacking two controllers on one workload would compound their backoff.
+Disable with `Set-MgxOption -NoAdaptivePacing`; inspect the learned state in `Get-MgxTelemetry`.
 
 ---
 
