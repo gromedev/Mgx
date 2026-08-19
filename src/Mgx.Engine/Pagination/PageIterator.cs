@@ -119,7 +119,7 @@ public sealed class PageIterator
                     yield break;
             }
 
-            nextLink = NextLinkValidator.Validate(page.NextLink, expectedHost);
+            nextLink = NextLinkValidator.ValidateOrThrow(page.NextLink, expectedHost);
             isFirstPage = false;
 
             onPageComplete?.Invoke(new PageCompletedInfo(nextLink));

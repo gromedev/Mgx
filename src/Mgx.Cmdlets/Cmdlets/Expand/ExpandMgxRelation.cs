@@ -221,7 +221,7 @@ public class ExpandMgxRelation : MgxCmdletBase
                         ? nl.GetString() : null;
                     Uri? expectedHost = System.Uri.TryCreate(url, UriKind.Absolute, out var parsed)
                         ? parsed : null;
-                    nextLink = NextLinkValidator.Validate(nextLink, expectedHost);
+                    nextLink = NextLinkValidator.ValidateOrThrow(nextLink, expectedHost);
 
                     int consecutiveEmptyPages = 0;
                     while (nextLink != null)
@@ -248,7 +248,7 @@ public class ExpandMgxRelation : MgxCmdletBase
                             break;
                         }
 
-                        nextLink = NextLinkValidator.Validate(page.NextLink, expectedHost);
+                        nextLink = NextLinkValidator.ValidateOrThrow(page.NextLink, expectedHost);
                     }
 
                     results[url] = items.ToArray();

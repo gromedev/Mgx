@@ -25,12 +25,16 @@ public class SsrfValidationTests
         var iterator = new PageIterator(client);
 
         var items = new List<JsonElement>();
-        await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            items.Add(item);
-        }
+            await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+            {
+                items.Add(item);
+            }
+        });
 
-        // Should get page 1 items but NOT follow the malicious nextLink
+        // Page 1 is still delivered and the malicious nextLink is never fetched - but the
+        // caller is told the collection is incomplete rather than left to assume it is whole.
         Assert.Single(items);
         Assert.Equal(1, handler.RequestCount); // Only initial request, no second page fetch
     }
@@ -52,13 +56,16 @@ public class SsrfValidationTests
         var iterator = new PageIterator(client);
 
         var items = new List<JsonElement>();
-        await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            items.Add(item);
-        }
+            await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+            {
+                items.Add(item);
+            }
+        });
 
-        Assert.Single(items);
-        Assert.Equal(1, handler.RequestCount);
+        Assert.Single(items);                   // page 1 was still delivered
+        Assert.Equal(1, handler.RequestCount);  // and the refused link was never fetched
     }
 
     [Fact]
@@ -78,13 +85,16 @@ public class SsrfValidationTests
         var iterator = new PageIterator(client);
 
         var items = new List<JsonElement>();
-        await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            items.Add(item);
-        }
+            await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+            {
+                items.Add(item);
+            }
+        });
 
-        Assert.Single(items);
-        Assert.Equal(1, handler.RequestCount);
+        Assert.Single(items);                   // page 1 was still delivered
+        Assert.Equal(1, handler.RequestCount);  // and the refused link was never fetched
     }
 
     [Fact]
@@ -137,9 +147,11 @@ public class SsrfValidationTests
         var result = await fanOut.FetchAllAsync(
             ["https://graph.microsoft.com/v1.0/groups/g1/members"]);
 
-        // Should get page 1 items but NOT follow the malicious nextLink
-        Assert.True(result.Results.ContainsKey("https://graph.microsoft.com/v1.0/groups/g1/members"));
-        Assert.Single(result.Results["https://graph.microsoft.com/v1.0/groups/g1/members"]);
+        // The refused link is reported against its own URL instead of silently yielding a
+        // partial member list. Other URLs in the same fan-out are unaffected.
+        Assert.False(result.Results.ContainsKey("https://graph.microsoft.com/v1.0/groups/g1/members"));
+        Assert.True(result.Errors.ContainsKey("https://graph.microsoft.com/v1.0/groups/g1/members"));
+        Assert.IsType<InvalidOperationException>(result.Errors["https://graph.microsoft.com/v1.0/groups/g1/members"]);
         Assert.Equal(1, handler.RequestCount);
     }
 
@@ -161,7 +173,8 @@ public class SsrfValidationTests
         var result = await fanOut.FetchAllAsync(
             ["https://graph.microsoft.com/v1.0/groups/g1/members"]);
 
-        Assert.Single(result.Results["https://graph.microsoft.com/v1.0/groups/g1/members"]);
+        Assert.False(result.Results.ContainsKey("https://graph.microsoft.com/v1.0/groups/g1/members"));
+        Assert.IsType<InvalidOperationException>(result.Errors["https://graph.microsoft.com/v1.0/groups/g1/members"]);
         Assert.Equal(1, handler.RequestCount);
     }
 
@@ -183,7 +196,8 @@ public class SsrfValidationTests
         var result = await fanOut.FetchAllAsync(
             ["https://graph.microsoft.com/v1.0/groups/g1/members"]);
 
-        Assert.Single(result.Results["https://graph.microsoft.com/v1.0/groups/g1/members"]);
+        Assert.False(result.Results.ContainsKey("https://graph.microsoft.com/v1.0/groups/g1/members"));
+        Assert.IsType<InvalidOperationException>(result.Errors["https://graph.microsoft.com/v1.0/groups/g1/members"]);
         Assert.Equal(1, handler.RequestCount);
     }
 
@@ -265,12 +279,15 @@ public class SsrfValidationTests
         var iterator = new PageIterator(client);
 
         var items = new List<JsonElement>();
-        await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            items.Add(item);
-        }
+            await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+            {
+                items.Add(item);
+            }
+        });
 
-        Assert.Single(items);
-        Assert.Equal(1, handler.RequestCount);
+        Assert.Single(items);                   // page 1 was still delivered
+        Assert.Equal(1, handler.RequestCount);  // and the refused link was never fetched
     }
 }

@@ -151,4 +151,38 @@ public class PaginationTests
             Assert.Equal("eventual", req.Headers.GetValues("ConsistencyLevel").First());
         }
     }
+
+    [Fact]
+    public async Task PageIterator_RejectedNextLink_Throws_RatherThanTruncatingSilently()
+    {
+        // A nextLink that fails validation is indistinguishable, at the loop level, from "no
+        // more pages" - both leave the validator returning null. Ending the iteration quietly
+        // hands the caller a partial collection and exit code 0, which is the failure mode the
+        // validator exists to prevent: against a response that is actually hostile, silence
+        // lets the sender truncate the result set and never be noticed.
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, """
+        {
+            "value": [
+                {"id": "user1", "displayName": "User One"},
+                {"id": "user2", "displayName": "User Two"}
+            ],
+            "@odata.nextLink": "https://evil.example.com/v1.0/users?$skiptoken=page2"
+        }
+        """);
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new ResilientGraphClient(httpClient, new ResilientGraphClientOptions { NoRateLimit = true });
+        var iterator = new PageIterator(client);
+
+        var items = new List<JsonElement>();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var item in iterator.StreamAllWithCountAsync("https://graph.microsoft.com/v1.0/users", 0, null))
+                items.Add(item);
+        });
+
+        Assert.Contains("nextLink", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, items.Count); // the valid page is still delivered before the failure
+    }
 }
