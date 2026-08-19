@@ -32,16 +32,24 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 
 ### Performance & Throughput
 
-| Operation                             |        Mgx | SDK (`Get-MgUser`) | Raw REST (`Invoke-RestMethod`) | Speedup vs SDK | Resource units |
-| ------------------------------------- | ---------: | -----------------: | -----------------------------: | -------------: | -------------: |
-| **List 100,000 users**                |  **47.1s** |             53.2s¹ |                         58.5s |          1.1× |         ~102 |
-| **Look up 5,000 users by ID**         |  **98.8s** |             521.0s |                        985.3s |      **5.3×** |       ~5,002 |
-| **User report** *(1k users + groups)* |  **23.9s** |             107.9s |                        205.8s |      **4.5×** |       ~2,003 |
-| **Full delta enumeration** *(130,233 items)* | **145.6s** |                  - |                             - |             - |            - |
+| Operation                             |        Mgx | SDK (`Get-MgUser`) | Raw REST (`Invoke-RestMethod`) | Speedup vs SDK |
+| ------------------------------------- | ---------: | -----------------: | -----------------------------: | -------------: |
+| **List 100,000 users**                |  **47.1s** |             53.2s¹ |                          58.5s |           1.1× |
+| **Look up 5,000 users by ID**         |  **98.8s** |             521.0s |                         985.3s |       **5.3×** |
+| **User report** *(1k users + groups)* |  **23.9s** |             107.9s |                         205.8s |       **4.5×** |
+| **Full delta enumeration** *(130,233 items)* | **145.6s** |              - |                              - |              - |
 
 <sup>¹ Both figures are the SDK at `-PageSize 999`, which is what the benchmark runs. At the SDK's *default* 100-item page size the same enumeration takes roughly ten times as long — the practical difference is that mgx needs no tuning to be fast, not that it out-runs a tuned SDK on plain enumeration.</sup>
 
-<sup>Resource units are per single operation, measured from `x-ms-resource-unit`, and are a property of the query shape rather than the client. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table exactly. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity & Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
+Graph charges resource units per request, by the shape of the query rather than by which client
+sent it - so every column above spends the same: about 102 units for the enumeration, 5,002 for
+the lookups, 2,003 for the report. That equality holds only because all three issue equivalent
+requests - the page size noted above changes the request count, and the cost with it.
+What mgx adds is not a cheaper request but a visible one: it accumulates `x-ms-resource-unit`
+across the session and paces against the budget they are charged to. See
+[Resource units: what queries actually cost](#resource-units-what-queries-actually-cost).
+
+<sup>Measured from `x-ms-resource-unit`. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table exactly. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity & Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
 
 ### Resilience Under Faults & Throttling
 
