@@ -253,6 +253,49 @@ public class DeltaRecoveryTests
     }
 
     /// <summary>
+    /// The escape hatch the ignored--Latest warning names has to work: -FullSync discards the
+    /// enumeration outright, checkpoint included, so there is nothing left to protect and
+    /// re-baselining from now is exactly what was asked for.
+    /// </summary>
+    [Fact]
+    public void FullSync_with_Latest_still_baselines_from_now_despite_a_checkpoint()
+    {
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-recovery-{Guid.NewGuid():N}")).FullName;
+        var deltaPath = Path.Combine(dir, "state.json");
+        var checkpointPath = Path.Combine(dir, "run.checkpoint");
+        var outputPath = Path.Combine(dir, "out.jsonl");
+
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);
+        handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
+        handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
+        handler.QueueResponse(HttpStatusCode.OK,
+            """{"value":[],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=FROMNOW"}""");
+
+        InjectMock(handler);
+        try
+        {
+            Sync(deltaPath, checkpointPath, outputPath);
+            Assert.True(File.Exists(checkpointPath));
+
+            using (var ps = Shell())
+            {
+                ps.AddCommand("Sync-MgxDelta").AddParameter("Uri", "/users/delta")
+                  .AddParameter("DeltaPath", deltaPath).AddParameter("CheckpointPath", checkpointPath)
+                  .AddParameter("OutputFile", outputPath)
+                  .AddParameter("FullSync", true).AddParameter("Latest", true);
+                ps.Invoke();
+                Assert.DoesNotContain(ps.Streams.Warning, w => w.Message.Contains("-Latest ignored"));
+            }
+
+            Assert.Contains("$deltatoken=FROMNOW", DeltaState.Load(deltaPath)!.DeltaLink);
+            Assert.Contains("deltatoken=latest", handler.Requests[^1].RequestUri!.ToString());
+        }
+        finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
     /// A temp file carries no identity: TryAdoptOrphanedTemp globs "{output}.*.tmp", takes the
     /// newest, and checks only that it has enough lines. The Resource check added in 48ffe87
     /// validates the CHECKPOINT, so a CURRENT checkpoint plus a temp orphaned by an unrelated
