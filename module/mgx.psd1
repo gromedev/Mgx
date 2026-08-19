@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '2.0.1'
+    ModuleVersion     = '2.1.0'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -52,12 +52,38 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
-v2.0.1
-Patch release. Three fixes for defects that break live sessions; no feature or API changes.
+v2.1.0
+Adds proactive throttle avoidance, ranged content downloads, and resumable enumeration.
 
-- The rate limiter was disposed on a timer while live clients still held it. Any Set-MgxOption call left every Enable-MgxResilience session throwing ObjectDisposedException minutes later, recoverable only by disabling and re-enabling resilience. The delay came from TotalTimeoutSeconds, a per-request timeout used as a resource lifetime.
-- Enable-MgxResilience and Disable-MgxResilience disposed the injected HTTP client synchronously, cancelling SDK requests that were still in flight - including a paged read running when the user disabled resilience. Re-injection is not always user-initiated: an identity change triggers it, and the check compares the auth context by instance, so a same-tenant Connect-MgGraph re-run is enough.
-- Sync-MgxDelta -Uri with a query string broke incremental sync. The resource-path check compared a value that keeps the query against one that never has it, so the first run succeeded and saved state while the second terminated with a SecurityError accusing that state file of tampering. "/users/delta?$select=id" is the shape Microsoft's delta documentation shows.
+Added
+- Adaptive request pacing, on by default. Requests are spaced before they are sent, per workload; opt out with Set-MgxOption -NoAdaptivePacing.
+- Get-MgxContent, to download file and media content whole or by byte range (-First).
+- Sync-MgxDelta -CheckpointPath, to resume interrupted enumerations.
+- Sync-MgxDelta -Latest, to baseline state without enumerating.
+- Sync-MgxDelta -Prefer, to send drive delta Prefer tokens.
+- Resource units consumed, in telemetry output, benchmarks and examples.
+
+Fixed
+- -Latest was honoured after a state invalidation, dropping every change since the last sync.
+- Repeat 429s could raise the adaptive cap above -RateLimitPerSecond.
+- Delta state did not record its API version, so runs omitting -ApiVersion silently synced the other one.
+- -Debug wrote redirect Location headers verbatim, leaking pre-authenticated download URLs.
+- Get-MgxContent -OutFile with piped input downloaded every item but kept only the last.
+- -Offset was ignored when a server returned a whole-body 200.
+- An offset past end of file overwrote an existing -OutFile with an empty one.
+- Two-hop content downloads were reported as failed requests.
+- Adaptive pacing fired synchronized bursts when sleep times were clamped.
+- Enable-MgxResilience recorded no telemetry, reporting TotalRequests=0 and dividing by zero.
+- $batch envelopes were bucketed as Other rather than their target workload.
+- Slow start opened above ceilings set below 4 rps.
+- ResiliencePipelineFactory.Reset() reverted configuration and kept batch pacer state across credential changes.
+- Ctrl-C during file cleanup raised disposed-object errors.
+
+v2.0.1
+Patch release. Three fixes; no feature or API changes.
+- The rate limiter was disposed on a timer while live clients held it, so any Set-MgxOption call broke Enable-MgxResilience sessions minutes later.
+- Enable-MgxResilience and Disable-MgxResilience cancelled SDK requests still in flight.
+- Sync-MgxDelta -Uri with a query string or trailing slash failed on the second run.
 
 v2.0.0
 Breaking release. Output shape changes to Hashtable; the floor moves DOWN to PowerShell 7.4.
