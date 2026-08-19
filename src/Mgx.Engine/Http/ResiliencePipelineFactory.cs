@@ -106,6 +106,11 @@ public static class ResiliencePipelineFactory
             s_cachedOptions = null;
             // Learned pacing state describes the old tenant; clear it with the CB history.
             AdaptiveRequestPacer.Reset();
+            // GraphBatchClient keeps its own AIMD state in separate statics, so clearing the
+            // request pacer alone left the batch pacer describing the previous tenant: a fresh
+            // credential started at the throttled item rate learned elsewhere, and its first
+            // batch was additionally delayed by the old tenant's completion timestamp.
+            GraphBatchClient.ResetPacingState();
         }
     }
 

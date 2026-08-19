@@ -17,7 +17,16 @@ public enum WorkloadBucket
     Directory = 1,
 
     /// <summary>Everything else (Exchange, Teams, Intune, reports, ...).</summary>
-    Other = 2
+    Other = 2,
+
+    /// <summary>
+    /// $batch envelopes. Kept separate because GraphBatchClient governs batch throughput with
+    /// its own item-level AIMD: a batch 429 landing in Other capped unrelated Exchange, Teams
+    /// and Intune traffic on evidence that had nothing to do with them, while the workload the
+    /// batch actually addressed went untouched. Measured budget isolation is per tenant and app
+    /// identity, so mixing signals across workloads discards real information.
+    /// </summary>
+    Batch = 3
 }
 
 /// <summary>
@@ -29,7 +38,7 @@ public enum WorkloadBucket
 /// </summary>
 public static class AdaptivePacing
 {
-    internal const int WorkloadBucketCount = 3;
+    internal const int WorkloadBucketCount = 4;
 
     /// <summary>Floor for any adapted rate. Halving without a floor would eventually reach
     /// zero, which disables pacing entirely - the opposite of what a throttled tenant needs.</summary>
@@ -117,6 +126,15 @@ public static class AdaptivePacing
         }
 
         if (segments.Length <= start) return WorkloadBucket.Other;
+
+        // $batch before anything else: the envelope's own URL says nothing about the workloads
+        // inside it, and guessing from the first inner operation would be worse than admitting
+        // the envelope is its own thing.
+        for (var i = start; i < segments.Length; i++)
+        {
+            if (segments[i].Equals("$batch", StringComparison.OrdinalIgnoreCase))
+                return WorkloadBucket.Batch;
+        }
 
         for (var i = start; i < segments.Length; i++)
         {

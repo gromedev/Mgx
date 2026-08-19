@@ -51,6 +51,13 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
         context.Properties.Set(ResiliencePipelineFactory.VerboseWriterKey,
             (Action<string>)(msg => _pendingVerbose.Enqueue(msg)));
         var bucket = AdaptivePacing.Classify(request.RequestUri?.ToString());
+        // Telemetry parity with ResilientGraphClient.SendAsync. Without it an
+        // Enable-MgxResilience session reported TotalRequests=0 alongside a non-zero retry
+        // count - self-contradictory, and a divide-by-zero for the throttle-rate calculation
+        // the Get-MgxTelemetry help tells users to compute.
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
+        var succeeded = false;
+        var recorded = false;
         try
         {
             // Same proactive gate as ResilientGraphClient.SendAsync. This is the
@@ -109,10 +116,26 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
             // not recorded on this path: timing here would include retry delays inside
             // ExecuteAsync, which would pollute the network-time baseline.
             AdaptiveRequestPacer.RecordResponse(bucket, result);
+
+            // A 3xx is an error on this path: the SDK bridge does not follow redirects itself
+            // and every caller surfaces them, so only 2xx counts as success here.
+            succeeded = result.IsSuccessStatusCode;
+            if (result.Headers.TryGetValues("x-ms-resource-unit", out var ruValues)
+                && long.TryParse(System.Linq.Enumerable.FirstOrDefault(ruValues), out var ru)
+                && ru > 0)
+            {
+                MgxTelemetryCollector.Current.RecordResourceUnit(ru);
+            }
             return result;
         }
         finally
         {
+            if (!recorded)
+            {
+                recorded = true;
+                totalSw.Stop();
+                MgxTelemetryCollector.Current.RecordRequest(succeeded, totalSw.ElapsedMilliseconds);
+            }
             // Drain buffered verbose messages on the calling thread
             if (VerboseWriter != null)
             {

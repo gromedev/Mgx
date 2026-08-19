@@ -144,7 +144,6 @@ public class AdaptivePacingTests
     [InlineData("/me/photo/$value")]
     [InlineData("/teams/abc/channels/xyz/messages/delta")]
     [InlineData("/deviceManagement/managedDevices")]
-    [InlineData("/$batch")]
     [InlineData("/mailFolders('inbox')/messages/delta")]
     [InlineData("")]
     [InlineData("not a uri at all")]
@@ -154,4 +153,17 @@ public class AdaptivePacingTests
     [Fact]
     public void Classify_null_is_other() =>
         Assert.Equal(WorkloadBucket.Other, AdaptivePacing.Classify(null));
+
+    [Theory]
+    [InlineData("/$batch")]
+    [InlineData("https://graph.microsoft.com/v1.0/$batch")]
+    [InlineData("/beta/$batch")]
+    public void Classify_batch_envelopes_get_their_own_bucket(string uri)
+    {
+        // A $batch envelope says nothing about the workloads inside it. Filing it under Other
+        // meant a batch 429 capped unrelated Exchange, Teams and Intune traffic to the throttled
+        // entry rate on evidence that had nothing to do with them, while the workload the batch
+        // actually addressed was left untouched - inverting the isolation the buckets exist for.
+        Assert.Equal(WorkloadBucket.Batch, AdaptivePacing.Classify(uri));
+    }
 }

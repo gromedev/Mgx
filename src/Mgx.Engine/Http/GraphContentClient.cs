@@ -142,9 +142,12 @@ public static class GraphContentClient
         // (they are short-lived), so re-run hop 1 once for a fresh one.
         for (var authAttempt = 0; ; authAttempt++)
         {
+            // redirectIsSuccess: this is the one caller that expects a 302 and follows it, so
+            // a redirect here is the documented success path, not a failed request.
             var hop1 = await graphClient.SendAsync(
                 HttpMethod.Get, requestUri, headers: requestHeaders,
-                cancellationToken: cancellationToken, traceResponseBody: false);
+                cancellationToken: cancellationToken, traceResponseBody: false,
+                redirectIsSuccess: true);
 
             if (hop1.IsSuccessStatusCode)
             {
@@ -345,9 +348,36 @@ public static class GraphContentClient
     /// </summary>
     public static async Task<long> CopyWithIdleTimeoutAsync(
         Stream source, Stream destination, long? maxBytes, TimeSpan idleTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, long skipBytes = 0)
     {
         var buffer = new byte[81920];
+
+        // Discard the bytes before the requested offset. Only reachable when a ranged request
+        // was answered with 200 and the whole body: the server ignored the offset, so it has to
+        // be honoured here instead. Without this, -Offset 1MB -Length 64KB returned bytes
+        // 0..65535 and reported success - the wrong bytes, silently, which is worse than an
+        // error because nothing downstream can tell.
+        long skipped = 0;
+        while (skipped < skipBytes)
+        {
+            var toSkip = (int)Math.Min(buffer.Length, skipBytes - skipped);
+            var r = await ReadWithIdleTimeoutAsync(source, buffer, toSkip, idleTimeout, cancellationToken);
+            if (r == 0)
+            {
+                // The body ended before the offset was reached, so the requested slice does not
+                // exist. Returning 0 was indistinguishable from a legitimately empty resource,
+                // and the -OutFile path does not inspect the count: it moved the empty temp over
+                // the destination, destroying an existing file and reporting success. Throwing
+                // is the only signal the caller can act on - its catch deletes the temp and
+                // rethrows, so the destination is left untouched, which is what the surrounding
+                // code already promises.
+                throw new InvalidOperationException(
+                    $"The content ended after {skipped:N0} bytes, before the requested offset of "
+                    + $"{skipBytes:N0}. The requested range does not exist in this resource.");
+            }
+            skipped += r;
+        }
+
         long total = 0;
         while (maxBytes == null || total < maxBytes.Value)
         {
@@ -355,19 +385,7 @@ public static class GraphContentClient
                 ? buffer.Length
                 : (int)Math.Min(buffer.Length, maxBytes.Value - total);
 
-            using var readCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            readCts.CancelAfter(idleTimeout);
-            int read;
-            try
-            {
-                read = await source.ReadAsync(buffer.AsMemory(0, toRead), readCts.Token);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                throw new HttpRequestException(
-                    $"Content download stalled: no data for {idleTimeout.TotalSeconds:F0}s.");
-            }
-
+            var read = await ReadWithIdleTimeoutAsync(source, buffer, toRead, idleTimeout, cancellationToken);
             if (read == 0) break;
             await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
             total += read;
@@ -376,5 +394,27 @@ public static class GraphContentClient
         if (total > 0)
             MgxTelemetryCollector.Current.RecordContentBytes(total);
         return total;
+    }
+
+    /// <summary>
+    /// One read, bounded by the idle timeout. A stalled body must not hang forever, and the
+    /// timeout applies per read rather than to the transfer as a whole so a slow-but-progressing
+    /// download is not killed.
+    /// </summary>
+    private static async Task<int> ReadWithIdleTimeoutAsync(
+        Stream source, byte[] buffer, int count, TimeSpan idleTimeout,
+        CancellationToken cancellationToken)
+    {
+        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        readCts.CancelAfter(idleTimeout);
+        try
+        {
+            return await source.ReadAsync(buffer.AsMemory(0, count), readCts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new HttpRequestException(
+                $"Content download stalled: no data for {idleTimeout.TotalSeconds:F0}s.");
+        }
     }
 }

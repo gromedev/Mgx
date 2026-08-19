@@ -142,7 +142,8 @@ public sealed class ResilientGraphClient : IDisposable
         CancellationToken cancellationToken = default,
         int permitCount = 1,
         bool paceGate = true,
-        bool traceResponseBody = true)
+        bool traceResponseBody = true,
+        bool redirectIsSuccess = false)
     {
         // Buffer content bytes before pipeline so retries reconstruct fresh HttpContent.
         // Snapshot ALL content headers (not just ContentType) to preserve
@@ -246,11 +247,14 @@ public sealed class ResilientGraphClient : IDisposable
                     return response;
                 },
                 context);
-            // A redirect is not a failure. Graph answers /content with a 302 to a
-            // pre-authenticated download host, so counting 3xx as failed made every
-            // successful two-hop download register as a failure in telemetry.
+            // A redirect counts as success only for the caller that expects one. Graph answers
+            // /content with a 302 to a pre-authenticated download host and GraphContentClient
+            // follows it, so booking that as a failure made every successful two-hop download
+            // register as failed. Every OTHER caller treats a 3xx as an error and throws -
+            // AllowAutoRedirect is off - so a blanket 3xx-is-success would book a request the
+            // user saw fail as succeeded. Hence the per-call flag rather than a status range.
             succeeded = result.IsSuccessStatusCode
-                || ((int)result.StatusCode >= 300 && (int)result.StatusCode < 400);
+                || (redirectIsSuccess && (int)result.StatusCode >= 300 && (int)result.StatusCode < 400);
 
             // Log throttle proximity and diagnostic headers to verbose.
             // These headers warn that requests are approaching throttle limits before 429s hit.

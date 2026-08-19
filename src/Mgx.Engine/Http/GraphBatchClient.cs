@@ -87,7 +87,10 @@ public sealed class GraphBatchClient
     private static bool HasWriteOperations(IReadOnlyList<BatchOperation> operations)
         => operations.Any(op => !string.Equals(op.Method, "GET", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Test-only: reset cross-call pacing state between tests.</summary>
+    /// <summary>
+    /// Clear cross-call batch pacing state. Called by ResiliencePipelineFactory.Reset when the
+    /// credential changes - this state is learned per tenant and must not outlive it.
+    /// </summary>
     internal static void ResetPacingState()
     {
         Interlocked.Exchange(ref s_lastBatchCompletedTicks, 0);

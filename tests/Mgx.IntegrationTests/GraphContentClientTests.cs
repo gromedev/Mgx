@@ -248,6 +248,88 @@ public class GraphContentClientTests : IDisposable
         Assert.Equal("full body", Encoding.UTF8.GetString(destination.ToArray()));
     }
 
+    [Fact]
+    public async Task Copy_honours_the_offset_when_the_server_ignored_range()
+    {
+        // The offset case of the test above. A server that answers a ranged request with 200
+        // and the whole body ignored the START of the range as well as its length, so the head
+        // must be discarded locally. Before this was handled, -Offset 5 -Length 4 returned
+        // "full" instead of "body" and reported success - silently wrong bytes.
+        using var source = new MemoryStream(Encoding.UTF8.GetBytes("full body that the server sent anyway"));
+        using var destination = new MemoryStream();
+
+        var copied = await GraphContentClient.CopyWithIdleTimeoutAsync(
+            source, destination, maxBytes: 4, TimeSpan.FromSeconds(5), CancellationToken.None,
+            skipBytes: 5);
+
+        Assert.Equal(4, copied);
+        Assert.Equal("body", Encoding.UTF8.GetString(destination.ToArray()));
+    }
+
+    [Fact]
+    public async Task Copy_throws_when_the_body_ends_before_the_offset()
+    {
+        // Returning 0 here was wrong, and this test previously asserted it. A count of zero is
+        // indistinguishable from a legitimately empty resource, and WriteToFile does not inspect
+        // the count - it moved the empty temp over the destination with overwrite: true,
+        // destroying an existing file and exiting successfully. Throwing is the only signal the
+        // caller can act on.
+        using var source = new MemoryStream(Encoding.UTF8.GetBytes("short"));
+        using var destination = new MemoryStream();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => GraphContentClient.CopyWithIdleTimeoutAsync(
+                source, destination, maxBytes: 10, TimeSpan.FromSeconds(5), CancellationToken.None,
+                skipBytes: 500));
+
+        Assert.Contains("before the requested offset", ex.Message);
+        Assert.Empty(destination.ToArray());
+    }
+
+    [Fact]
+    public async Task An_empty_resource_still_writes_an_empty_result()
+    {
+        // The counterpart: a genuinely empty body with no offset requested must NOT throw. The
+        // fix above must distinguish "the slice does not exist" from "the resource is empty",
+        // which a bare copied == 0 check would not.
+        using var source = new MemoryStream([]);
+        using var destination = new MemoryStream();
+
+        var copied = await GraphContentClient.CopyWithIdleTimeoutAsync(
+            source, destination, maxBytes: null, TimeSpan.FromSeconds(5), CancellationToken.None);
+
+        Assert.Equal(0, copied);
+        Assert.Empty(destination.ToArray());
+    }
+
+    [Fact]
+    public async Task A_redirect_counts_as_success_only_for_the_caller_that_expects_one()
+    {
+        // Content path: the 302 is the documented success path, so it must not book a failure.
+        QueueRedirectToCdn();
+        _cdnHandler.QueueResponse(HttpStatusCode.OK, "payload!");
+        MgxTelemetryCollector.Current.Reset();
+
+        using var result = await _client.GetContentAsync(GraphContentUrl);
+        await ReadAllAsync(result);
+
+        Assert.Equal(0, MgxTelemetryCollector.Current.GetSummary().Failed);
+
+        // Ordinary path: AllowAutoRedirect is off and every non-content caller throws on a 3xx,
+        // so booking it as succeeded would report success for a request the user saw fail.
+        _graphHandler.QueueResponse(HttpStatusCode.Found, null,
+            new() { ["Location"] = "https://contoso-my.sharepoint.com/download.aspx" });
+        MgxTelemetryCollector.Current.Reset();
+
+        using var plain = await _client.SendAsync(
+            HttpMethod.Get, "https://graph.microsoft.com/v1.0/reports/x");
+
+        Assert.Equal(HttpStatusCode.Found, plain.StatusCode);
+        var summary = MgxTelemetryCollector.Current.GetSummary();
+        Assert.Equal(1, summary.Failed);
+        Assert.Equal(0, summary.Succeeded);
+    }
+
     private sealed class StalledStream : Stream
     {
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)

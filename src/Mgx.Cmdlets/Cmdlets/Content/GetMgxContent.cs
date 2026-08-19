@@ -212,19 +212,26 @@ public class GetMgxContent : MgxCmdletBase
             // 200 with the full body (profile photos do this). Copy only the requested bytes;
             // disposing the result aborts the rest of the transfer.
             long? maxBytes = null;
+            long skipBytes = 0;
             if (range != null && result.StatusCode == HttpStatusCode.OK)
             {
                 maxBytes = RequestedBytes;
-                WriteVerbose($"Server ignored the Range header (HTTP 200). Truncating to the requested {maxBytes} bytes.");
+                // The server ignored the offset too, not just the length. Discarding the head
+                // locally is the only way -Offset can mean what it says on this path; without
+                // it the caller silently receives bytes 0..Length-1 and is told it worked.
+                skipBytes = Offset;
+                WriteVerbose(skipBytes > 0
+                    ? $"Server ignored the Range header (HTTP 200). Discarding the first {skipBytes:N0} bytes and taking {maxBytes:N0}."
+                    : $"Server ignored the Range header (HTTP 200). Truncating to the requested {maxBytes} bytes.");
             }
 
             if (_resolvedOutFile != null)
             {
-                WriteToFile(result, maxBytes);
+                WriteToFile(result, maxBytes, skipBytes);
             }
             else
             {
-                WriteToPipeline(result, maxBytes, errorTarget);
+                WriteToPipeline(result, maxBytes, skipBytes, errorTarget);
             }
         }
         catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
@@ -250,7 +257,7 @@ public class GetMgxContent : MgxCmdletBase
         }
     }
 
-    private void WriteToFile(GraphContentResult result, long? maxBytes)
+    private void WriteToFile(GraphContentResult result, long? maxBytes, long skipBytes)
     {
         // Temp + atomic move, like every other file-writing path in mgx: a failed download
         // never truncates an existing file.
@@ -261,7 +268,8 @@ public class GetMgxContent : MgxCmdletBase
             using (var file = new FileStream(tempPath, FileMode.Create, FileAccess.Write))
             {
                 copied = GraphContentClient.CopyWithIdleTimeoutAsync(
-                        result.Content, file, maxBytes, GetClient().BodyReadTimeout, CancellationToken)
+                        result.Content, file, maxBytes, GetClient().BodyReadTimeout,
+                        CancellationToken, skipBytes)
                     .GetAwaiter().GetResult();
             }
             File.Move(tempPath, _resolvedOutFile!, overwrite: true);
@@ -277,7 +285,7 @@ public class GetMgxContent : MgxCmdletBase
             + $") -> {_resolvedOutFile}");
     }
 
-    private void WriteToPipeline(GraphContentResult result, long? maxBytes, object? errorTarget)
+    private void WriteToPipeline(GraphContentResult result, long? maxBytes, long skipBytes, object? errorTarget)
     {
         // Known-oversized before a single byte moves: refuse early.
         var expected = maxBytes ?? result.ContentLength;
@@ -296,7 +304,8 @@ public class GetMgxContent : MgxCmdletBase
         var copyLimit = maxBytes ?? MaxPipelineBytes + 1;
         using var buffer = new MemoryStream(expected is > 0 and <= int.MaxValue ? (int)expected : 0);
         var copied = GraphContentClient.CopyWithIdleTimeoutAsync(
-                result.Content, buffer, copyLimit, GetClient().BodyReadTimeout, CancellationToken)
+                result.Content, buffer, copyLimit, GetClient().BodyReadTimeout,
+                CancellationToken, skipBytes)
             .GetAwaiter().GetResult();
 
         if (copied > MaxPipelineBytes)

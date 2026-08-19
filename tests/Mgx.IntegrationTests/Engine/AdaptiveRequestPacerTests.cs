@@ -23,12 +23,18 @@ public class AdaptiveRequestPacerTests
         public PacerScope()
         {
             AdaptiveRequestPacer.Reset();
+            // Reset clears learned state only - it deliberately no longer reverts configuration,
+            // because doing so re-enabled pacing under a client built with NoAdaptivePacing. So
+            // the scope must restore defaults explicitly, or a test that configured a low
+            // ceiling or disabled pacing leaks that setting into every later test in the run.
+            AdaptiveRequestPacer.Configure(ResilientGraphClientOptions.Default);
             AdaptiveRequestPacer.DisabledForTests = false;
         }
 
         public void Dispose()
         {
             AdaptiveRequestPacer.Reset();
+            AdaptiveRequestPacer.Configure(ResilientGraphClientOptions.Default);
             AdaptiveRequestPacer.DisabledForTests = true;
         }
     }
@@ -313,6 +319,64 @@ public class AdaptiveRequestPacerTests
         var summary = MgxTelemetryCollector.Current.GetSummary();
         Assert.True(summary.AdaptivePacingActivations >= 1,
             "the SDK-bridge path must be paced exactly like ResilientGraphClient.SendAsync");
+
+        // Telemetry parity. Reporting pacing activations and retries while TotalRequests stayed
+        // 0 was self-contradictory, and made the throttle-rate formula in the Get-MgxTelemetry
+        // help divide by zero on exactly the path M365DSC-style consumers use.
+        Assert.Equal(3, summary.TotalRequests);
+        Assert.Equal(3, summary.Succeeded);
+        Assert.Equal(0, summary.Failed);
+    }
+
+    [Fact]
+    public async Task Concurrent_waiters_stay_spaced_when_the_queue_exceeds_the_delay_cap()
+    {
+        // The slot is claimed at full interval but the sleep used to be clamped to
+        // MaxRetryAfterSeconds, so every claimant queued past the clamp woke at the clamp and
+        // sent simultaneously - a synchronised burst produced exactly when the bucket was most
+        // oversubscribed, which is the opposite of what the gate is for.
+        using var scope = new PacerScope();
+        // NoRateLimit pins the ceiling at 50, so cold-start slow start caps at 4 rps => a 250 ms
+        // interval. MaxRetryAfterSeconds = 1 sets the old 1000 ms sleep clamp, which 12 queued
+        // claims (~2.75 s of slots) overshoot decisively.
+        AdaptiveRequestPacer.Configure(new ResilientGraphClientOptions
+        {
+            NoRateLimit = true,
+            MaxRetryAfterSeconds = 1,
+        });
+        AdaptiveRequestPacer.DisabledForTests = false;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var waits = await Task.WhenAll(Enumerable.Range(0, 12)
+            .Select(async _ =>
+            {
+                await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+                return sw.ElapsedMilliseconds;
+            }));
+
+        var ordered = waits.OrderBy(x => x).ToArray();
+        // Under the old clamp every claim past ~1000 ms woke at the clamp: eight of these twelve
+        // would land inside one 200 ms window and send together.
+        var clustered = ordered.Count(t => t > 900 && t < 1100);
+        Assert.True(clustered <= 2,
+            $"waiters bunched at the delay cap instead of staying spaced: [{string.Join(", ", ordered)}]");
+        Assert.True(ordered[^1] >= 2000,
+            $"the last waiter should honour its claimed slot (~2750ms), got {ordered[^1]}ms");
+    }
+
+    [Fact]
+    public async Task Batch_bucket_never_claims_a_pacing_slot()
+    {
+        // GraphBatchClient owns batch throughput through its own item-level AIMD and passes
+        // paceGate: false. The gate refuses the bucket as well, so a caller that forgets the
+        // flag cannot accidentally stack two AIMD controllers on one workload. Before $batch
+        // had its own bucket it classified as Other, and an outer 429 capped unrelated
+        // Exchange, Teams and Intune traffic on evidence that had nothing to do with them.
+        using var scope = new PacerScope();
+        AdaptiveRequestPacer.DisabledForTests = false;
+
+        var waited = await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Batch, CancellationToken.None);
+        Assert.Equal(0, waited);
     }
 
     [Fact]

@@ -131,9 +131,12 @@ internal static class AdaptiveRequestPacer
                 s_lastLatencyMs[i] = 0;
             }
         }
-        s_enabled = true;
-        s_ceilingRate = 50;
-        s_maxDelayMs = 120_000;
+        // Configuration is deliberately NOT reverted here. Reset clears LEARNED state - adapted
+        // caps, slow start, gauges, baselines. Resetting s_enabled/s_ceilingRate/s_maxDelayMs to
+        // defaults re-enabled pacing under a client built with NoAdaptivePacing, which then
+        // recorded activations until the next cmdlet invocation happened to re-Configure. The
+        // exposed window was in-flight fan-outs and parallel runspaces, where no re-Configure
+        // intervenes. Callers changing configuration call Configure; it is not Reset's business.
     }
 
     // --- pure math (the testable core) ---
@@ -177,6 +180,12 @@ internal static class AdaptiveRequestPacer
     /// </summary>
     internal static async ValueTask<long> WaitAsync(WorkloadBucket bucket, CancellationToken cancellationToken)
     {
+        // Batch envelopes are exempt by construction - GraphBatchClient passes paceGate: false
+        // and runs its own item-level AIMD. Guarding here as well means a batch can never claim
+        // a slot even if a future caller forgets the flag, and keeps two AIMD controllers from
+        // compounding their backoff on one workload.
+        if (bucket == WorkloadBucket.Batch) return 0;
+
         if (!s_enabled || DisabledForTests) return 0;
 
         var b = (int)bucket;
@@ -197,7 +206,11 @@ internal static class AdaptiveRequestPacer
                 || quietTicks > (long)(AdaptivePacing.AdaptiveRecoveryWindow.TotalSeconds * Stopwatch.Frequency);
             if (cold && s_adaptedRate[b] == 0)
             {
-                s_slowStartRate[b] = SlowStartInitialRate;
+                // Clamp to the ceiling, as the throttle path already does. Without it, a caller
+                // configuring -RateLimitPerSecond 1..3 (values the tuning help recommends) got a
+                // slow-start cap of 4 sitting ABOVE their configured rate, and telemetry
+                // reporting "slow-start 4 rps" against a 2 rps ceiling.
+                s_slowStartRate[b] = Math.Min(SlowStartInitialRate, s_ceilingRate);
                 s_lastRampTicks[b] = now;
             }
 
@@ -244,7 +257,21 @@ internal static class AdaptiveRequestPacer
         var delayTicks = targetTicks - claimNow;
         if (delayTicks <= 0) return 0;
 
-        var delayMs = Math.Min(delayTicks * 1000 / Stopwatch.Frequency, s_maxDelayMs);
+        // Honour the claimed slot in full. Clamping the sleep here while still advancing the
+        // slot by the whole interval was a synchronised-burst generator: every claimant whose
+        // turn fell past the clamp woke at exactly the clamp and sent together, and the slot ran
+        // away ahead of any wait that would ever be served. That fires a burst precisely when
+        // the bucket is most oversubscribed - the opposite of the mechanism's purpose.
+        //
+        // Unbounded waiting is not the risk it looks like. The slot advances by at most one
+        // interval per request, and the interval is bounded by MinAdaptiveRate (2 rps => 500 ms)
+        // plus DampingMaxDelayMs (2 s). A server Retry-After is clamped to s_maxDelayMs where it
+        // is applied, in RecordThrottle, so a hostile or absurd Retry-After still cannot push the
+        // slot beyond the horizon. The wait is cancellable, which is the real escape hatch.
+        //
+        // s_maxDelayMs derives from MaxRetryAfterSeconds - a cap on how long to honour ONE
+        // server response. Reusing it as a queue-depth cap conflated two different limits.
+        var delayMs = delayTicks * 1000 / Stopwatch.Frequency;
         if (delayMs <= 0) return 0;
 
         await Task.Delay((int)delayMs, cancellationToken);
