@@ -76,10 +76,22 @@ public class GraphServiceException : Exception
     /// A string property, or null when absent or not actually a string. Graph nests a non-string
     /// "message" on some endpoints (an object with a "value"), which GetString() rejects outright.
     /// </summary>
-    private static string? AsString(JsonElement obj, string name) =>
-        obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
-            ? v.GetString()
-            : null;
+    private static string? AsString(JsonElement obj, string name)
+    {
+        if (!obj.TryGetProperty(name, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.String) return v.GetString();
+
+        // Some endpoints nest it as { "value": "..." } - the very shape this helper's own
+        // comment names. Returning null there produced "Code: " with an empty message, which
+        // is strictly worse than the text that was sitting one level down.
+        if (v.ValueKind == JsonValueKind.Object
+            && v.TryGetProperty("value", out var inner)
+            && inner.ValueKind == JsonValueKind.String)
+        {
+            return inner.GetString();
+        }
+        return null;
+    }
 
     /// <summary>
     /// Maps common Graph error codes to user-facing guidance strings.

@@ -442,16 +442,36 @@ public class SyncMgxDelta : MgxCmdletBase
                     // adoption entirely: resume restarted at checkpoint.NextLink and the crashed
                     // run's items, sitting in the orphaned temp, were never emitted, while the
                     // delta token advanced past them on success. TryAdoptOrphanedTemp now appends
-                    // to an existing output instead of overwriting it, so the guard is unnecessary.
+                    // to an existing output instead of overwriting it, so ADOPTION no longer needs
+                    // the guard - but the deletion branch below still does.
                     if (outputPath != null)
                     {
                         var orphanCp = PaginationCheckpoint.Load(checkpointPath);
-                        if (orphanCp?.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))
+
+                        // Validate the checkpoint's resource BEFORE merging anything. Adoption
+                        // used to sit behind an output-absent guard, which incidentally kept it
+                        // away from this case; without that guard a temp left by a DIFFERENT
+                        // enumeration - the glob is outputPath + ".*.tmp" - would be merged into
+                        // a valid output, and a later successful resume would make the pollution
+                        // permanent. The mismatch is handled properly a few lines below; here we
+                        // only decline to adopt.
+                        var resourceMatches = orphanCp != null
+                            && string.Equals(orphanCp.Resource, requestUrl, StringComparison.Ordinal);
+
+                        if (resourceMatches && orphanCp!.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))
                         {
                             WriteWarning($"Recovered {orphanCp.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
                         }
-                        else
+                        else if (!File.Exists(outputPath))
                         {
+                            // Only when the output is genuinely absent, which is what this
+                            // message says. Dropping the outer guard made this else fire on ANY
+                            // adoption failure - and adoption fails routinely: a resumed run
+                            // writes straight to the output and leaves no temp behind, so a
+                            // second interruption reached here with a VALID checkpoint, deleted
+                            // it, and re-enumerated from the saved deltaLink - replacing the
+                            // output with incremental changes only and losing the baseline for
+                            // good. Adoption stays unguarded; only the deletion is conditional.
                             WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
                             PaginationCheckpoint.Delete(checkpointPath);
                         }

@@ -38,6 +38,15 @@ public class ErrorBodyShapeTests
     }
 
     [Fact]
+    public void Extracts_a_message_nested_under_value()
+    {
+        var ex = new GraphServiceException(
+            HttpStatusCode.BadRequest,
+            """{"error":{"code":"badRequest","message":{"value":"the real text"}}}""");
+        Assert.Contains("the real text", ex.Message);
+    }
+
+    [Fact]
     public void Falls_back_to_the_status_line_when_the_shape_is_wrong()
     {
         var ex = new GraphServiceException(HttpStatusCode.ServiceUnavailable, """{"error":404}""");

@@ -206,7 +206,11 @@ Describe 'Help content is authored, not auto-generated' {
         $cmd = @($script:Maml.helpItems.command | Where-Object { $_.details.name.Trim() -eq $name })[0]
         $cmd | Should -Not -BeNullOrEmpty -Because "$name has no entry in the compiled MAML"
 
-        $inMaml = @($cmd.examples.example).Count
+        # @($null).Count is 1 in PowerShell, so a cmdlet whose entire <examples> element is
+        # missing counted as 1 - and any cmdlet with exactly one markdown example then passed
+        # with its help gone. Count nodes, and require the element to exist at all.
+        $cmd.examples | Should -Not -BeNullOrEmpty -Because "$name has no <examples> element in the compiled MAML"
+        $inMaml = @($cmd.examples.example | Where-Object { $null -ne $_ }).Count
         $inMaml | Should -Be $inMarkdown -Because "module/help/$name.md documents $inMarkdown example(s) but the MAML carries $inMaml - regenerate the compiled help"
     }
 
