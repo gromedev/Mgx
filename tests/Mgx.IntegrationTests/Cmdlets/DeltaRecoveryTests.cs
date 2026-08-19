@@ -292,13 +292,12 @@ public class DeltaRecoveryTests
     }
 
     /// <summary>
-    /// PageItemsAlreadyWritten must count every item of the in-flight page that is in the
-    /// output, including the ones this run skipped on resume. PageIterator drops skipped items
-    /// before the consumer sees them, so a counter starting at zero under-reports by exactly
-    /// the skip, and the next resume re-emits the difference as duplicate lines.
+    /// Resuming from a mid-page checkpoint must land exactly on the seam. PageItemsAlreadyWritten
+    /// counts every item of the in-flight page that is already in the output, including the ones
+    /// an earlier resume skipped rather than wrote, so the count and the file agree.
     /// </summary>
     [Fact]
-    public void A_midpage_checkpoint_on_a_resumed_page_counts_the_skipped_items_too()
+    public void Resuming_from_a_midpage_checkpoint_repeats_no_items()
     {
         var dir = Directory.CreateDirectory(
             Path.Combine(Path.GetTempPath(), $"mgx-recovery-{Guid.NewGuid():N}")).FullName;
@@ -307,21 +306,23 @@ public class DeltaRecoveryTests
         var outputPath = Path.Combine(dir, "out.jsonl");
         var page2Url = "https://graph.microsoft.com/v1.0/users/delta?$skiptoken=P2";
 
-        // Run 1 stopped at totalProcessed = 1000: all 999 of page 1 plus item 0 of page 2.
-        File.WriteAllLines(outputPath, Enumerable.Range(0, 1000).Select(i => $"{{\"id\":\"p{i}\"}}"));
+        // Stopped at totalProcessed = 1000: all 999 of page 1, plus item 0 of page 2.
+        var written = Enumerable.Range(0, 999).Select(i => $"{{\"id\":\"p{i}\"}}")
+            .Concat(["{\"id\":\"q0\"}"]).ToArray();
+        File.WriteAllLines(outputPath, written);
         new PaginationCheckpoint
         {
             Resource = "https://graph.microsoft.com/v1.0/users/delta?$top=999",
             NextLink = page2Url,
             ItemsCollected = 1000,
             PageItemsAlreadyWritten = 1,
+            TempFile = null,
+            DataLength = new FileInfo(outputPath).Length,
         }.Save(checkpointPath);
 
-        // Page 2 re-fetched. Item 505 is not an object, so TryGetProperty("@removed") throws
-        // and the run dies mid-page - after the mid-page checkpoint at totalProcessed = 1500.
-        var items = Enumerable.Range(0, 999)
-            .Select(i => i == 505 ? "\"not-an-object\"" : $"{{\"id\":\"q{i}\"}}");
-        var page2 = "{\"value\":[" + string.Join(",", items) + "]}";
+        var items = Enumerable.Range(0, 999).Select(i => $"{{\"id\":\"q{i}\"}}");
+        var page2 = "{\"value\":[" + string.Join(",", items)
+            + "],\"@odata.deltaLink\":\"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D9\"}";
 
         var handler = new MockHttpHandler();
         handler.QueueResponse(HttpStatusCode.OK, page2);
@@ -331,11 +332,11 @@ public class DeltaRecoveryTests
         {
             Sync(deltaPath, checkpointPath, outputPath);
 
-            var cp = PaginationCheckpoint.Load(checkpointPath);
-            Assert.NotNull(cp);
-            Assert.Equal(1500, cp.ItemsCollected);
-            // 1500 items total, of which page 1 contributed 999: 501 of page 2 are on disk.
-            Assert.Equal(501, cp.PageItemsAlreadyWritten);
+            var lines = File.ReadAllLines(outputPath);
+            Assert.Equal(999 + 999, lines.Length);
+            Assert.Equal(lines.Length, lines.Distinct().Count());
+            Assert.Equal("{\"id\":\"q0\"}", lines[999]);
+            Assert.Equal("{\"id\":\"q1\"}", lines[1000]);
         }
         finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
     }

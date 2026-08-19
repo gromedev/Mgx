@@ -707,7 +707,10 @@ public class SyncMgxDelta : MgxCmdletBase
                                 while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                                 {
                                     writer.WriteLine(enumerator.Current.GetRawText());
-                                    if (enumerator.Current.TryGetProperty("@removed", out _))
+                                    // TryGetProperty throws on anything that is not an object,
+                                    // and the item is whatever the service put in "value".
+                                    if (enumerator.Current.ValueKind == JsonValueKind.Object
+                                        && enumerator.Current.TryGetProperty("@removed", out _))
                                         removedCount++;
                                     itemCount++;
                                     pageItemsWritten++;
@@ -835,7 +838,8 @@ public class SyncMgxDelta : MgxCmdletBase
                     {
                         while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                         {
-                            if (enumerator.Current.TryGetProperty("@removed", out _))
+                            if (enumerator.Current.ValueKind == JsonValueKind.Object
+                                && enumerator.Current.TryGetProperty("@removed", out _))
                                 removedCount++;
                             var ht = JsonToHashtable(enumerator.Current);
                             WriteObject(ht);

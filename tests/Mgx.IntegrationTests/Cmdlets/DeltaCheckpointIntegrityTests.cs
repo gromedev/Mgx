@@ -358,4 +358,42 @@ public class DeltaCheckpointIntegrityTests
         }
         finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
     }
+
+    // ---------------------------------------------------------------- D11
+
+    /// <summary>
+    /// The item loop calls TryGetProperty("@removed") on every element. That throws
+    /// InvalidOperationException on anything that is not a JSON object, which escapes as a
+    /// terminating error naming neither the endpoint nor the item.
+    /// </summary>
+    [Fact]
+    public void A_non_object_item_in_a_page_does_not_terminate_the_run()
+    {
+        var env = NewEnv();
+        try
+        {
+            var handler = new MockHttpHandler();
+            handler.QueueResponse(HttpStatusCode.OK,
+                """{"value":[{"id":"b1"},"not-an-object",{"id":"b2"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D2"}""");
+            InjectMock(handler);
+
+            Exception? escaped = null;
+            using (var ps = Shell())
+            {
+                ps.AddCommand("Sync-MgxDelta")
+                  .AddParameter("Uri", "/users/delta")
+                  .AddParameter("DeltaPath", env.DeltaPath)
+                  .AddParameter("CheckpointPath", env.CheckpointPath)
+                  .AddParameter("OutputFile", env.OutputPath);
+                try { ps.Invoke(); }
+                catch (Exception ex) { escaped = ex; }
+            }
+
+            Assert.Null(escaped);
+            var ids = Ids(env.OutputPath);
+            Assert.Contains("{\"id\":\"b1\"}", ids);
+            Assert.Contains("{\"id\":\"b2\"}", ids);
+        }
+        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+    }
 }
