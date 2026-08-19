@@ -208,6 +208,18 @@ public class SyncMgxDelta : MgxCmdletBase
         // and clear it wherever state is discarded.
         var honourLatest = Latest.IsPresent;
 
+        // A live resume checkpoint is not a fresh run either. Without delta state the guards
+        // below never fire, so -Latest was honored on top of an interrupted enumeration: the
+        // checkpoint is dropped a moment later as "a different enumeration" (the token=latest
+        // suffix changes requestUrl), the items the crashed run collected stay stranded in its
+        // temp, and an empty page still saves a from-now token - so everything before this
+        // moment is permanently unreachable. -FullSync deletes the checkpoint above, so
+        // "-FullSync -Latest" still re-baselines from now, which is what the warning below
+        // tells people to use.
+        var hasResumableCheckpoint = resolvedCheckpointPath != null && File.Exists(resolvedCheckpointPath);
+        if (honourLatest && hasResumableCheckpoint)
+            honourLatest = false;
+
         if (loadResult == DeltaLoadResult.Corrupt)
         {
             WriteWarning($"Delta state file '{DeltaPath}' is corrupt. Starting full sync.");
@@ -360,10 +372,14 @@ public class SyncMgxDelta : MgxCmdletBase
 
             if (Latest.IsPresent && !honourLatest)
             {
-                WriteWarning(
-                    "-Latest ignored: the previous delta state was discarded, so this run must "
-                    + "enumerate to rebuild it. Baselining from now would silently drop every "
-                    + "change since the last successful sync.");
+                WriteWarning(hasResumableCheckpoint
+                    ? "-Latest ignored: a resume checkpoint exists, so an interrupted enumeration "
+                      + "is still in progress. Baselining from now would abandon what it collected "
+                      + "and drop every change before now. Delete the checkpoint, or use -FullSync "
+                      + "to re-baseline."
+                    : "-Latest ignored: the previous delta state was discarded, so this run must "
+                      + "enumerate to rebuild it. Baselining from now would silently drop every "
+                      + "change since the last successful sync.");
             }
             else if (honourLatest)
             {
@@ -397,6 +413,35 @@ public class SyncMgxDelta : MgxCmdletBase
         else
             WriteWarning($"Could not delete resume checkpoint at '{checkpointPath}' ({reason}). " +
                 "Delete it manually before the next run.");
+    }
+
+    /// <summary>
+    /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
+    /// where every such file is an orphan by definition.
+    /// </summary>
+    private void DeleteStaleTemps(string outputPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            foreach (var stale in Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp").ToList())
+            {
+                try
+                {
+                    File.Delete(stale);
+                    WriteVerbose($"Deleted an orphaned temp file from an earlier interrupted run: {Path.GetFileName(stale)}");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    WriteWarning($"Could not delete orphaned temp file '{stale}': {ex.Message}. Delete it manually.");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort; a sweep failure must never stop the sync.
+        }
     }
 
     private void ExecuteDeltaSync(
@@ -527,7 +572,14 @@ public class SyncMgxDelta : MgxCmdletBase
                 long itemCount = 0;
                 long removedCount = 0;
                 long totalProcessed = resumedItemCount;
-                int pageItemsWritten = 0;
+                // Seeded from the resume skip, not 0. PageIterator drops the skipped items before
+                // the consumer ever sees them (PageIterator.cs: "if (isFirstPage && skippedOnPage
+                // < skipOnFirstPage) continue;"), so a counter starting at 0 records only the
+                // NEWLY written items of the first resumed page. A mid-page checkpoint there then
+                // claimed fewer items of that page than the output actually held, and the next
+                // resume skipped too few and re-emitted the difference - up to a page's worth of
+                // duplicate lines, which is exactly what the comment below says cannot happen.
+                int pageItemsWritten = resume?.SkipOnFirstPage ?? 0;
 
                 void OnPageComplete(PageCompletedInfo info)
                 {
@@ -559,6 +611,20 @@ public class SyncMgxDelta : MgxCmdletBase
                 {
                     // JSONL output mode. Fresh runs write to a temp file and promote on
                     // success; checkpointed resumes append to the already-promoted output.
+                    if (!appendOutput)
+                    {
+                        // Nothing is being resumed, so no temp on disk describes recoverable
+                        // work. Anything left over was orphaned - by -FullSync, by a -Property
+                        // /-Filter/-Prefer change, by a checkpoint from a different enumeration,
+                        // or by an adoption that declined a torn temp - and orphans are not
+                        // inert: TryAdoptOrphanedTemp picks the NEWEST file matching
+                        // outputPath + ".*.tmp" with nothing but a line count to go on, so a
+                        // survivor from an unrelated enumeration is adoptable by some later
+                        // crash's checkpoint, and one success makes those rows permanent.
+                        // Sweeping here is what keeps "a temp exists only while a checkpoint
+                        // describing it exists" true across runs.
+                        DeleteStaleTemps(outputPath);
+                    }
                     var writePath = appendOutput ? outputPath : $"{outputPath}.{Guid.NewGuid():N}.tmp";
                     try
                     {
@@ -657,7 +723,22 @@ public class SyncMgxDelta : MgxCmdletBase
                             }
                             if (!promoted)
                             {
-                                try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                                // A surviving checkpoint describes items that exist ONLY in this
+                                // temp: SaveBoundaryCheckpoint flushes the writer before recording
+                                // the position, so the temp always holds at least ItemsCollected.
+                                // Deleting it leaves the checkpoint pointing past data that is
+                                // nowhere - and the next run then finds a checkpoint, an output
+                                // and no temp, which is the routine "nothing to adopt" state, so
+                                // it resumes in APPEND mode against an output that never received
+                                // these pages and the delta token advances past them.
+                                // Keep the temp for the next run to adopt. It is deleted by
+                                // adoption, by a later fresh run's own failure once the checkpoint
+                                // is gone, or on the missing-output path below.
+                                var resumable = checkpointPath != null && File.Exists(checkpointPath);
+                                if (!resumable)
+                                {
+                                    try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                                }
                             }
                         }
                         throw;

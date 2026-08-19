@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using Mgx.Engine.Http;
 
 namespace Mgx.IntegrationTests.Engine.Http;
 
@@ -10,18 +11,12 @@ namespace Mgx.IntegrationTests.Engine.Http;
 /// </summary>
 public class RetryAfterDateFormTests
 {
-    private static TimeSpan? Resolve(RetryConditionHeaderValue? retryAfter)
-    {
-        // Mirrors GraphContentClient's DelayGenerator: Delta first, then Date, capped at 120s.
-        var cap = TimeSpan.FromSeconds(120);
-        if (retryAfter?.Delta is { } delta) return delta > cap ? cap : delta;
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            if (delay > TimeSpan.Zero) return delay > cap ? cap : delay;
-        }
-        return null;
-    }
+    // The production resolver itself. This used to be a local copy of it, annotated "mirrors
+    // GraphContentClient's DelayGenerator" - so every test below asserted that a copy of the
+    // code behaved like itself, and deleting the HTTP-date branch from the product left all
+    // 567 tests green.
+    private static TimeSpan? Resolve(RetryConditionHeaderValue? retryAfter) =>
+        GraphContentClient.ResolveRetryDelay(retryAfter);
 
     [Fact]
     public void Delta_form_is_honoured()

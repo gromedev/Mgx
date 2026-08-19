@@ -84,6 +84,34 @@ public static class GraphContentClient
 
     // Small reactive pipeline for hop 2: retry 3 with exponential backoff + jitter on
     // 429/5xx/transport errors, honoring Retry-After clamped to two minutes.
+    /// <summary>
+    /// Delay for one download retry, from Retry-After. The header has two legal forms:
+    /// delta-seconds and an HTTP-date. Honoring only Delta silently fell back to plain
+    /// exponential backoff whenever a download host chose the date form - and the main pipeline
+    /// already handles both, so this path was the odd one out. A date already in the past yields
+    /// no delay rather than a negative one, and both forms are capped at 120s.
+    ///
+    /// Internal rather than inlined into the DelayGenerator lambda because the pipeline is a
+    /// private static field with no seam: a test could only reach the lambda by driving a real
+    /// 429 through GetContentAsync. The test that covers this used to hold its own copy of the
+    /// logic instead, which passed with the whole feature deleted from the product.
+    /// Polly's MaxDelay does NOT clamp a value returned from a DelayGenerator, so the cap here
+    /// is the only bound on the sleep.
+    /// </summary>
+    internal static TimeSpan? ResolveRetryDelay(RetryConditionHeaderValue? retryAfter)
+    {
+        var cap = TimeSpan.FromSeconds(120);
+        if (retryAfter?.Delta is { } delta)
+            return delta > cap ? cap : delta;
+        if (retryAfter?.Date is { } date)
+        {
+            var delay = date - DateTimeOffset.UtcNow;
+            if (delay > TimeSpan.Zero)
+                return delay > cap ? cap : delay;
+        }
+        return null;
+    }
+
     private static readonly ResiliencePipeline<HttpResponseMessage> s_downloadPipeline =
         new ResiliencePipelineBuilder<HttpResponseMessage>()
             .AddRetry(new RetryStrategyOptions<HttpResponseMessage>
@@ -104,23 +132,7 @@ public static class GraphContentClient
                     return ValueTask.FromResult(args.Outcome.Exception is HttpRequestException);
                 },
                 DelayGenerator = args =>
-                {
-                    // Retry-After has two legal forms: delta-seconds and an HTTP-date. Honouring
-                    // only Delta silently fell back to plain exponential backoff whenever a
-                    // download host chose the date form - and the main pipeline already handles
-                    // both, so this path was the odd one out.
-                    var retryAfter = args.Outcome.Result?.Headers.RetryAfter;
-                    var cap = TimeSpan.FromSeconds(120);
-                    if (retryAfter?.Delta is { } delta)
-                        return ValueTask.FromResult<TimeSpan?>(delta > cap ? cap : delta);
-                    if (retryAfter?.Date is { } date)
-                    {
-                        var delay = date - DateTimeOffset.UtcNow;
-                        if (delay > TimeSpan.Zero)
-                            return ValueTask.FromResult<TimeSpan?>(delay > cap ? cap : delay);
-                    }
-                    return ValueTask.FromResult<TimeSpan?>(null);
-                },
+                    ValueTask.FromResult(ResolveRetryDelay(args.Outcome.Result?.Headers.RetryAfter)),
                 OnRetry = args =>
                 {
                     args.Outcome.Result?.Dispose();

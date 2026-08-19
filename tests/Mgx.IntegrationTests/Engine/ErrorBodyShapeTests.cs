@@ -46,6 +46,24 @@ public class ErrorBodyShapeTests
         Assert.Contains("the real text", ex.Message);
     }
 
+    /// <summary>
+    /// The theory above only asserts the message is non-empty, and the backstop catch at the
+    /// bottom of FormatAndExtract returns the status line for anything that throws - so all ten
+    /// cases stay green with every ValueKind guard deleted. The guards are two independently
+    /// sufficient controls with the catch, and the theory pins only their disjunction.
+    /// Pin the guards themselves: a body odd in ONE place must still yield the parts that are
+    /// well formed, instead of falling back wholesale.
+    /// </summary>
+    [Fact]
+    public void A_body_odd_in_one_place_still_yields_the_parts_that_are_well_formed()
+    {
+        var ex = new GraphServiceException(
+            HttpStatusCode.ServiceUnavailable,
+            """{"error":{"code":404,"message":"numeric code"}}""");
+        Assert.Contains("numeric code", ex.Message);
+        Assert.Null(ex.ErrorCode);
+    }
+
     [Fact]
     public void Falls_back_to_the_status_line_when_the_shape_is_wrong()
     {

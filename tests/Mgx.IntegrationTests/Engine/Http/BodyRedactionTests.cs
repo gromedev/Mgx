@@ -63,11 +63,18 @@ public class BodyRedactionTests
         Assert.DoesNotContain("hunter2", trace, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Three items, not two. Sanitize makes two passes that can each match a downloadUrl - one
+    /// by property name, one by value - so with only two items a first-match-only regression
+    /// was masked: pass one redacted FIRST, pass two redacted SECOND, and the test stayed green
+    /// while every third and subsequent capability URL leaked.
+    /// </summary>
     [Fact]
     public void Redacts_every_url_in_a_body_not_just_the_first()
     {
-        var trace = Trace("""{"value":[{"@microsoft.graph.downloadUrl":"https://a.sharepoint.com/x?tempauth=FIRST"},{"@microsoft.graph.downloadUrl":"https://b.sharepoint.com/y?tempauth=SECOND"}]}""");
+        var trace = Trace("""{"value":[{"@microsoft.graph.downloadUrl":"https://a.sharepoint.com/x?tempauth=FIRST"},{"@microsoft.graph.downloadUrl":"https://b.sharepoint.com/y?tempauth=SECOND"},{"@microsoft.graph.downloadUrl":"https://c.sharepoint.com/z?tempauth=THIRD"}]}""");
         Assert.DoesNotContain("FIRST", trace, StringComparison.Ordinal);
         Assert.DoesNotContain("SECOND", trace, StringComparison.Ordinal);
+        Assert.DoesNotContain("THIRD", trace, StringComparison.Ordinal);
     }
 }
