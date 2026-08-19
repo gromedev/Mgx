@@ -19,7 +19,7 @@ function Show-PacingState {
     param([string]$Label)
     $t = Get-MgxTelemetry
     Write-Host "`n$Label" -ForegroundColor Cyan
-    "  requests           : $($t.TotalRequests)  ($($t.Succeeded) ok, $($t.Failed) failed)"
+    "  requests           : $($t.Requests)  ($($t.Succeeded) ok, $($t.Failed) failed)"
     "  pacing waits       : $($t.AdaptivePacingWaitMs) ms over $($t.AdaptivePacingActivations) activations"
     "  throttle retries   : $($t.ThrottleRetries)   rate-limiter waits: $($t.RateLimiterWaitMs) ms"
     "  resource units     : $($t.ResourceUnitsConsumed)"

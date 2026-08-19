@@ -1470,7 +1470,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       <command:example>
         <maml:title>---------------- Example 3: Check throttle rate ----------------</maml:title>
         <dev:code>$t = Get-MgxTelemetry
-"Throttle rate: $([math]::Round($t.ThrottleCount / $t.TotalRequests * 100, 1))%"</dev:code>
+"Throttle rate: $(if ($t.Requests) { [math]::Round($t.ThrottleRetries / $t.Requests * 100, 1) } else { 0 })%"</dev:code>
         <dev:remarks>
           <maml:para>Calculates the percentage of requests that were throttled.</maml:para>
         </dev:remarks>

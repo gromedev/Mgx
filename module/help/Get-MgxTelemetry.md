@@ -40,7 +40,7 @@ Returns current telemetry and resets all counters to zero.
 ### Example 3: Check throttle rate
 ```powershell
 $t = Get-MgxTelemetry
-"Throttle rate: $([math]::Round($t.ThrottleCount / $t.TotalRequests * 100, 1))%"
+"Throttle rate: $(if ($t.Requests) { [math]::Round($t.ThrottleRetries / $t.Requests * 100, 1) } else { 0 })%"
 ```
 
 Calculates the percentage of requests that were throttled.

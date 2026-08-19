@@ -13,7 +13,7 @@
 #>
 
 BeforeAll {
-    $ModulePath = Join-Path $PSScriptRoot '../module/mgx.psd1'
+    $ModulePath = Join-Path $PSScriptRoot '../../module/mgx.psd1'
     Import-Module $ModulePath -Force
 }
 
@@ -22,7 +22,7 @@ Describe 'Module Loading' {
         $module = Get-Module Mgx
         $module | Should -Not -BeNullOrEmpty
         # Read expected version from manifest to avoid hardcoded values breaking on version bumps
-        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot '../module/mgx.psd1')
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot '../../module/mgx.psd1')
         $module.Version | Should -Be $manifest.ModuleVersion
     }
 
@@ -58,7 +58,7 @@ Describe 'Module Loading' {
         #
         # Runs in a child process because the precondition is "Polly.Core has never
         # been loaded", which the parent suite has already violated by this point.
-        $modulePath = Join-Path $PSScriptRoot '../module/mgx.psd1'
+        $modulePath = Join-Path $PSScriptRoot '../../module/mgx.psd1'
         $probe = @"
 Import-Module '$modulePath' -Force
 try { Remove-Module mgx -ErrorAction Stop }
@@ -66,7 +66,30 @@ catch { Write-Output ('THREW: ' + `$_.Exception.Message.Split([char]10)[0]); exi
 if (Get-Module mgx) { Write-Output 'STILL LOADED'; exit 1 }
 Write-Output 'OK'
 "@
-        $result = pwsh -NoProfile -Command $probe
+        # This assertion needs a FRESH session, so it must spawn a child host. Under a
+        # dotnet-tool PowerShell install on Unix there is no re-executable host: the
+        # process path is the dotnet muxer, and $PSHOME/pwsh is a managed wrapper that
+        # cannot be exec'd directly ("Exec format error"). Rather than fail there and
+        # look like an mgx defect, prove the host can re-exec first and skip if it cannot.
+        $hostExe = @(
+            (Get-Process -Id $PID).Path
+            (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+        ) | Where-Object { $_ -and (Split-Path $_ -Leaf) -like 'pwsh*' } | Select-Object -First 1
+
+        if (-not $hostExe) {
+            Set-ItResult -Skipped -Because 'this host cannot re-exec itself (dotnet-tool PowerShell install)'
+            return
+        }
+        # A failed exec surfaces as a terminating NativeCommandFailed, not a return value,
+        # so the probe must be wrapped rather than compared.
+        $probeOk = $null
+        try { $probeOk = & $hostExe -NoProfile -Command '"alive"' 2>$null } catch { $probeOk = $null }
+        if ($probeOk -ne 'alive') {
+            Set-ItResult -Skipped -Because "host '$hostExe' cannot be launched as a child process"
+            return
+        }
+
+        $result = & $hostExe -NoProfile -Command $probe
         $result | Should -Contain 'OK'
         $LASTEXITCODE | Should -Be 0
     }
@@ -1319,7 +1342,7 @@ Describe 'Expand-MgxRelation Buffer Warning' {
     It 'Source code contains 50k buffer warning guard' {
         # The actual live test (piping 50k items) requires Graph connection and takes ~15 min
         # due to fan-out HTTP calls. Verify the guard exists in source instead.
-        $source = Get-Content (Join-Path $PSScriptRoot '../src/Mgx.Cmdlets/Cmdlets/Expand/ExpandMgxRelation.cs') -Raw
+        $source = Get-Content (Join-Path $PSScriptRoot '../../src/Mgx.Cmdlets/Cmdlets/Expand/ExpandMgxRelation.cs') -Raw
         $source | Should -Match '50_000'
         $source | Should -Match 'WriteWarning'
         $source | Should -Match 'buffer|Buffer'
@@ -1333,7 +1356,7 @@ Describe 'HttpClient Ownership Disposal Guard' {
 
     BeforeAll {
         # Ensure Mgx.Engine types are loaded (transitive dep of Mgx.Cmdlets)
-        $enginePath = Join-Path $PSScriptRoot '../module/Mgx.Engine.dll'
+        $enginePath = Join-Path $PSScriptRoot '../../module/Mgx.Engine.dll'
         [System.Reflection.Assembly]::LoadFrom($enginePath) | Out-Null
 
         $script:CmdletBaseType = [Mgx.Cmdlets.Base.MgxCmdletBase]
@@ -1354,7 +1377,9 @@ Describe 'HttpClient Ownership Disposal Guard' {
         $script:CmdletBaseType.GetField('s_ownsHttpClient', $script:Flags).SetValue($null, $false)
         $script:CmdletBaseType.GetField('s_clientOptions', $script:Flags).SetValue(
             $null, [Mgx.Engine.Http.ResilientGraphClientOptions]::Default)
-        $script:CmdletBaseType.GetField('s_cachedTenantId', $script:Flags).SetValue($null, $null)
+        # Clients are keyed on a fingerprint of the whole auth context, not the tenant id.
+        # This teardown reflects on that field by name, so it must track any rename.
+        $script:CmdletBaseType.GetField('s_cachedAuthFingerprint', $script:Flags).SetValue($null, $null)
     }
 
     It 'Should NOT dispose HttpClient when s_ownsHttpClient is false' {

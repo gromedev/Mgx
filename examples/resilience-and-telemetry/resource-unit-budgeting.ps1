@@ -72,12 +72,12 @@ Write-Host "`n=== Sizing a per-group fan-out over the whole tenant ===" -Foregro
 # --- what the session actually spent ---
 Write-Host "`n=== Session telemetry ===" -ForegroundColor Cyan
 $t = Get-MgxTelemetry
-"  requests           : $($t.TotalRequests)  ($($t.Succeeded) ok, $($t.Failed) failed)"
+"  requests           : $($t.Requests)  ($($t.Succeeded) ok, $($t.Failed) failed)"
 "  resource units     : $($t.ResourceUnitsConsumed)"
 "  throttle retries   : $($t.ThrottleRetries)"
 "  pacing waits       : $($t.AdaptivePacingWaitMs) ms over $($t.AdaptivePacingActivations) activations"
-if ($t.TotalRequests -gt 0) {
-    "  average cost       : {0:N2} RU per request" -f ($t.ResourceUnitsConsumed / $t.TotalRequests)
+if ($t.Requests -gt 0) {
+    "  average cost       : {0:N2} RU per request" -f ($t.ResourceUnitsConsumed / $t.Requests)
 }
 
 Write-Host @"

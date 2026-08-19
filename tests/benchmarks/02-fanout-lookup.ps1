@@ -74,11 +74,9 @@ if ($Contender) {
 }
 
 # ---------------- parent mode ----------------
-Write-Host "collecting $SampleSize bench user ids..."
-$ids = [System.Collections.Generic.List[string]]::new()
-Invoke-MgxRequest /users -All -Filter "startsWith(userPrincipalName,'bench.u')" -Property id |
-    Select-Object -First $SampleSize | ForEach-Object { $ids.Add($_.id) }
-if ($ids.Count -lt $SampleSize) { throw "only found $($ids.Count) bench users; seed the tenant first" }
+Write-Host "collecting $SampleSize user ids..."
+# Read-only benchmark: seeded users preferred, ordinary users acceptable. See Get-BenchUserIds.
+$ids = Get-BenchUserIds -Count $SampleSize
 Write-Host "got $($ids.Count) ids"
 
 $tmp = [System.IO.Path]::GetTempPath()

@@ -17,7 +17,11 @@ param(
 Import-MgxLocal
 Import-Module Microsoft.Graph.Users
 
-$ids = 1..$N
+# Strings, not integers. Invoke-MgxRequest resolves a piped id as either a bare string or
+# an 'id' member; an int is neither, so every record raised MissingPipelineId, -ErrorAction
+# SilentlyContinue swallowed all of them, and the fan-out contender died at EndProcessing
+# claiming no pipeline input. Real Graph ids are strings, so this matches actual usage.
+$ids = @(1..$N | ForEach-Object { "$_" })
 
 # Find a free port (a crashed prior run can leave a zombie listener behind)
 $Port = ($Port..($Port + 20)) | Where-Object {

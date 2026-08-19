@@ -27,32 +27,50 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 
 ## Benchmarks
 
-> **Environment:** Entra ID test tenant with 100k users, 15.4k groups, and 705 service principals. PowerShell 7.5.4 with Microsoft.Graph SDK 2.34; the batch-create run and one kill-resume run used 7.6.4. The module's supported floor is 7.4, but these figures were not measured there.
+> **Environment:** Entra ID test tenant with 100k users and 15.8k groups. PowerShell 7.6.4 (.NET 10) with the Microsoft.Graph SDK, app-only via certificate. The module's supported floor is 7.4 (.NET 8), which is verified by the test suite but is not where these figures were measured. Every row below comes from one run of the suite against one tenant on one build; rows that could not be re-measured have been removed rather than carried forward.
 
 ### Performance & Throughput
 
-| Operation                                |        Mgx |     SDK (`Get-MgUser`) | Raw REST (`Invoke-RestMethod`) |    Speedup vs SDK |
-| ---------------------------------------- | ---------: | ---------------------: | -----------------------------: | ----------------: |
-| **List 100,000 users**                   |  **78.2s** |                505.0s¹ |                         153.3s |          **6.5×** |
-| **Look up 5,000 users by ID**            | **422.0s** |               2,183.0s |                        5,500s² |          **5.2×** |
-| **User report** *(1k users + groups)*    |  **87.8s** |                 450.0s |                       1,132.0s |          **5.1×** |
-| **Create 10,000 users**                  | **510.0s** |               6,158.0s |    Failed *(dead socket hang)* |         **12.1×** |
-| **Recurring delta sync** *(200 changes)* |   **0.9s** | 84.5s *(full re-pull)* |                         Manual | **94× less work** |
+| Operation                             |        Mgx | SDK (`Get-MgUser`) | Raw REST (`Invoke-RestMethod`) | Speedup vs SDK | Resource units |
+| ------------------------------------- | ---------: | -----------------: | -----------------------------: | -------------: | -------------: |
+| **List 100,000 users**                |  **47.1s** |             53.2s¹ |                         58.5s |          1.1× |         ~102 |
+| **Look up 5,000 users by ID**         |  **98.8s** |             521.0s |                        985.3s |      **5.3×** |       ~5,002 |
+| **User report** *(1k users + groups)* |  **23.9s** |             107.9s |                        205.8s |      **4.5×** |       ~2,003 |
+| **Full delta enumeration** *(130,233 items)* | **145.6s** |                  - |                             - |             - |            - |
 
-<sup>¹ SDK measured at its default 100-item page size. Passing `-PageSize 999` reduces the SDK result to 84.5s; Mgx remains slightly faster without additional configuration.</sup>
+<sup>¹ Both figures are the SDK at `-PageSize 999`, which is what the benchmark runs. At the SDK's *default* 100-item page size the same enumeration takes roughly ten times as long — the practical difference is that mgx needs no tuning to be fast, not that it out-runs a tuned SDK on plain enumeration.</sup>
 
-<sup>² The baseline completed 3,472 of 5,000 lookups before its token expired. Three attempts failed in different ways.</sup>
+<sup>Resource units are per single operation, measured from `x-ms-resource-unit`, and are a property of the query shape rather than the client. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table exactly. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity &amp; Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
 
 ### Resilience Under Faults & Throttling
 
 **Fault injection:** 15% `429` throttling and 3% `503` errors across 1,000 lookups.
 
-* **Mgx:** Completed **1,000 / 1,000** in **43.2s** with 0 failures.
-* **Bare SDK:** Completed **1,000 / 1,000** in **211.7s**.
-* **Naive REST:** Completed in **0.9s**, but silently dropped **180 items**.
-* **SDK + `Enable-MgxResilience`:** 100% completion with the same wall time as the bare SDK when no faults occur.
-* **Adaptive pacing:** Dynamically adjusts throughput during throttling, per workload, across every request. In a 77,000-object seeding campaign, Mgx executed 3,710 requests with **0 lost objects** and **0 circuit-breaker trips**.
+* **Mgx:** Completed **1,000 / 1,000** in **132.8s** with 0 failures.
+* **Bare SDK:** Completed **1,000 / 1,000** in **211.8s**.
+* **Naive REST:** Completed in **1.0s**, but silently dropped **180 items**.
+* **SDK + `Enable-MgxResilience`:** Completed **1,000 / 1,000** in **211.6s** - the SDK's own retry handler already covers this fault profile, so injection neither helps nor hurts here.
 * **Connection recovery:** Per-request body-read timeouts and periodic connection recycling prevent long-running operations from remaining stuck on dead sockets.
+
+Read the mgx figure with its cause in view. This harness injects `429`s on a fixed schedule keyed
+on entity id, so the fault rate is **independent of how fast you send**. Adaptive pacing responds to
+those throttle signals by spacing subsequent requests - 447s of accumulated wait across 994 of 2,000
+requests - and on a mock whose faults cannot be avoided, that spacing is pure cost. It is the one
+condition where backing off can buy nothing.
+
+Against a real tenant the pacer behaves differently, because it only constrains while ramping from
+cold or while backing off from an observed throttle. Once slow start reaches the configured ceiling
+it deactivates, and with no throttling there is no adapted cap, so the gate is inert. Measured on the
+100k-user tenant, 8,000 concurrent reads with pacing on and off:
+
+| | wall | throttle retries | pacing wait |
+| --- | ---: | ---: | ---: |
+| Adaptive pacing on *(default)* | 39.4s | 0 | 0s, 0 activations |
+| `-NoAdaptivePacing` | 40.3s | 0 | - |
+
+No 429s appeared at any concurrency the module permits; Graph absorbed the load by inflating latency
+from 113ms to ~1s instead. That is consistent with the throttling behaviour documented below, and it
+is why pacing reacts to `Retry-After` and latency drift rather than to a header that never arrives.
 
 ### Memory Efficiency & Recovery
 
@@ -198,7 +216,7 @@ All HTTP operations pass through four layered [Polly 8.x](https://github.com/App
 
 ### Resource units: what queries actually cost
 
-Graph throttles directory workloads on a **resource-unit budget**, not on request count or bandwidth. Mgx reads `x-ms-resource-unit` on every response and accumulates it, so `Get-MgxTelemetry` reports what a session actually spent - see [examples/27-resource-unit-budgeting.ps1](examples/27-resource-unit-budgeting.ps1).
+Graph throttles directory workloads on a **resource-unit budget**, not on request count or bandwidth. Mgx reads `x-ms-resource-unit` on every response and accumulates it, so `Get-MgxTelemetry` reports what a session actually spent - see [examples/resilience-and-telemetry/resource-unit-budgeting.ps1](examples/resilience-and-telemetry/resource-unit-budgeting.ps1).
 
 Measured against a 15,779-group test tenant:
 

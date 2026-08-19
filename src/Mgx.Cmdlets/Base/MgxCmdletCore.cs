@@ -38,11 +38,10 @@ public abstract class MgxCmdletCore : PSCmdlet, IDisposable
     /// it before deciding whether to promote or delete a temp file - so a throw there would
     /// replace the OperationCanceledException and skip the cleanup, orphaning a partial file.
     ///
-    /// .NET 10 happens not to throw in practice, which is why this has never been seen: the test
-    /// project targets net10.0 while the module targets net8.0, and the CI leg that would have
-    /// exercised PowerShell 7.4 (.NET 8) had been failing at parse time since 2.0.0. A token
-    /// struct copied before disposal stays fully usable, so caching costs nothing and removes the
-    /// dependency on undocumented leniency.
+    /// .NET 10 happens not to throw in practice, but the documented contract specifies
+    /// ObjectDisposedException for every moniker including net8.0, which is what the module
+    /// targets. A token struct copied before disposal stays fully usable, so caching costs
+    /// nothing and removes the dependency on undocumented leniency.
     /// </remarks>
     protected CancellationToken CancellationToken => _token;
 
