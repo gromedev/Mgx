@@ -305,7 +305,7 @@ internal static class AdaptiveRequestPacer
             //
             // Returning here also skips the Retry-After slot hold below, deliberately: that hold
             // writes s_nextSlotTicks, and nothing on the batch path ever reads it for the same
-            // reason - WaitAsync is gone before it looks. Per-item Retry-After is honoured by
+            // reason - WaitAsync is gone before it looks. Per-item Retry-After is honored by
             // GraphBatchClient itself.
             if (bucket == WorkloadBucket.Batch)
                 return;

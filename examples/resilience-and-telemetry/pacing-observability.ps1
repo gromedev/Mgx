@@ -69,7 +69,7 @@ if ($t.LastThrottlePercentage -lt 0) {
   code that looks like a feature.
 
   What the pacer uses instead, in order of reliability:
-    1. 429 + Retry-After  - unambiguous, always honoured
+    1. 429 + Retry-After  - unambiguous, always honored
     2. latency drift      - throughput fell ~19x under load before recovering
     3. this percentage    - welcome when present, assumed absent
 "@

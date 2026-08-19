@@ -470,7 +470,7 @@ public class GraphContentClientTests : IDisposable
 
         // -First 5 has to mean five bytes. Byte ranges are inclusive at both ends, so the last
         // byte requested is 4: asking for 0-5 pulls a sixth byte off the wire that the caller
-        // never asked for and never sees flagged, because the server honoured the range and no
+        // never asked for and never sees flagged, because the server honored the range and no
         // local truncation runs. On the 256 KB-header scans this parameter exists for, that is
         // an extra byte per file and a header boundary landing one byte late.
         var (first, firstRange) = InvokeContentOverRangeHonouringOrigin(body, new() { ["First"] = 5L });

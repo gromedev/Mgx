@@ -4,13 +4,14 @@ using Mgx.Engine.Pagination;
 namespace Mgx.IntegrationTests.Engine.Pagination;
 
 /// <summary>
-/// A valid checkpoint must survive an adoption that legitimately finds nothing to adopt.
+/// TryAdoptOrphanedTemp's contract when there is nothing to adopt: report failure and leave the
+/// existing output exactly as it was.
 ///
-/// A resumed JSONL run writes straight to the output and leaves no temp behind, so a SECOND
-/// interruption reaches recovery with a checkpoint, an output, and no temp - adoption returns
-/// false. If that is treated as "the output is missing", the checkpoint is deleted, the run
-/// re-enumerates from the saved deltaLink, and the output is replaced with incremental changes
-/// only. The baseline is then unrecoverable, because the delta token has already moved past it.
+/// Scope note: these are unit tests of the helper. They cannot guard the caller's decision about
+/// what a failed adoption MEANS - the helper never opens the checkpoint, so no assertion here can
+/// distinguish "checkpoint kept" from "checkpoint deleted". That decision lives in SyncMgxDelta
+/// and is covered end to end by DeltaRecoveryTests, which drives the cmdlet against a mock
+/// transport.
 /// </summary>
 public class CheckpointRetentionTests
 {
@@ -70,31 +71,4 @@ public class CheckpointRetentionTests
         finally { Directory.Delete(dir, true); }
     }
 
-    /// <summary>
-    /// PaginationCheckpoint.Delete is what the caller invokes on the missing-output path. Guard
-    /// against a future edit reintroducing an unconditional delete by pinning the distinction
-    /// the caller has to make.
-    /// </summary>
-    [Fact]
-    public void Checkpoint_and_output_are_independent_facts()
-    {
-        var dir = NewDir();
-        try
-        {
-            var output = Path.Combine(dir, "out.jsonl");
-            var cp = Path.Combine(dir, "out.checkpoint");
-            File.WriteAllLines(output, ["{\"id\":\"kept\"}"]);
-            new PaginationCheckpoint
-            {
-                NextLink = "https://graph.microsoft.com/v1.0/users/delta?$skiptoken=abc",
-                Resource = "/users/delta",
-                ItemsCollected = 1
-            }.Save(cp);
-
-            Assert.False(TryAdopt(output, 1));   // no temp: routine
-            Assert.True(File.Exists(cp));        // and therefore no reason to drop the checkpoint
-            Assert.True(File.Exists(output));
-        }
-        finally { Directory.Delete(dir, true); }
-    }
 }

@@ -4,7 +4,7 @@ Microsoft Graph PowerShell works well for ordinary scripting, but high-volume op
 
 Mgx adds concurrency, streaming pagination, batching, and resilience features to Microsoft Graph PowerShell while using the existing `Connect-MgGraph` authentication context.
 
-In benchmarks, operations that benefit from concurrency and batching were **5–12× faster** than the Microsoft Graph SDK. Mgx also provides resilience for throttling, transient failures, dead connections, and interrupted long-running operations. In a 24-hour fault-injection test against a 100,000-user tenant, Mgx completed every operation without losing a single object.
+In benchmarks, operations that benefit from concurrency and batching were **4–5× faster** than the Microsoft Graph SDK. On plain enumeration, where there is nothing to parallelize, it comes out about level with a tuned SDK - the difference being that it needs no tuning to get there. Mgx also provides resilience for throttling, transient failures, dead connections, and interrupted long-running operations: under injected `429` and `503` faults it completed 1,000 of 1,000 lookups with no failures, where a naive REST loop silently dropped 180.¹
 
 <sup>¹ Tested under sustained throttle waves, injected 429/503 faults, dead sockets, and `kill -9` during export. See [`tests/benchmarks/`](tests/benchmarks/).</sup>
 
@@ -21,6 +21,7 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 * **Performance:** Streaming pagination, concurrent fan-out, and batched writes of up to 20 sub-requests per HTTP call.
 * **Resilience:** Proactive rate limiting, exponential backoff with jitter, circuit breakers, adaptive per-workload request pacing, body-read timeouts, and connection recycling.
 * **Operations:** Streamed JSONL exports with checkpoint/resume, delta sync token management, and resilience injection for existing Graph SDK scripts through `Enable-MgxResilience`.
+* **Content:** File and media downloads with `Get-MgxContent`, whole or by byte range, over a redirect path validated against a host allowlist and followed without the bearer token.
 * **Observability:** Execution metrics via `Get-MgxTelemetry`, including HTTP timing, throttle waits, retries, and resource consumption.
 
 ---
@@ -78,11 +79,11 @@ Export 100,000 users to JSONL:
 
 |                    | Mgx `Export-MgxCollection` | Mgx `Invoke-MgxRequest \| file` | `Invoke-RestMethod` buffer+write |
 | ------------------ | -------------------------: | ------------------------------: | -------------------------------: |
-| Wall time          |                      74.0s |                           76.0s |                           157.2s |
-| Peak working set   |                      341MB |                       **225MB** |                        **504MB** |
-| Managed heap delta |                    +19.8MB |                      **+8.0MB** |                     **+428.9MB** |
+| Wall time          |                      53.0s |                           47.0s |                            64.0s |
+| Peak working set   |                      305MB |                       **265MB** |                        **555MB** |
+| Managed heap delta |                    +19.8MB |                      **+5.0MB** |                     **+415.7MB** |
 
-* **Low memory footprint:** JSONL export peaks as low as **225MB RAM**, compared with 504MB for buffered REST.
+* **Low memory footprint:** streaming to a file adds **5MB** to the managed heap over the whole export, against 416MB for the buffer-then-write approach. Peak working set is 265MB against 555MB.
 * **Kill-safe resume:** `Export-MgxCollection` checkpoints progress continuously. After interruption, rerunning the export resumes from the checkpoint without duplicating objects.
 
 ---
@@ -153,9 +154,9 @@ See [`examples/`](examples/) for additional examples.
 | **Bulk Lookups**             | `$ids \| ForEach-Object { Get-MgUser -UserId $_ }` | `$ids \| Invoke-MgxRequest '/users/{id}'`                    |
 | **Bulk Updates**             | `$ids \| ForEach-Object { Update-MgUser ... }`     | `$urls \| Invoke-MgxBatchRequest -Method PATCH -Body @{...}` |
 | **Exporting Data**           | `$all = Get-MgUser -All; $all \| Export-Csv ...`   | `Export-MgxCollection /users -OutputFile users.jsonl`        |
-| **Fault Protection**         | Manual script handling required                    | Built-in or via `Enable-MgxResilience`                       |
-| **Observability**            | No retry/throttle metrics                          | `Get-MgxTelemetry`                                           |
-| **Dead Connection Handling** | Indefinite hangs possible                          | Body-read timeouts + connection recycling                    |
+| **Fault Protection**         | Written per script                                 | Built-in, or added to existing scripts with `Enable-MgxResilience` |
+| **Observability**            | Timed by the caller                                | `Get-MgxTelemetry`                                           |
+| **Dead Connection Handling** | Left to the default HTTP timeouts                  | Body-read timeouts + connection recycling                    |
 | **Beta Endpoints**           | Requires `Microsoft.Graph.Beta`                    | `-ApiVersion beta`                                           |
 
 ---
