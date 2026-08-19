@@ -315,7 +315,10 @@ function Invoke-WatchdoggedContender {
 function Write-BenchResult {
     param(
         [Parameter(Mandatory)] [string] $Benchmark,
-        [Parameter(Mandatory)] [object] $Result
+        [Parameter(Mandatory)] [object] $Result,
+        # The run's wall clock. Only needed for the RU rate below; picked up from $Result.WallMs
+        # when the caller already records one.
+        [long] $WallMs = 0
     )
     $dir = Join-Path $PSScriptRoot 'results'
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
@@ -326,6 +329,9 @@ function Write-BenchResult {
     # benchmark that records only wall time describes half the cost. Captured from session
     # telemetry, which accumulates x-ms-resource-unit across every response.
     $telemetry = $null
+    $wall = if ($WallMs -gt 0) { $WallMs }
+            elseif ($Result.WallMs -and [long]$Result.WallMs -gt 0) { [long]$Result.WallMs }
+            else { 0 }
     try {
         $t = Get-MgxTelemetry -ErrorAction Stop
         $telemetry = [pscustomobject]@{
@@ -363,15 +369,22 @@ function Write-BenchResult {
             # arrives, even during active 429s, so recording it per run is how we would notice
             # if that ever changed.
             LastThrottlePct  = $t.LastThrottlePercentage
-            RuPerSecond      = $(if ($t.TotalElapsedMs -gt 0) {
-                                    [math]::Round($t.ResourceUnitsConsumed / ($t.TotalElapsedMs / 1000), 1)
-                                } else { 0 })
+            # A rate is only meaningful against the run's WALL clock. Telemetry's TotalElapsedMs
+            # is the SUM of per-request durations, so a concurrent run exceeds its own wall time
+            # by roughly the concurrency factor - dividing by it yields RU per request-second and
+            # understates the budget draw by that factor (a concurrency-128 run measured at 182
+            # RU/s reported 1.6). Callers that know their wall clock pass it; the rest record no
+            # rate at all, because a missing number is auditable and a wrong one is not.
+            WallMs           = $(if ($wall -gt 0) { $wall } else { $null })
+            RuPerSecond      = $(if ($wall -gt 0) {
+                                    [math]::Round($t.ResourceUnitsConsumed / ($wall / 1000), 1)
+                                } else { $null })
             # The documented budget is 8,000 RU per 10s per application+tenant pair for tenants
             # above 500 users, i.e. 800 RU/s. Recorded as a ratio so a run that approaches the
             # ceiling is obvious without re-deriving the arithmetic each time.
-            BudgetFraction   = $(if ($t.TotalElapsedMs -gt 0) {
-                                    [math]::Round(($t.ResourceUnitsConsumed / ($t.TotalElapsedMs / 1000)) / 800, 3)
-                                } else { 0 })
+            BudgetFraction   = $(if ($wall -gt 0) {
+                                    [math]::Round(($t.ResourceUnitsConsumed / ($wall / 1000)) / 800, 3)
+                                } else { $null })
         }
     }
     catch {
