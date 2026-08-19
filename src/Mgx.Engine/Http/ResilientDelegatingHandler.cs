@@ -117,6 +117,11 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
                     // session, which is indistinguishable from no network time at all.
                     // NOTE: deliberately not AdaptiveRequestPacer.RecordLatency - see the comment
                     // after ExecuteAsync for why the pacer baseline stays off this path.
+                    // Caveat: on this path the SDK's own retry handler sleeps INSIDE
+                    // base.SendAsync, so its Retry-After waits land in HttpMs while
+                    // RetryDelayMs stays 0 (that counts Polly's waits, and Polly is outside).
+                    // Separating them would mean reaching into the SDK's handler chain.
+                    // Bounded by AttemptTimeoutSeconds, and the alternative was reporting 0.
                     var httpSw = Stopwatch.StartNew();
                     var attempt = await base.SendAsync(clone, ctx.CancellationToken);
                     MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);

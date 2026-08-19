@@ -762,6 +762,11 @@ public abstract class MgxCmdletBase : MgxCmdletCore
             // being absent - and that guard silently discarded the crashed run's items instead.
             // Preserve what is there and append to it; build the combined file first so the
             // destination is replaced in one Move rather than mutated in place.
+            // Staging costs peak disk equal to output + temp, briefly, rather than temp alone.
+            // That is deliberate: appending straight to the output would halve the peak but
+            // lose atomicity, and a merge that dies halfway would leave a half-written output
+            // with no staging file to recover from. On a full volume this fails and the caller
+            // keeps its checkpoint, which is the safe direction.
             var existing = File.Exists(outputPath) ? outputPath : null;
             long copied = 0;
             var adoptPath = outputPath + ".adopt";
