@@ -78,9 +78,11 @@ jobs:
             tests/TestResults.xml
           if-no-files-found: ignore
 
-  # The manifest claims PowerShell 7.4+. That claim is only honest if every supported
-  # host actually imports the module and passes the surface tests, so each one gets a leg.
-  # 7.4 is the LTS floor; without this job the floor is an assertion rather than a result.
+  # The manifest claims PowerShell 7.4+. That claim is only honest if the supported range
+  # actually imports the module and passes the surface tests, so its ends each get a leg:
+  # 7.4 is the LTS floor, and the newest release is the "+". Without this job the floor is
+  # an assertion rather than a result. The middle of the range is not covered - a 7.5-only
+  # regression reaches a user before it reaches CI, which is the accepted cost of the trim.
   compat:
     name: PowerShell ${{ matrix.psversion }}
     runs-on: windows-latest
@@ -89,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        psversion: ['7.4', '7.5', '7.6']
+        psversion: ['7.4', '7.6']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
