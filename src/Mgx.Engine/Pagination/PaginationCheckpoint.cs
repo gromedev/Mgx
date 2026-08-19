@@ -28,6 +28,23 @@ public sealed class PaginationCheckpoint
     [JsonPropertyName("pageItemsAlreadyWritten")]
     public int PageItemsAlreadyWritten { get; set; }
 
+    /// <summary>
+    /// File name (not path) of the temp the writing run was appending to, relative to the
+    /// output's directory - or null when that run wrote straight to the output. This is what
+    /// makes a checkpoint answerable: without it, "no temp on disk" cannot be told apart from
+    /// "a temp from some other run is on disk", and neither from "the run was appending".
+    /// </summary>
+    [JsonPropertyName("tempFile")]
+    public string? TempFile { get; set; }
+
+    /// <summary>
+    /// Byte length of that file at the moment this checkpoint was saved, captured after the
+    /// writer was flushed. Null on checkpoints written before this was recorded, which are
+    /// treated as unverifiable rather than as zero-length.
+    /// </summary>
+    [JsonPropertyName("dataLength")]
+    public long? DataLength { get; set; }
+
     [JsonPropertyName("timestamp")]
     public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
 

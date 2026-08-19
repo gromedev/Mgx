@@ -743,6 +743,93 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     /// Shared by Export-MgxCollection and Sync-MgxDelta (both write
     /// <c>output.{guid}.tmp</c> on fresh runs).
     /// </summary>
+    /// <summary>
+    /// Append the first <paramref name="dataLength"/> bytes of a named temp file to the output,
+    /// then remove the temp. Unlike the glob-and-newest form, this adopts exactly the file the
+    /// checkpoint recorded, so a leftover from an unrelated run cannot be merged in.
+    /// Returns false when the temp is absent or shorter than the checkpoint promised, which
+    /// means the items it counted are in no file and the caller must not resume past them.
+    /// Bytes rather than lines: the length was taken from the writer's own position, so it
+    /// cannot disagree with itself about line endings or a torn final line.
+    /// </summary>
+    protected static bool TryAdoptNamedTemp(string outputPath, string tempFileName, long dataLength)
+    {
+        try
+        {
+            if (dataLength <= 0) return false;
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+            // A name, never a path: a checkpoint is untrusted input once it is on disk.
+            if (!string.Equals(tempFileName, Path.GetFileName(tempFileName), StringComparison.Ordinal))
+                return false;
+            var tempPath = Path.Combine(dir, tempFileName);
+            if (!File.Exists(tempPath)) return false;
+            if (new FileInfo(tempPath).Length < dataLength) return false;
+
+            // Staged like the glob form: build the combined file first so the destination is
+            // replaced in one Move rather than mutated in place.
+            var adoptPath = outputPath + ".adopt";
+            using (var writer = new FileStream(adoptPath, FileMode.Create, FileAccess.Write))
+            {
+                if (File.Exists(outputPath))
+                {
+                    using var prior = new FileStream(outputPath, FileMode.Open, FileAccess.Read);
+                    prior.CopyTo(writer);
+                }
+                using var temp = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
+                var buffer = new byte[81920];
+                long remaining = dataLength;
+                while (remaining > 0)
+                {
+                    var read = temp.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                    if (read <= 0) break;
+                    writer.Write(buffer, 0, read);
+                    remaining -= read;
+                }
+                if (remaining > 0)
+                {
+                    writer.Dispose();
+                    File.Delete(adoptPath);
+                    return false;
+                }
+            }
+            File.Move(adoptPath, outputPath, overwrite: true);
+            // The merge is done. A temp that will not delete is litter, not a failure - saying
+            // otherwise would tell the caller nothing was adopted when everything was.
+            try { File.Delete(tempPath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Cut the output back to the length a checkpoint recorded for it, dropping anything the
+    /// interrupted run wrote after its last save. Those items are re-fetched, so dropping them
+    /// is what keeps a resume from duplicating them. Returns false when the output is shorter
+    /// than recorded, which means it is no longer the file the checkpoint describes.
+    /// </summary>
+    protected static bool TryTrimOutputToCheckpoint(string outputPath, long dataLength)
+    {
+        try
+        {
+            if (!File.Exists(outputPath)) return false;
+            var actual = new FileInfo(outputPath).Length;
+            if (actual < dataLength) return false;
+            if (actual == dataLength) return true;
+            using var fs = new FileStream(outputPath, FileMode.Open, FileAccess.Write);
+            fs.SetLength(dataLength);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     protected static bool TryAdoptOrphanedTemp(string outputPath, long itemCount)
     {
         try

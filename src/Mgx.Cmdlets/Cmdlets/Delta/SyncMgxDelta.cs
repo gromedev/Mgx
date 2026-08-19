@@ -444,6 +444,63 @@ public class SyncMgxDelta : MgxCmdletBase
         }
     }
 
+    /// <summary>
+    /// Put the files into the state the checkpoint claims, or delete the checkpoint. A
+    /// checkpoint records which file its items were written to and how many bytes of that file
+    /// they occupy, which makes three cases decidable instead of guessed:
+    /// a temp is named, so the run was fresh and the output holds only what preceded it;
+    /// none is named, so the run was appending and the output holds them;
+    /// nothing is recorded, so the checkpoint predates this and is handled as it was before.
+    /// When the counted items turn out to be in no file, the delta link has not moved, so
+    /// re-enumerating costs time and loses nothing while resuming past them loses them for good.
+    /// </summary>
+    private void ReconcileCheckpointWithFiles(string checkpointPath, string outputPath, PaginationCheckpoint checkpoint)
+    {
+        if (checkpoint.DataLength is not { } dataLength)
+        {
+            if (TryAdoptOrphanedTemp(outputPath, checkpoint.ItemsCollected))
+                WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
+            else if (!File.Exists(outputPath))
+            {
+                WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                PaginationCheckpoint.Delete(checkpointPath);
+            }
+            return;
+        }
+
+        if (checkpoint.TempFile != null)
+        {
+            if (TryAdoptNamedTemp(outputPath, checkpoint.TempFile, dataLength))
+            {
+                WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
+                // Those items live in the output now. Repoint the checkpoint at it immediately,
+                // so a second interruption cannot adopt the same temp a second time.
+                checkpoint.TempFile = null;
+                checkpoint.DataLength = new FileInfo(outputPath).Length;
+                try { checkpoint.Save(checkpointPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    WriteWarning($"Checkpoint save failed after recovery: {ex.Message}");
+                }
+                return;
+            }
+
+            WriteWarning(
+                $"The interrupted sync's temp file is missing or incomplete, so the {checkpoint.ItemsCollected} items it "
+                + "recorded are not on disk. Re-enumerating from the last saved delta token; no changes are lost.");
+            PaginationCheckpoint.Delete(checkpointPath);
+            return;
+        }
+
+        if (!TryTrimOutputToCheckpoint(outputPath, dataLength))
+        {
+            WriteWarning(
+                $"'{outputPath}' no longer holds the {checkpoint.ItemsCollected} items the resume checkpoint records. "
+                + "Re-enumerating from the last saved delta token; no changes are lost.");
+            PaginationCheckpoint.Delete(checkpointPath);
+        }
+    }
+
     private void ExecuteDeltaSync(
         ResilientGraphClient client,
         string requestUrl,
@@ -493,30 +550,19 @@ public class SyncMgxDelta : MgxCmdletBase
                     {
                         var orphanCp = PaginationCheckpoint.Load(checkpointPath);
 
-                        // Validate the checkpoint's resource BEFORE merging anything. Adoption
-                        // used to sit behind an output-absent guard, which incidentally kept it
-                        // away from this case; without that guard a temp left by a DIFFERENT
-                        // enumeration - the glob is outputPath + ".*.tmp" - would be merged into
-                        // a valid output, and a later successful resume would make the pollution
-                        // permanent. The mismatch is handled properly a few lines below; here we
-                        // only decline to adopt.
+                        // The resource is checked before anything is merged. The temp glob is
+                        // shaped from the output path, so a checkpoint belonging to a different
+                        // enumeration must never be allowed to pull a file into this one. The
+                        // mismatch itself is handled a few lines below; here we only decline.
                         var resourceMatches = orphanCp != null
                             && string.Equals(orphanCp.Resource, requestUrl, StringComparison.Ordinal);
 
-                        if (resourceMatches && orphanCp!.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))
+                        if (resourceMatches && orphanCp!.NextLink != null)
                         {
-                            WriteWarning($"Recovered {orphanCp.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
+                            ReconcileCheckpointWithFiles(checkpointPath, outputPath, orphanCp);
                         }
                         else if (!File.Exists(outputPath))
                         {
-                            // Only when the output is genuinely absent, which is what this
-                            // message says. Dropping the outer guard made this else fire on ANY
-                            // adoption failure - and adoption fails routinely: a resumed run
-                            // writes straight to the output and leaves no temp behind, so a
-                            // second interruption reached here with a VALID checkpoint, deleted
-                            // it, and re-enumerated from the saved deltaLink - replacing the
-                            // output with incremental changes only and losing the baseline for
-                            // good. Adoption stays unguarded; only the deletion is conditional.
                             WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
                             PaginationCheckpoint.Delete(checkpointPath);
                         }
@@ -581,6 +627,11 @@ public class SyncMgxDelta : MgxCmdletBase
                 // duplicate lines, which is exactly what the comment below says cannot happen.
                 int pageItemsWritten = resume?.SkipOnFirstPage ?? 0;
 
+                // What the next two checkpoint sites should say about WHERE the counted items
+                // are. Set once the writer exists; null on the pipeline path, which has no file.
+                string? checkpointTempFile = null;
+                long? checkpointDataLength = null;
+
                 void OnPageComplete(PageCompletedInfo info)
                 {
                     if (info.NextPageUrl != null)
@@ -598,7 +649,9 @@ public class SyncMgxDelta : MgxCmdletBase
                             Resource = requestUrl,
                             NextLink = info.NextPageUrl,
                             ItemsCollected = totalProcessed,
-                            PageItemsAlreadyWritten = 0
+                            PageItemsAlreadyWritten = 0,
+                            TempFile = checkpointTempFile,
+                            DataLength = checkpointDataLength
                         }.Save(checkpointPath);
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -626,6 +679,8 @@ public class SyncMgxDelta : MgxCmdletBase
                         DeleteStaleTemps(outputPath);
                     }
                     var writePath = appendOutput ? outputPath : $"{outputPath}.{Guid.NewGuid():N}.tmp";
+                    // A resumed run appends to the output itself, so there is no temp to name.
+                    checkpointTempFile = appendOutput ? null : Path.GetFileName(writePath);
                     try
                     {
                         using (var writer = new StreamWriter(writePath, appendOutput))
@@ -639,6 +694,7 @@ public class SyncMgxDelta : MgxCmdletBase
                                 onPageComplete: info =>
                                 {
                                     writer.Flush();
+                                    checkpointDataLength = writer.BaseStream.Position;
                                     SaveBoundaryCheckpoint(info);
                                     OnPageComplete(info);
                                 },
@@ -661,6 +717,7 @@ public class SyncMgxDelta : MgxCmdletBase
                                     if (totalProcessed % 500 == 0)
                                     {
                                         writer.Flush();
+                                        checkpointDataLength = writer.BaseStream.Position;
                                         // Mid-page checkpoint: tracks items written from the
                                         // current page so crash resume skips them (no dupes).
                                         if (checkpointPath != null)
@@ -672,7 +729,9 @@ public class SyncMgxDelta : MgxCmdletBase
                                                     Resource = requestUrl,
                                                     NextLink = currentFetchUrl,
                                                     ItemsCollected = totalProcessed,
-                                                    PageItemsAlreadyWritten = pageItemsWritten
+                                                    PageItemsAlreadyWritten = pageItemsWritten,
+                                                    TempFile = checkpointTempFile,
+                                                    DataLength = checkpointDataLength
                                                 }.Save(checkpointPath);
                                             }
                                             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -706,15 +765,23 @@ public class SyncMgxDelta : MgxCmdletBase
                             {
                                 try
                                 {
+                                    // Promote first: once the move lands the items are in the
+                                    // output, so that is what the checkpoint must point at. If
+                                    // the save then fails, the previous checkpoint still names
+                                    // a temp that no longer exists, which reads as unusable and
+                                    // costs a re-enumeration rather than a wrong resume.
+                                    var promotedLength = new FileInfo(writePath).Length;
+                                    File.Move(writePath, outputPath, overwrite: true);
+                                    promoted = true;
                                     new PaginationCheckpoint
                                     {
                                         Resource = requestUrl,
                                         NextLink = currentFetchUrl,
                                         ItemsCollected = totalProcessed,
-                                        PageItemsAlreadyWritten = pageItemsWritten
+                                        PageItemsAlreadyWritten = pageItemsWritten,
+                                        TempFile = null,
+                                        DataLength = promotedLength
                                     }.Save(checkpointPath);
-                                    File.Move(writePath, outputPath, overwrite: true);
-                                    promoted = true;
                                 }
                                 catch (Exception promoteEx) when (promoteEx is IOException or UnauthorizedAccessException)
                                 {
