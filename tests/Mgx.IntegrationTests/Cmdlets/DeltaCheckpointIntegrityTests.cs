@@ -322,6 +322,41 @@ public class DeltaCheckpointIntegrityTests
         finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
+    /// <summary>
+    /// A checkpoint is read back from disk, so its contents are input, not a fact. One naming
+    /// the output as the temp to adopt would have the file appended to itself and then removed.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_naming_the_output_as_its_own_temp_does_not_consume_it()
+    {
+        var env = NewEnv();
+        try
+        {
+            File.WriteAllLines(env.OutputPath, ["{\"id\":\"a1\"}", "{\"id\":\"a2\"}"]);
+            new PaginationCheckpoint
+            {
+                Resource = DeltaLink1,
+                NextLink = Page2Url,
+                ItemsCollected = 2,
+                TempFile = "out.jsonl",
+                DataLength = new FileInfo(env.OutputPath).Length,
+            }.Save(env.CheckpointPath);
+
+            var handler = new MockHttpHandler();
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
+            InjectMock(handler);
+
+            Sync(env);
+
+            Assert.True(File.Exists(env.OutputPath), "the output must survive");
+            Assert.Equal(
+                ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                Ids(env.OutputPath));
+        }
+        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+    }
+
     // ---------------------------------------------------------------- D10
 
     /// <summary>

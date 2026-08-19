@@ -763,6 +763,12 @@ public abstract class MgxCmdletBase : MgxCmdletCore
             if (!string.Equals(tempFileName, Path.GetFileName(tempFileName), StringComparison.Ordinal))
                 return false;
             var tempPath = Path.Combine(dir, tempFileName);
+            // Naming the output as its own temp would append the file to itself and then
+            // delete it. Fresh runs never write such a name, but a checkpoint on disk is
+            // whatever it says it is.
+            if (string.Equals(Path.GetFullPath(tempPath), Path.GetFullPath(outputPath),
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
             if (!File.Exists(tempPath)) return false;
             if (new FileInfo(tempPath).Length < dataLength) return false;
 
