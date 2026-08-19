@@ -19,7 +19,11 @@ Write-Host "Building Mgx ($Configuration)..." -ForegroundColor Cyan
 # checked before the compile, failing in a second instead of a minute.
 $manifestVersion = (Import-PowerShellDataFile (Join-Path $ModuleRoot 'mgx.psd1')).ModuleVersion
 $propsFile = Join-Path $PSScriptRoot 'Directory.Build.props'
-$propsVersion = ([xml](Get-Content $propsFile -Raw)).Project.PropertyGroup.Version
+# Select-Object -First on a filtered list: .Project.PropertyGroup.Version returns an ARRAY the
+# moment a second top-level <PropertyGroup> exists, and comparing an array to a string does not
+# fail loudly - it just stops gating.
+$propsVersion = @(([xml](Get-Content $propsFile -Raw)).Project.PropertyGroup.Version |
+    Where-Object { $_ }) | Select-Object -First 1
 if (-not $propsVersion) {
     throw "Version gate failed: no <Version> found in $propsFile"
 }
@@ -44,7 +48,7 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 # Copy Cmdlets + Engine DLLs (load in default ALC)
 # Detect TFM from csproj instead of hardcoding (survives TFM upgrades)
 $csproj = [xml](Get-Content "$PSScriptRoot/src/Mgx.Cmdlets/Mgx.Cmdlets.csproj")
-$tfm = $csproj.Project.PropertyGroup.TargetFramework
+$tfm = @($csproj.Project.PropertyGroup.TargetFramework | Where-Object { $_ }) | Select-Object -First 1
 $CmdletsOutput = Join-Path $PSScriptRoot "src/Mgx.Cmdlets/bin/$Configuration/$tfm"
 Copy-Item "$CmdletsOutput/Mgx.Cmdlets.dll" $ModuleRoot -Force
 Copy-Item "$CmdletsOutput/Mgx.Cmdlets.pdb" $ModuleRoot -Force -ErrorAction SilentlyContinue
@@ -99,19 +103,6 @@ $orphans = Get-ChildItem $DepsDir -Filter 'Mgx.*.dll'
 if ($orphans) {
     throw "Module integrity check failed: Mgx assemblies found in Dependencies/ (should only be in root): $($orphans.Name -join ', ')"
 }
-
-# Write build hash for staleness detection
-$hashInputFiles = @(
-    (Join-Path $ModuleRoot 'Mgx.Cmdlets.dll'),
-    (Join-Path $ModuleRoot 'Mgx.Engine.dll')
-) | Where-Object { Test-Path $_ }
-$combinedHash = ($hashInputFiles | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash }) -join '|'
-$buildStamp = @{
-    Hash      = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($combinedHash))) -Algorithm SHA256).Hash
-    Timestamp = (Get-Date -Format 'o')
-    Configuration = $Configuration
-}
-$buildStamp | ConvertTo-Json | Set-Content (Join-Path $ModuleRoot '.build-hash') -Force
 
 Write-Host "`nBuild complete!" -ForegroundColor Green
 Write-Host "Module output: $ModuleRoot" -ForegroundColor Yellow

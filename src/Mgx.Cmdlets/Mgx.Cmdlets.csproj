@@ -26,8 +26,8 @@
   <!-- Post-build: auto-stage DLLs into module/ so IDE builds are never stale -->
   <Target Name="StageModuleOutput" AfterTargets="Build">
     <PropertyGroup>
-      <ModuleRoot>$(MSBuildThisFileDirectory)..\..\module</ModuleRoot>
-      <DepsDir>$(ModuleRoot)\Dependencies</DepsDir>
+      <ModuleRoot>$(MSBuildThisFileDirectory)../../module</ModuleRoot>
+      <DepsDir>$(ModuleRoot)/Dependencies</DepsDir>
     </PropertyGroup>
 
     <MakeDir Directories="$(DepsDir)" />
