@@ -53,13 +53,25 @@ across the session and paces against the budget they are charged to. See
 
 ### Resilience Under Faults & Throttling
 
-**Fault injection:** 15% `429` throttling and 3% `503` errors across 1,000 lookups.
+1,000 lookups against a server injecting `429` on 15% of ids and `503` twice on a further 3%:
 
-* **Mgx:** Completed **1,000 / 1,000** in **132.8s** with 0 failures.
-* **Bare SDK:** Completed **1,000 / 1,000** in **211.8s**.
-* **Naive REST:** Completed in **1.0s**, but silently dropped **180 items**.
-* **SDK + `Enable-MgxResilience`:** Completed **1,000 / 1,000** in **211.6s** - the SDK's own retry handler already covers this fault profile, so injection neither helps nor hurts here.
-* **Connection recovery:** Per-request body-read timeouts and periodic connection recycling prevent long-running operations from remaining stuck on dead sockets.
+| Contender                        | Retrieved     |    Lost | Wall time |
+| -------------------------------- | ------------: | ------: | --------: |
+| Mgx                              | **1,000** / 1,000 |   0 |    132.8s |
+| SDK + `Enable-MgxResilience`     | **1,000** / 1,000 |   0 |    211.6s |
+| Bare SDK                         | **1,000** / 1,000 |   0 |    211.8s |
+| `Invoke-RestMethod` loop, no retry |     820 / 1,000 | **180** |      1.0s |
+
+The last row is the one worth looking at. It finishes in a second, reports no error, and returns
+82% of the data - the failure mode a script only discovers downstream, if at all. Retrieving
+everything costs two orders of magnitude more wall time, and that is the whole trade.
+
+Adding `Enable-MgxResilience` to the SDK neither helps nor hurts against this fault profile,
+because the SDK's own retry handler already covers it. What it adds is not covered here: per-request
+body-read timeouts and periodic connection recycling, so a dead socket surfaces as a
+retryable error rather than an indefinite hang. The benchmark suite runs its SDK baselines
+inside watchdogged child processes for exactly that reason - bare SDK cmdlets have no default
+body-read timeout and have hung indefinitely during these runs.
 
 Read the mgx figure with its cause in view. This harness injects `429`s on a fixed schedule keyed
 on entity id, so the fault rate is **independent of how fast you send**. Adaptive pacing responds to
