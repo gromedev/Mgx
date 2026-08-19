@@ -1582,4 +1582,86 @@ public class DeltaQueryTests
             CleanupMockHttpClient();
         }
     }
+
+    /// <summary>
+    /// A single delta page carrying <paramref name="count"/> items, no nextLink, deltaLink present.
+    /// </summary>
+    private static string BuildSingleDeltaPage(int count)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\"value\":[");
+        for (int i = 0; i < count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append($"{{\"id\":\"user{i}\",\"displayName\":\"User {i}\"}}");
+        }
+        sb.Append("],\"@odata.deltaLink\":\"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=bigpage\"}");
+        return sb.ToString();
+    }
+
+    [Fact]
+    public void Cmdlet_Checkpoint_MidPage_BoundsProgressLostWhenARunDiesInsideAPage()
+    {
+        // A delta page can be long, and can be the only page of the run. If progress were saved
+        // at page boundaries alone, a run that died inside a page would resume from zero and
+        // re-enumerate everything it had already written. The contract is mid-page checkpointing:
+        // the position is saved often enough that dying inside a page costs at most
+        // MaxAcceptableLoss items of lost progress.
+        //
+        // The death staged here is the JSONL promotion: -OutputFile names an existing directory,
+        // so the temp file cannot be renamed onto it. That failure lands after the page has been
+        // consumed and before the success path deletes the checkpoint, so what remains on disk is
+        // exactly what a resume would find.
+        const int ItemsInPage = 1250;
+        const int MaxAcceptableLoss = 500;
+
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, BuildSingleDeltaPage(ItemsInPage));
+
+        InjectMockHttpClient(handler);
+        var stem = $"cmdlet-cp-midpage-{Guid.NewGuid()}";
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"{stem}.json");
+        var cpPath = Path.Combine(Path.GetTempPath(), $"{stem}.checkpoint");
+        var outputPath = Path.Combine(Path.GetTempPath(), $"{stem}.jsonl");
+        Directory.CreateDirectory(outputPath);
+
+        try
+        {
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("OutputFile", outputPath)
+              .AddParameter("CheckpointPath", cpPath);
+            ps.Invoke();
+
+            Assert.True(ps.HadErrors, "the run must fail: the output could not be promoted");
+            Assert.False(File.Exists(deltaPath), "delta state must not be saved on failure");
+
+            var checkpoint = PaginationCheckpoint.Load(cpPath);
+            Assert.True(checkpoint != null,
+                $"the run consumed {ItemsInPage} items inside one page and left no checkpoint - "
+                + "every item would be re-enumerated on resume");
+            Assert.True(checkpoint!.PageItemsAlreadyWritten > 0,
+                "the surviving checkpoint holds no in-page position, so a resume cannot skip "
+                + "what was already written");
+            Assert.True(checkpoint.ItemsCollected >= ItemsInPage - MaxAcceptableLoss,
+                $"checkpoint stalled at {checkpoint.ItemsCollected} of {ItemsInPage} items: dying here "
+                + $"loses {ItemsInPage - checkpoint.ItemsCollected} items of progress, more than the "
+                + $"{MaxAcceptableLoss} the resume guarantee allows");
+            // Single page: the in-page position is the whole position.
+            Assert.Equal(checkpoint.ItemsCollected, (long)checkpoint.PageItemsAlreadyWritten);
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            PaginationCheckpoint.Delete(cpPath);
+            if (Directory.Exists(outputPath)) Directory.Delete(outputPath, recursive: true);
+            foreach (var leftover in Directory.GetFiles(Path.GetTempPath(), $"{stem}*"))
+            {
+                try { File.Delete(leftover); } catch { }
+            }
+            CleanupMockHttpClient();
+        }
+    }
 }

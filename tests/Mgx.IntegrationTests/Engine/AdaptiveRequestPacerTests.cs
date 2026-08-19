@@ -186,6 +186,34 @@ public class AdaptiveRequestPacerTests
     }
 
     [Fact]
+    public async Task Proximity_gauge_paces_requests_beyond_what_the_rate_cap_alone_would()
+    {
+        // The gauge is opportunistic - Graph emits x-ms-throttle-limit-percentage rarely, so it
+        // may never be seen live - but the wiring from RecordResponse into the gate must work
+        // when a header does arrive. Nothing else in the suite drives a reported percentage
+        // through WaitAsync, so severing damping from the gate is otherwise invisible.
+        using var scope = new PacerScope();
+
+        // Cold-bucket slow start is the only other spacing source here and it caps at 4 rps,
+        // i.e. a 250ms interval. A reported 1.0 ("throttling has begun") sits halfway up the
+        // damping ramp: 1000ms, four times anything the cap can produce.
+        await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+
+        using var response = new HttpResponseMessage(HttpStatusCode.OK);
+        response.Headers.TryAddWithoutValidation("x-ms-throttle-limit-percentage", "1.0");
+        AdaptiveRequestPacer.RecordResponse(WorkloadBucket.Directory, response);
+
+        // The interval computed for a request governs the slot the *next* one claims, so the
+        // damped spacing is observable on the request after the first post-header send.
+        await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+        var damped = await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+
+        Assert.True(damped > 600,
+            "a request sent while Graph reports it is at the throttle limit must be spaced by the "
+            + $"proximity damping (~1000ms), well past the 250ms the 4 rps cap alone gives; waited {damped}ms");
+    }
+
+    [Fact]
     public void RecordResponse_treats_a_final_429_as_a_throttle()
     {
         using var scope = new PacerScope();
@@ -246,6 +274,43 @@ public class AdaptiveRequestPacerTests
 
         Assert.Equal(AdaptiveRequestPacer.SlowStartInitialRate * 2,
             AdaptiveRequestPacer.GetSlowStartRate(WorkloadBucket.Directory));
+    }
+
+    [Fact]
+    public async Task Adapted_cap_climbs_back_out_of_a_throttle_after_clean_intervals()
+    {
+        // The "AI" of AIMD. A 429 halves the bucket's rate; if the additive recovery step never
+        // ran, one 429 would pace that workload forever and throughput would never return.
+        using var scope = new PacerScope();
+        // A 5 rps ceiling makes one additive step (4 + max(1, 5/10)) reach the ceiling, so a
+        // recovered bucket becomes observable within two ramp intervals rather than the ten a
+        // 50 rps ceiling would need.
+        AdaptiveRequestPacer.Configure(new ResilientGraphClientOptions { RateLimitPerSecond = 5 });
+        AdaptiveRequestPacer.DisabledForTests = false;
+
+        AdaptiveRequestPacer.RecordThrottle(WorkloadBucket.Directory, retryAfter: null);
+
+        // While the cap holds, back-to-back requests are spaced (4 rps => ~250ms).
+        await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+        var whileCapped = await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+        Assert.True(whileCapped > 0, "a bucket capped by a 429 must still be pacing before it recovers");
+
+        // Two clean ramp intervals. The first ramp after a throttle only re-arms the window -
+        // the throttle shares its timestamp - and the second performs the additive increase.
+        for (var i = 0; i < 2; i++)
+        {
+            await Task.Delay(1300);
+            await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+        }
+
+        // Recovery is observable as restored throughput: a burst is no longer spaced at all.
+        var afterRecovery = new long[3];
+        for (var i = 0; i < afterRecovery.Length; i++)
+            afterRecovery[i] = await AdaptiveRequestPacer.WaitAsync(WorkloadBucket.Directory, CancellationToken.None);
+
+        Assert.True(afterRecovery.All(w => w == 0),
+            "a bucket that stayed clean must climb back out of its post-429 cap, but requests are still "
+            + $"being paced: [{string.Join(", ", afterRecovery)}] ms");
     }
 
     // --- integration: the two request paths and the batch exemption ---
