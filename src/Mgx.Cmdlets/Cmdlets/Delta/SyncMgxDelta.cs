@@ -433,10 +433,17 @@ public class SyncMgxDelta : MgxCmdletBase
 
                 if (checkpointPath != null && File.Exists(checkpointPath))
                 {
-                    // JSONL fresh-run crash: the checkpoint survives but the output was never
-                    // promoted from its temp file. Adopt the temp (trimmed to the checkpointed
-                    // count) so resume appends to real data instead of declaring staleness.
-                    if (outputPath != null && !File.Exists(outputPath))
+                    // JSONL crash: the checkpoint survives but the output was never promoted from
+                    // its temp file. Adopt the temp (trimmed to the checkpointed count) so resume
+                    // appends to real data instead of declaring staleness.
+                    //
+                    // This used to require the output to be ABSENT, which meant the common
+                    // steady-state sequence - a successful run, then a crashed one - skipped
+                    // adoption entirely: resume restarted at checkpoint.NextLink and the crashed
+                    // run's items, sitting in the orphaned temp, were never emitted, while the
+                    // delta token advanced past them on success. TryAdoptOrphanedTemp now appends
+                    // to an existing output instead of overwriting it, so the guard is unnecessary.
+                    if (outputPath != null)
                     {
                         var orphanCp = PaginationCheckpoint.Load(checkpointPath);
                         if (orphanCp?.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))

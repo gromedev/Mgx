@@ -1470,9 +1470,33 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       <command:example>
         <maml:title>---------------- Example 3: Check throttle rate ----------------</maml:title>
         <dev:code>$t = Get-MgxTelemetry
-"Throttle rate: $(if ($t.Requests) { [math]::Round($t.ThrottleRetries / $t.Requests * 100, 1) } else { 0 })%"</dev:code>
+&quot;Throttle rate: $(if ($t.Requests) { [math]::Round($t.ThrottleRetries / $t.Requests * 100, 1) } else { 0 })%&quot;</dev:code>
         <dev:remarks>
           <maml:para>Calculates the percentage of requests that were throttled.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>------ Example 4: Watch adaptive pacing during a fan-out ------</maml:title>
+        <dev:code>Get-MgxTelemetry | Select-Object AdaptivePacingWaitMs, AdaptivePacingActivations, LastThrottlePercentage, PacingState</dev:code>
+        <dev:remarks>
+          <maml:para>Shows how much proactive pacing has happened and the current per-workload pacing state.</maml:para>
+          <maml:para>## PARAMETERS</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: SwitchParameter</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>## INPUTS</maml:para>
+          <maml:para>## OUTPUTS</maml:para>
+          <maml:para>## NOTES</maml:para>
+          <maml:para>## RELATED LINKS</maml:para>
+          <maml:para>[Set-MgxOption](Set-MgxOption.md)</maml:para>
+          <maml:para>[Get-MgxOption](Get-MgxOption.md)</maml:para>
         </dev:remarks>
       </command:example>
     </command:examples>
@@ -2749,6 +2773,18 @@ Import-Csv ./users.csv |
       <command:syntaxItem>
         <maml:name>Set-MgxOption</maml:name>
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>BatchChunkConcurrency</maml:name>
+          <maml:description>
+            <maml:para>Number of $batch chunks executed concurrently. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int32</command:parameterValue>
+          <dev:type>
+            <maml:name>Int32</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>1</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>BatchItemsPerSecond</maml:name>
           <maml:description>
             <maml:para>Target throughput for batch item pacing in items/sec. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.</maml:para>
@@ -2928,6 +2964,18 @@ Import-Csv ./users.csv |
       </command:syntaxItem>
     </command:syntax>
     <command:parameters>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>BatchChunkConcurrency</maml:name>
+        <maml:description>
+          <maml:para>Number of $batch chunks executed concurrently. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int32</command:parameterValue>
+        <dev:type>
+          <maml:name>Int32</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>1</dev:defaultValue>
+      </command:parameter>
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>BatchItemsPerSecond</maml:name>
         <maml:description>
@@ -3586,17 +3634,189 @@ Import-Csv ./users.csv |
         <maml:title>------ Example 5: Sync group changes including membership ------</maml:title>
         <dev:code>Sync-MgxDelta /groups/delta -DeltaPath groups.delta</dev:code>
         <dev:remarks>
-          <maml:para>Group delta responses include `members@delta` arrays showing member additions and removals. Access via `$group.'members@delta'`.</maml:para>
+          <maml:para>Group delta responses include `members@delta` arrays showing member additions and removals. Access via `$group.&#x27;members@delta&#x27;`.</maml:para>
         </dev:remarks>
       </command:example>
       <command:example>
         <maml:title>-------- Example 6: Scheduled sync in unattended script --------</maml:title>
         <dev:code>$results = Sync-MgxDelta /users/delta -DeltaPath C:\sync\users.delta -Property id,displayName,accountEnabled
-$removed = $results | Where-Object { $_.'@removed' }
-$changed = $results | Where-Object { -not $_.'@removed' }
-Write-Host "$($changed.Count) changed, $($removed.Count) removed"</dev:code>
+$removed = $results | Where-Object { $_.&#x27;@removed&#x27; }
+$changed = $results | Where-Object { -not $_.&#x27;@removed&#x27; }
+Write-Host &quot;$($changed.Count) changed, $($removed.Count) removed&quot;</dev:code>
         <dev:remarks>
           <maml:para>Suitable for scheduled tasks. If the delta token expires (&gt;7 days since last run), Sync-MgxDelta automatically performs a full re-sync and warns.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>-------- Example 7: Enumerate a whole drive, resumable --------</maml:title>
+        <dev:code>Sync-MgxDelta /me/drive/root/delta -DeltaPath drive.delta -CheckpointPath drive.checkpoint -OutputFile drive.jsonl</dev:code>
+        <dev:remarks>
+          <maml:para>First run enumerates the entire drive to JSONL. If the run is killed at any point, re-running the identical command resumes from the last checkpointed page instead of starting over. Subsequent runs after completion return only changed items.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>---- Example 8: Baseline from now, then track changes only ----</maml:title>
+        <dev:code>Sync-MgxDelta /groups/delta -DeltaPath groups.delta -Latest   # instant baseline, no data
+# ...later...
+Sync-MgxDelta /groups/delta -DeltaPath groups.delta           # only what changed since</dev:code>
+        <dev:remarks>
+          <maml:para>-Latest skips the initial full enumeration and stores a &quot;from now&quot; token. The form is chosen automatically: drive resources use `?token=latest`, directory and everything else `$deltatoken=latest`.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>--------- Example 9: Drive delta with Prefer behaviors ---------</maml:title>
+        <dev:code>Sync-MgxDelta /me/drive/root/delta -DeltaPath drive.delta -Prefer deltashowremovedasdeleted</dev:code>
+        <dev:remarks>
+          <maml:para>Removed drive items carry the `deleted` facet instead of appearing as bare deletions. Note: `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it as `-Headers @{ deltaExcludeParent = &quot;true&quot; }`.</maml:para>
+          <maml:para>## PARAMETERS</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Accepted values: v1.0, beta</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: v1.0</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: True</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: SwitchParameter</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: False</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: SwitchParameter</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: False</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String[]</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Hashtable</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String[]</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases: Select</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Int32</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: True</maml:para>
+          <maml:para>Position: 0</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: ActionPreference</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases: proga</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>## INPUTS</maml:para>
+          <maml:para>## OUTPUTS</maml:para>
+          <maml:para>## NOTES</maml:para>
+          <maml:para>Delta queries follow all @odata.nextLink pages automatically (equivalent to -All on other cmdlets). The delta token is saved only after all pages are successfully retrieved.</maml:para>
+          <maml:para>Query parameters ($select, $filter) are encoded into the delta token on the first request. Do not re-specify them on subsequent runs; they are automatically applied from the saved token. If you change -Property between runs, Sync-MgxDelta detects the mismatch and performs a full re-sync.</maml:para>
+          <maml:para>Supported delta endpoints include: /users/delta, /groups/delta, /applications/delta, /servicePrincipals/delta, /devices/delta, /directoryRoles/delta, and many others. Source: [Use delta query to track changes in Microsoft Graph data](https://learn.microsoft.com/en-us/graph/delta-query-overview)</maml:para>
+          <maml:para>Graph does not guarantee that an object appears only once in a delta response: it &quot;can&#x27;t ensure that entities are unified in a single response.&quot; Deduplicate by `id` before treating emitted objects as change events.</maml:para>
+          <maml:para>This is most visible on an initial full enumeration. Measured against a tenant with 15,779 groups, `/groups/delta` emitted 156,413 objects across all pages - a replay factor of roughly 10x - with every object accounted for by a repeat rather than a distinct group. Incremental rounds off an established token are typically clean, but nothing in the contract promises that, so the dedup belongs in the consumer either way.</maml:para>
+          <maml:para>Two consequences worth designing around:</maml:para>
+          <maml:para>- For a change feed, baseline with `-Latest` so the initial enumeration never happens. It records a sync-from-now token and returns nothing, and every later run reports only real changes.</maml:para>
+          <maml:para>- When counting, count distinct ids. An object that changed twice inside one window is one object; keeping the last occurrence gives its current state.</maml:para>
+          <maml:para>`-CheckpointPath` writes item counts as emitted, not deduplicated, so a resumed run&#x27;s progress figures reflect the same replay.</maml:para>
+          <maml:para>Source: [Use delta query to track changes](https://learn.microsoft.com/en-us/graph/delta-query-overview#other-considerations)</maml:para>
+          <maml:para>## RELATED LINKS</maml:para>
+          <maml:para>[Export-MgxCollection](Export-MgxCollection.md)</maml:para>
+          <maml:para>[Invoke-MgxRequest](Invoke-MgxRequest.md)</maml:para>
+          <maml:para>[Set-MgxOption](Set-MgxOption.md)</maml:para>
         </dev:remarks>
       </command:example>
     </command:examples>
@@ -3935,14 +4155,14 @@ Write-Host "$($changed.Count) changed, $($removed.Count) removed"</dev:code>
     <command:examples>
       <command:example>
         <maml:title>------------------ Example 1: Download a file ------------------</maml:title>
-        <dev:code>Get-MgxContent "/me/drive/items/01ABC/content" -OutFile ./report.xlsx</dev:code>
+        <dev:code>Get-MgxContent &quot;/me/drive/items/01ABC/content&quot; -OutFile ./report.xlsx</dev:code>
         <dev:remarks>
           <maml:para>Downloads the drive item to a local file.</maml:para>
         </dev:remarks>
       </command:example>
       <command:example>
-        <maml:title>------- Example 2: First 256 KB of every file in a folder -------</maml:title>
-        <dev:code>Invoke-MgxRequest "/me/drive/items/01FOLDER/children" -All |
+        <maml:title>---- Example 2: First 256 KB of every file in a folder (format sniffing / partial hash) ----</maml:title>
+        <dev:code>Invoke-MgxRequest &quot;/me/drive/items/01FOLDER/children&quot; -All |
     Where-Object { $_.file } |
     ForEach-Object {
         $bytes = $_ | Get-MgxContent -First 262144
@@ -3953,10 +4173,128 @@ Write-Host "$($changed.Count) changed, $($removed.Count) removed"</dev:code>
         </dev:remarks>
       </command:example>
       <command:example>
-        <maml:title>---------------- Example 3: A specific byte range ----------------</maml:title>
-        <dev:code>Get-MgxContent "/me/drive/items/01ABC/content" -Offset 1048576 -Length 65536</dev:code>
+        <maml:title>--------------- Example 3: A specific byte range ---------------</maml:title>
+        <dev:code>Get-MgxContent &quot;/me/drive/items/01ABC/content&quot; -Offset 1048576 -Length 65536</dev:code>
         <dev:remarks>
           <maml:para>Returns bytes 1,048,576 through 1,114,111 (Range: bytes=1048576-1114111).</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>----------------- Example 4: A mail attachment -----------------</maml:title>
+        <dev:code>Get-MgxContent &quot;/me/messages/AAMk.../attachments/AAMk.../`$value&quot; -OutFile ./attachment.pdf</dev:code>
+        <dev:remarks>
+          <maml:para>Attachment bytes are served directly by Graph (no download-host hop).</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>------------------- Example 5: Profile photo -------------------</maml:title>
+        <dev:code>Get-MgxContent &quot;/me/photo/`$value&quot; -OutFile ./me.jpg</dev:code>
+        <dev:remarks>
+          <maml:para>Note the backtick: `$value` would otherwise be expanded by PowerShell.</maml:para>
+          <maml:para>## PARAMETERS</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: Uri</maml:para>
+          <maml:para>Aliases: Resource</maml:para>
+          <maml:para>Required: True</maml:para>
+          <maml:para>Position: 0</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Object</maml:para>
+          <maml:para>Parameter Sets: InputObject</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: True</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: True (ByValue)</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Int64</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Int64</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: 0</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Int64</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: String</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Accepted values: v1.0, beta</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: v1.0</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: Hashtable</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases:</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>```yaml</maml:para>
+          <maml:para>Type: ActionPreference</maml:para>
+          <maml:para>Parameter Sets: (All)</maml:para>
+          <maml:para>Aliases: proga</maml:para>
+          <maml:para>Required: False</maml:para>
+          <maml:para>Position: Named</maml:para>
+          <maml:para>Default value: None</maml:para>
+          <maml:para>Accept pipeline input: False</maml:para>
+          <maml:para>Accept wildcard characters: False</maml:para>
+          <maml:para>```</maml:para>
+          <maml:para>## INPUTS</maml:para>
+          <maml:para>## OUTPUTS</maml:para>
+          <maml:para>## NOTES</maml:para>
+          <maml:para>Content downloads require the mgx-owned HTTP transport. If mgx had to fall back to the Graph SDK&#x27;s client (rare - it means the clean client could not be built), Get-MgxContent refuses with ContentRequiresOwnedTransport rather than let a transport that auto-follows redirects fetch from an unvalidated host.</maml:para>
+          <maml:para>Graph reports drive-item hashes as quickXorHash in base64; rclone and many tools print hex. Convert before comparing:</maml:para>
+          <maml:para>`[System.Convert]::ToHexString([System.Convert]::FromBase64String($item.file.hashes.quickXorHash))`</maml:para>
+          <maml:para>The pre-authenticated download URL on piped items is short-lived (~1 hour). On expiry mgx re-requests it automatically for the /content path; for stale piped `@microsoft.graph.downloadUrl` values, re-fetch the item.</maml:para>
+          <maml:para>Intune report export jobs are not a /content flow: the completed job&#x27;s `url` property is a pre-authenticated Azure Blob URL - download it directly with Invoke-WebRequest; it needs nothing from mgx.</maml:para>
+          <maml:para>## RELATED LINKS</maml:para>
+          <maml:para>[Invoke-MgxRequest](Invoke-MgxRequest.md)</maml:para>
+          <maml:para>[Sync-MgxDelta](Sync-MgxDelta.md)</maml:para>
+          <maml:para>[Get-MgxTelemetry](Get-MgxTelemetry.md)</maml:para>
         </dev:remarks>
       </command:example>
     </command:examples>

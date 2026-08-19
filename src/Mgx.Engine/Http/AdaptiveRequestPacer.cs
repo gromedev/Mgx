@@ -295,6 +295,21 @@ internal static class AdaptiveRequestPacer
         {
             var now = Stopwatch.GetTimestamp();
             s_lastThrottleTicks[b] = now;
+
+            // Batch is never gated - WaitAsync returns before touching state, because
+            // GraphBatchClient runs its own item-level AIMD. Setting an adapted cap for it
+            // therefore created a control nothing enforces AND nothing clears: the expiry check
+            // lives inside WaitAsync, so the cap survived forever and Get-MgxTelemetry reported
+            // "batch: capped 2/50 rps (last 429 3600s ago)" indefinitely. The throttle timestamp
+            // above is still recorded - it is real, and the batch client reads it.
+            //
+            // Returning here also skips the Retry-After slot hold below, deliberately: that hold
+            // writes s_nextSlotTicks, and nothing on the batch path ever reads it for the same
+            // reason - WaitAsync is gone before it looks. Per-item Retry-After is honoured by
+            // GraphBatchClient itself.
+            if (bucket == WorkloadBucket.Batch)
+                return;
+
             // Both branches clamp to the ceiling. Only the entry branch used to, so a REPEAT
             // throttle could raise the cap: ReduceRate floors at MinAdaptiveRate (2), so with
             // -RateLimitPerSecond 1 - a value the tuning help recommends verbatim - the second

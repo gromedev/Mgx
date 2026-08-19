@@ -105,10 +105,19 @@ public static class GraphContentClient
                 },
                 DelayGenerator = args =>
                 {
-                    if (args.Outcome.Result?.Headers.RetryAfter?.Delta is { } delta)
-                    {
-                        var cap = TimeSpan.FromSeconds(120);
+                    // Retry-After has two legal forms: delta-seconds and an HTTP-date. Honouring
+                    // only Delta silently fell back to plain exponential backoff whenever a
+                    // download host chose the date form - and the main pipeline already handles
+                    // both, so this path was the odd one out.
+                    var retryAfter = args.Outcome.Result?.Headers.RetryAfter;
+                    var cap = TimeSpan.FromSeconds(120);
+                    if (retryAfter?.Delta is { } delta)
                         return ValueTask.FromResult<TimeSpan?>(delta > cap ? cap : delta);
+                    if (retryAfter?.Date is { } date)
+                    {
+                        var delay = date - DateTimeOffset.UtcNow;
+                        if (delay > TimeSpan.Zero)
+                            return ValueTask.FromResult<TimeSpan?>(delay > cap ? cap : delay);
                     }
                     return ValueTask.FromResult<TimeSpan?>(null);
                 },

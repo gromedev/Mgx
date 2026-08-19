@@ -393,6 +393,87 @@ public class AdaptiveRequestPacerTests
         Assert.Equal(0, summary.Failed);
     }
 
+    /// <summary>
+    /// A handler that takes measurable time, so ElapsedMilliseconds does not truncate to 0.
+    /// </summary>
+    private sealed class SlowHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(25, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(TestData.SingleUser, System.Text.Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    [Fact]
+    public async Task Sdk_bridge_path_records_http_time()
+    {
+        AdaptiveRequestPacer.DisabledForTests = true;   // isolate network time from pacing delay
+        try
+        {
+            ResiliencePipelineFactory.Reset();
+            var options = new ResilientGraphClientOptions { NoRateLimit = true };
+            var (pipeline, rateLimiter) = ResiliencePipelineFactory.GetOrCreate(options);
+            using var slow = new SlowHandler();
+            using var resilient = new ResilientDelegatingHandler(pipeline, rateLimiter) { InnerHandler = slow };
+            using var httpClient = new HttpClient(resilient);
+
+            MgxTelemetryCollector.Current.Reset();
+            await httpClient.GetAsync("https://graph.microsoft.com/v1.0/users/a");
+
+            var summary = MgxTelemetryCollector.Current.GetSummary();
+            // The 2.1 parity fix added RecordRequest and stopped there, so HttpMs stayed 0 for
+            // every Enable-MgxResilience session - indistinguishable from no network time.
+            Assert.True(summary.HttpMs > 0,
+                $"HttpMs must be recorded on the SDK-bridge path, got {summary.HttpMs}");
+        }
+        finally
+        {
+            AdaptiveRequestPacer.DisabledForTests = false;
+            ResiliencePipelineFactory.Reset();
+        }
+    }
+
+    [Fact]
+    public async Task Sdk_bridge_path_records_rate_limiter_wait()
+    {
+        AdaptiveRequestPacer.DisabledForTests = true;   // isolate the limiter from pacing delay
+        try
+        {
+            ResiliencePipelineFactory.Reset();
+            // A burst of 1 at 1/sec guarantees the second and third acquisitions actually wait.
+            var options = new ResilientGraphClientOptions
+            {
+                RateLimitPerSecond = 1,
+                RateLimitBurst = 1,
+                RateLimitQueueLimit = 10
+            };
+            var (pipeline, rateLimiter) = ResiliencePipelineFactory.GetOrCreate(options);
+            var mock = new MockHttpHandler();
+            mock.SetDefaultResponse(HttpStatusCode.OK, TestData.SingleUser);
+            using var resilient = new ResilientDelegatingHandler(pipeline, rateLimiter) { InnerHandler = mock };
+            using var httpClient = new HttpClient(resilient);
+
+            MgxTelemetryCollector.Current.Reset();
+            await httpClient.GetAsync("https://graph.microsoft.com/v1.0/users/a");
+            await httpClient.GetAsync("https://graph.microsoft.com/v1.0/users/b");
+            await httpClient.GetAsync("https://graph.microsoft.com/v1.0/users/c");
+
+            var summary = MgxTelemetryCollector.Current.GetSummary();
+            Assert.True(summary.RateLimiterWaitMs > 0,
+                $"limiter wait must be recorded on the SDK-bridge path, got {summary.RateLimiterWaitMs}");
+        }
+        finally
+        {
+            AdaptiveRequestPacer.DisabledForTests = false;
+            ResiliencePipelineFactory.Reset();
+        }
+    }
+
     [Fact]
     public async Task Concurrent_waiters_stay_spaced_when_the_queue_exceeds_the_delay_cap()
     {

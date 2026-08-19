@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Threading.RateLimiting;
 using Polly;
@@ -72,7 +73,9 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
 
             if (_rateLimiter != null)
             {
+                var limiterSw = Stopwatch.StartNew();
                 lease = await _rateLimiter.AcquireAsync(1, cancellationToken);
+                MgxTelemetryCollector.Current.RecordRateLimiterWait(limiterSw.ElapsedMilliseconds);
                 if (!lease.IsAcquired)
                     throw new InvalidOperationException("Rate limit exceeded. Too many concurrent requests. Reduce -Concurrency on fan-out cmdlets, increase the queue with Set-MgxOption -RateLimitQueueLimit, or disable with Set-MgxOption -NoRateLimit.");
             }
@@ -108,7 +111,16 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
                         clone.Content = freshContent;
                     }
 
-                    return await base.SendAsync(clone, ctx.CancellationToken);
+                    // Per-attempt network time, measured INSIDE the pipeline so retry delays are
+                    // excluded - the same placement the owned client uses. Without this,
+                    // Get-MgxTelemetry reported "HTTP Time (ms): 0" for every Enable-MgxResilience
+                    // session, which is indistinguishable from no network time at all.
+                    // NOTE: deliberately not AdaptiveRequestPacer.RecordLatency - see the comment
+                    // after ExecuteAsync for why the pacer baseline stays off this path.
+                    var httpSw = Stopwatch.StartNew();
+                    var attempt = await base.SendAsync(clone, ctx.CancellationToken);
+                    MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);
+                    return attempt;
                 },
                 context);
 

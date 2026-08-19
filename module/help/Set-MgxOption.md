@@ -57,6 +57,21 @@ Restores all options to their default values.
 
 ## PARAMETERS
 
+### -BatchChunkConcurrency
+Number of $batch chunks executed concurrently. The default of 1 runs chunks sequentially, which is what keeps inter-chunk pacing meaningful; raising it trades that pacing for throughput and makes server-side write throttling more likely. Range: 1-10. Default: 1.
+
+```yaml
+Type: Int32
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: 1
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
 ### -BatchItemsPerSecond
 Target throughput for batch item pacing in items/sec. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.
 

@@ -270,8 +270,15 @@ public class GetMgxContent : MgxCmdletBase
         {
             WriteGraphError(ex, errorTarget, ApiVersion);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            // UnauthorizedAccessException is NOT an IOException. FileStream throws it for an
+            // unwritable parent directory or a destination that is itself a directory, and
+            // File.Move(overwrite: true) throws it for a read-only destination on Windows - so
+            // an unwritable -OutFile escaped every filter here, skipped DrainClientMessages, and
+            // surfaced as an unhandled error naming a temp path the caller never supplied.
+            // Eleven other sites in this codebase already pair the two; this was the only
+            // file-writing cmdlet that did not.
             DrainClientMessages();
             WriteError(new ErrorRecord(ex, "IOError", ErrorCategory.WriteError, OutFile));
         }

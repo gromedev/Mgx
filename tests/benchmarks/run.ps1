@@ -27,7 +27,10 @@ $suite = @(
     @{ id = '08'; script = '08-delta-sync.ps1';      args = @();                 cooldown = $false },
     @{ id = '09'; script = '09-kill-resume.ps1';     args = @();                 cooldown = $false },
     @{ id = '07'; script = '07-adaptive-pacing.ps1'; args = @();                 cooldown = $true },
-    @{ id = '04'; script = '04-batch-create.ps1';    args = $(if ($IncludeSlow) { @() } else { @('-SkipBaselines') }); cooldown = $false }
+    @{ id = '04'; script = '04-batch-create.ps1';    args = $(if ($IncludeSlow) { @() } else { @('-SkipBaselines') }); cooldown = $true },
+    # Last, and after a cooldown: it drives the tenant toward its resource-unit budget on
+    # purpose, so it must not colour any earlier benchmark's numbers.
+    @{ id = '10'; script = '10-pacing-under-real-throttling.ps1'; args = @(); cooldown = $false }
 )
 
 if ($Only) {

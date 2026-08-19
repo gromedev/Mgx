@@ -40,7 +40,7 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 
 <sup>¹ Both figures are the SDK at `-PageSize 999`, which is what the benchmark runs. At the SDK's *default* 100-item page size the same enumeration takes roughly ten times as long — the practical difference is that mgx needs no tuning to be fast, not that it out-runs a tuned SDK on plain enumeration.</sup>
 
-<sup>Resource units are per single operation, measured from `x-ms-resource-unit`, and are a property of the query shape rather than the client. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table exactly. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity &amp; Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
+<sup>Resource units are per single operation, measured from `x-ms-resource-unit`, and are a property of the query shape rather than the client. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table exactly. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity & Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
 
 ### Resilience Under Faults & Throttling
 

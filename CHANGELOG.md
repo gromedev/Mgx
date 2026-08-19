@@ -16,15 +16,21 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 ### Fixed
 
 - -Latest was honoured after a state invalidation, dropping every change since the last sync.
+- Delta resume dropped the interrupted run's items when an earlier run had already completed, and advanced the delta token past them.
+- Get-MgxContent left an unwritable -OutFile as an unhandled error naming a temp path.
+- A non-Graph JSON error body threw from inside the exception it was being used to build, surfacing a CDN failure as a security refusal.
+- A $batch 429 set a pacing cap that nothing enforced and nothing cleared, so telemetry reported it forever.
+- Get-MgxContent ignored Retry-After when a download host sent it as an HTTP date.
+- Get-Help was missing the examples for -CheckpointPath, -Latest, -Prefer, adaptive pacing, and two Get-MgxContent endpoints, and did not document Set-MgxOption -BatchChunkConcurrency.
 - Repeat 429s could raise the adaptive cap above -RateLimitPerSecond.
 - Delta state did not record its API version, so runs omitting -ApiVersion silently synced the other one.
-- -Debug wrote redirect Location headers verbatim, leaking pre-authenticated download URLs.
+- -Debug wrote pre-authenticated download URLs verbatim, from redirect headers and from response bodies.
 - Get-MgxContent -OutFile with piped input downloaded every item but kept only the last.
 - -Offset was ignored when a server returned a whole-body 200.
 - An offset past end of file overwrote an existing -OutFile with an empty one.
 - Two-hop content downloads were reported as failed requests.
 - Adaptive pacing fired synchronized bursts when sleep times were clamped.
-- Enable-MgxResilience recorded no telemetry, reporting TotalRequests=0 and dividing by zero.
+- Enable-MgxResilience recorded no telemetry: request counts, HTTP time and rate-limiter wait all stayed 0.
 - $batch envelopes were bucketed as Other rather than their target workload.
 - Slow start opened above ceilings set below 4 rps.
 - ResiliencePipelineFactory.Reset() reverted configuration and kept batch pacer state across credential changes.

@@ -69,7 +69,7 @@ Returns bytes 1,048,576 through 1,114,111 (Range: bytes=1048576-1114111).
 
 ### Example 4: A mail attachment
 ```powershell
-Get-MgxContent "/me/messages/AAMk.../attachments/AAMk.../$value" -OutFile ./attachment.pdf
+Get-MgxContent "/me/messages/AAMk.../attachments/AAMk.../`$value" -OutFile ./attachment.pdf
 ```
 
 Attachment bytes are served directly by Graph (no download-host hop).

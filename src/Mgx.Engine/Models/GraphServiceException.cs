@@ -32,10 +32,23 @@ public class GraphServiceException : Exception
         try
         {
             using var doc = JsonDocument.Parse(responseBody);
+
+            // Shape-check before every access. TryGetProperty throws InvalidOperationException on
+            // a non-object, and GetString() throws on a non-string - neither is a JsonException,
+            // so valid JSON of an unexpected shape used to escape this method as an exception
+            // thrown from inside an exception's own constructor. Graph always emits the OData
+            // envelope, but the content path's second hop talks to SharePoint, OneDrive and CDN
+            // hosts that are not Graph and answer with whatever they like.
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return $"HTTP {(int)statusCode}: {statusCode}";
+
             if (doc.RootElement.TryGetProperty("error", out var errorObj))
             {
-                var code = errorObj.TryGetProperty("code", out var c) ? c.GetString() : null;
-                var message = errorObj.TryGetProperty("message", out var m) ? m.GetString() : null;
+                if (errorObj.ValueKind != JsonValueKind.Object)
+                    return $"HTTP {(int)statusCode}: {statusCode}";
+
+                var code = AsString(errorObj, "code");
+                var message = AsString(errorObj, "message");
                 errorCode = code;
 
                 // Build formatted message from whatever Graph provided
@@ -51,9 +64,22 @@ public class GraphServiceException : Exception
                 return formatted;
             }
         }
-        catch (JsonException) { }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            // Backstop: the shape guards above cover the reachable cases, but an error body must
+            // never be able to throw out of here - callers are constructing an exception.
+        }
         return $"HTTP {(int)statusCode}: {statusCode}";
     }
+
+    /// <summary>
+    /// A string property, or null when absent or not actually a string. Graph nests a non-string
+    /// "message" on some endpoints (an object with a "value"), which GetString() rejects outright.
+    /// </summary>
+    private static string? AsString(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString()
+            : null;
 
     /// <summary>
     /// Maps common Graph error codes to user-facing guidance strings.

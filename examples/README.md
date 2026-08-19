@@ -74,7 +74,6 @@ Connect-MgGraph -Scopes "User.Read.All", "Group.Read.All"   # adjust scopes per 
 | [resilience-status.ps1](resilience-and-telemetry/resilience-status.ps1) | Check, enable, and disable SDK resilience injection | `User.Read.All` |
 | [telemetry.ps1](resilience-and-telemetry/telemetry.ps1) | View request counts, retries, and throttle events for the session | `User.Read.All` |
 | [tune-rate-limits.ps1](resilience-and-telemetry/tune-rate-limits.ps1) | Tune rate limiter, retry count, and timeouts at runtime | `User.Read.All` |
-| [benchmark-resilience.ps1](resilience-and-telemetry/benchmark-resilience.ps1) | Benchmark: bare SDK vs MgxResilience vs Invoke-MgxRequest vs Export | `User.Read.All` |
 | [resource-unit-budgeting.ps1](resilience-and-telemetry/resource-unit-budgeting.ps1) | Measure what query shapes cost in resource units, and size a fan-out from the measurement | `Group.Read.All`, `User.Read.All` |
 | [pacing-observability.ps1](resilience-and-telemetry/pacing-observability.ps1) | Watch the adaptive pacer: slow start, per-workload buckets, and which throttle signals are real | `User.Read.All`, `Files.Read.All` |
 

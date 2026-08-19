@@ -756,11 +756,25 @@ public abstract class MgxCmdletBase : MgxCmdletCore
                 .FirstOrDefault();
             if (temp == null) return false;
 
+            // The output may already hold a COMPLETED run's items: success, then a crash on the
+            // next run, leaves a valid output file and an orphaned temp side by side. Adoption
+            // used to Move over the destination, which is why the caller guarded it on the output
+            // being absent - and that guard silently discarded the crashed run's items instead.
+            // Preserve what is there and append to it; build the combined file first so the
+            // destination is replaced in one Move rather than mutated in place.
+            var existing = File.Exists(outputPath) ? outputPath : null;
             long copied = 0;
             var adoptPath = outputPath + ".adopt";
-            using (var reader = new StreamReader(temp.FullName))
             using (var writer = new StreamWriter(adoptPath, append: false))
             {
+                if (existing != null)
+                {
+                    using var prior = new StreamReader(existing);
+                    string? kept;
+                    while ((kept = prior.ReadLine()) != null) writer.WriteLine(kept);
+                }
+
+                using var reader = new StreamReader(temp.FullName);
                 string? line;
                 while (copied < itemCount && (line = reader.ReadLine()) != null)
                 {
