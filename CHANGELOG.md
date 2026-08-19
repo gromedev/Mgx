@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+Intended as 2.1.0. Renamed to a version heading in the release commit, so nothing here
+claims to have shipped until it has.
+
+Adds proactive throttle avoidance, ranged content downloads, and resumable drive enumeration. 
+
+- Download content and/or metadata e.g. an entire SharePoint document library or OneDrive, or only the first few kilobytes of every file in it for dry-runs.
+- Avoid throttling rather than recover from it. Requests are now spaced before they are sent, per workload, with no configuration.
+
+### Added
+
+- Added adaptive request pacing by default, spacing requests prior to sending (backoff floor 2 rps, additive recovery, partitioned by drive, directory, batch, and other workloads) with opt-out via Set-MgxOption -NoAdaptivePacing.
+- Added Get-MgxContent to download file and media content whole or by byte range (-First), validating redirect Location headers against an allowlist, stripping bearer tokens on the second hop, and redacting capability URLs in debug output.
+- Added Sync-MgxDelta -CheckpointPath to resume interrupted enumerations at page boundaries or every 500 items in JSONL mode. Checkpoints automatically delete on 410 Gone errors or changed sync parameters.
+- Added Sync-MgxDelta -Latest to baseline state from the current moment without enumerating (using token=latest for drives and $deltatoken=latest elsewhere).
+- Added Sync-MgxDelta -Prefer to send drive delta Prefer tokens and force full re-syncs if tokens change.
+- Added Resource Units Consumed metrics to telemetry outputs, benchmark results, and examples.
+
+### Fixed
+
+- Fixed successful two-hop content downloads being reported as failed requests due to HTTP 302 redirect classification.
+- Fixed -Offset being ignored when servers return whole-body 200 responses, and fixed empty temp files overwriting existing -OutFile targets when offsets exceed file length.
+- Fixed adaptive pacing firing synchronized burst requests when queue sleep times were clamped.
+- Fixed Enable-MgxResilience failing to record telemetry (reporting TotalRequests=0 and causing divide-by-zero errors).
+- Fixed $batch envelopes being categorized under the Other workload bucket instead of their target workload.
+- Fixed slow start opening above lower configured ceilings (-RateLimitPerSecond 1..3).
+- Fixed ResiliencePipelineFactory.Reset() reverting configuration settings and retaining batch pacer state across credential changes.
+- Cached CancellationToken in MgxCmdletCore to prevent disposed object errors when handling file cleanup during Ctrl-C.
+- Fixed CI compatibility matrix parse failures that prevented verifying the PowerShell 7.4 floor.
+
+### Documentation
+
+- Documented Graph delta response duplication behaviors, recommending id deduplication and -Latest baselining.
+- Clarified that adaptive pacing applies to all requests except batch outer POSTs.
+- Documented measured throttling behaviors (absence of x-ms-throttle-limit-percentage headers, reliance on Retry-After/latency, and app+tenant scoped resource unit budgets).
+
 ## 2.0.1
 
 Patch release. Three fixes; no feature or API changes.

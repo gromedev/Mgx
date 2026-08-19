@@ -234,6 +234,37 @@ function Write-BenchResult {
             RuPerRequest     = $(if ($t.TotalRequests -gt 0) {
                                     [math]::Round($t.ResourceUnitsConsumed / $t.TotalRequests, 2)
                                 } else { 0 })
+            # Per-workload state, parsed from the pacer's own description. RU itself is a single
+            # tenant-wide counter, but the buckets tell you WHICH workload was being paced when
+            # the units were spent - a directory fan-out and a drive pull draw on limits that are
+            # documented and measured as independent, so a total alone hides which one is near
+            # its ceiling.
+            PacingState      = $t.PacingState
+            PacingBuckets    = $(
+                                    if ($t.PacingState) {
+                                        @($t.PacingState -split ';' | Where-Object { $_ } |
+                                          ForEach-Object {
+                                              $name, $rest = $_ -split ':', 2
+                                              [pscustomobject]@{
+                                                  Workload = $name.Trim()
+                                                  State    = if ($rest) { $rest.Trim() } else { '' }
+                                              }
+                                          })
+                                    } else { @() }
+                                )
+            # -1 means Graph never sent x-ms-throttle-limit-percentage. Measured live it never
+            # arrives, even during active 429s, so recording it per run is how we would notice
+            # if that ever changed.
+            LastThrottlePct  = $t.LastThrottlePercentage
+            RuPerSecond      = $(if ($t.ElapsedMs -gt 0) {
+                                    [math]::Round($t.ResourceUnitsConsumed / ($t.ElapsedMs / 1000), 1)
+                                } else { 0 })
+            # The documented budget is 8,000 RU per 10s per application+tenant pair for tenants
+            # above 500 users, i.e. 800 RU/s. Recorded as a ratio so a run that approaches the
+            # ceiling is obvious without re-deriving the arithmetic each time.
+            BudgetFraction   = $(if ($t.ElapsedMs -gt 0) {
+                                    [math]::Round(($t.ResourceUnitsConsumed / ($t.ElapsedMs / 1000)) / 800, 3)
+                                } else { 0 })
         }
     }
     catch {

@@ -1,6 +1,6 @@
 # Identify files by content WITHOUT downloading them: ranged reads.
 #
-# The field-study case behind Get-MgxContent: a metadata-extraction job
+# Get-MgxContent: a metadata-extraction job
 # over 20k drive files needed only each file's first 256 KB (magic bytes,
 # EXIF, partial hash) - ranged reads moved ~5 GB instead of 63 GB.
 #
