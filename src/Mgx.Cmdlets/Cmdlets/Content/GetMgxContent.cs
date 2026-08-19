@@ -65,6 +65,13 @@ public class GetMgxContent : MgxCmdletBase
 
     private string VersionedBaseUrl => $"{s_graphEndpoint}/{ApiVersion}";
     private string? _resolvedOutFile;
+
+    // -OutFile carries no ParameterSetName, so it binds in the InputObject set too and the help
+    // documents that combination. With a single destination and File.Move(overwrite: true) per
+    // record, piping N items downloaded all N and left one file - the last writer winning, with
+    // no warning and full transfer cost for the discarded ones. Export-MgxCollection and
+    // Sync-MgxDelta guard the analogous case; this did not.
+    private bool _wroteOutFile;
     private bool _transportChecked;
 
     protected override void BeginProcessing()
@@ -227,7 +234,20 @@ public class GetMgxContent : MgxCmdletBase
 
             if (_resolvedOutFile != null)
             {
+                if (_wroteOutFile)
+                {
+                    // Refuse rather than overwrite. Checked here, not in BeginProcessing, so the
+                    // legitimate single-piped-item case still works.
+                    ThrowTerminatingError(new ErrorRecord(
+                        new InvalidOperationException(
+                            "-OutFile writes a single file, but more than one item was piped in. "
+                            + "Each item would overwrite the last. Pipe one item, or omit -OutFile "
+                            + "and redirect the byte[] output per item."),
+                        "OutFileWithMultipleInputs", ErrorCategory.InvalidOperation, OutFile));
+                    return;
+                }
                 WriteToFile(result, maxBytes, skipBytes);
+                _wroteOutFile = true;
             }
             else
             {

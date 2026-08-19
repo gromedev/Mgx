@@ -1664,4 +1664,48 @@ public class DeltaQueryTests
             CleanupMockHttpClient();
         }
     }
+    [Fact]
+    public void Latest_is_refused_when_the_previous_state_was_discarded()
+    {
+        // -Latest baselines from now and returns nothing. After a state invalidation the user is
+        // told a full re-sync is starting; honouring -Latest there returns zero items and saves a
+        // fresh baseline, dropping every change since the last good sync. The "-Latest ignored"
+        // guard only covered the resume path, which an invalidated state never reaches - and
+        // -Latest's own help invites leaving it in a scheduled script, which is the setup that
+        // triggers it.
+        var handler = new MockHttpHandler();
+        handler.SetDefaultResponse(HttpStatusCode.OK, DeltaPage2WithToken);
+        InjectMockHttpClient(handler);
+        var deltaPath = Path.Combine(Path.GetTempPath(), $"latest-discard-{Guid.NewGuid()}.json");
+
+        try
+        {
+            // Stored state selected only id; this run asks for more, which invalidates it.
+            new DeltaState
+            {
+                DeltaLink = "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=stale",
+                Resource = "/users/delta",
+                GraphEndpoint = "https://graph.microsoft.com",
+                Select = "id",
+            }.Save(deltaPath);
+
+            using var ps = CreateTestShell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("Property", new[] { "id", "mail" })
+              .AddParameter("Latest");
+            ps.Invoke();
+
+            var requested = handler.Requests.Select(r => r.RequestUri!.ToString()).ToList();
+            Assert.NotEmpty(requested);
+            Assert.DoesNotContain(requested,
+                u => u.Contains("token=latest", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            DeltaState.Delete(deltaPath);
+            CleanupMockHttpClient();
+        }
+    }
 }

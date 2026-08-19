@@ -295,9 +295,15 @@ internal static class AdaptiveRequestPacer
         {
             var now = Stopwatch.GetTimestamp();
             s_lastThrottleTicks[b] = now;
-            s_adaptedRate[b] = s_adaptedRate[b] > 0
+            // Both branches clamp to the ceiling. Only the entry branch used to, so a REPEAT
+            // throttle could raise the cap: ReduceRate floors at MinAdaptiveRate (2), so with
+            // -RateLimitPerSecond 1 - a value the tuning help recommends verbatim - the second
+            // 429 moved the cap from 1 to 2, halved the spacing, and printed the
+            // self-contradictory "capped 2/1 rps". A throttle must never widen the gate.
+            var reduced = s_adaptedRate[b] > 0
                 ? AdaptivePacing.ReduceRate(s_adaptedRate[b])
-                : Math.Min(ThrottledEntryRate, s_ceilingRate);
+                : ThrottledEntryRate;
+            s_adaptedRate[b] = Math.Min(reduced, s_ceilingRate);
             s_slowStartRate[b] = 0; // the adapted cap governs from here
             s_lastRampTicks[b] = now;
         }

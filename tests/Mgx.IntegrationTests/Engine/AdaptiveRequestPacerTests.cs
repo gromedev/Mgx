@@ -429,6 +429,29 @@ public class AdaptiveRequestPacerTests
             $"the last waiter should honour its claimed slot (~2750ms), got {ordered[^1]}ms");
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void A_throttle_never_raises_the_cap_above_the_configured_ceiling(int ceiling)
+    {
+        // ReduceRate floors at MinAdaptiveRate (2), and only the first-throttle branch clamped to
+        // the ceiling. So a SECOND 429 under -RateLimitPerSecond 1 moved the cap from 1 to 2 -
+        // halving the spacing in response to being throttled, and reporting "capped 2/1 rps".
+        // Three throttles, because the bug needs a repeat to appear.
+        using var scope = new PacerScope();
+        AdaptiveRequestPacer.Configure(new ResilientGraphClientOptions { RateLimitPerSecond = ceiling });
+
+        for (var i = 0; i < 3; i++)
+        {
+            AdaptiveRequestPacer.RecordThrottle(WorkloadBucket.Directory, null);
+            var cap = AdaptiveRequestPacer.GetAdaptedRate(WorkloadBucket.Directory);
+            Assert.True(cap <= ceiling,
+                $"after {i + 1} throttle(s) the cap was {cap}, above the configured ceiling {ceiling}");
+        }
+    }
+
     [Fact]
     public async Task Batch_bucket_never_claims_a_pacing_slot()
     {

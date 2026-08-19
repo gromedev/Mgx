@@ -200,9 +200,20 @@ public class SyncMgxDelta : MgxCmdletBase
         // Validate delta state BEFORE GetClient() so validation errors
         // are surfaced without requiring a Graph connection.
         var (existingState, loadResult) = DeltaState.LoadWithResult(resolvedDeltaPath);
+        // -Latest means "baseline from now, return nothing". That is right for a first run and
+        // catastrophic after a state invalidation: the user is told a full re-sync is starting,
+        // gets zero items, and a fresh baseline token is persisted - so every change since the
+        // last successful sync is dropped permanently. The guard that warns "-Latest ignored"
+        // lives in the resume branch, which an invalidated state never reaches. Track it here
+        // and clear it wherever state is discarded.
+        var honourLatest = Latest.IsPresent;
+
         if (loadResult == DeltaLoadResult.Corrupt)
         {
             WriteWarning($"Delta state file '{DeltaPath}' is corrupt. Starting full sync.");
+            // A corrupt state means the previous position is unknown, which is exactly when
+            // baselining from now would hide the most: everything since the last good sync.
+            honourLatest = false;
         }
 
         if (existingState != null)
@@ -242,6 +253,7 @@ public class SyncMgxDelta : MgxCmdletBase
                     WriteVerbose($"Could not delete old delta state at '{DeltaPath}' (file may be locked). It will be overwritten.");
                 DeleteCheckpoint(resolvedCheckpointPath, "property selection changed");
                 existingState = null;
+                honourLatest = false;  // a discarded state is not a fresh run
             }
 
             // Detect Prefer change between runs: the tokens shape what the enumeration
@@ -259,6 +271,7 @@ public class SyncMgxDelta : MgxCmdletBase
                         WriteVerbose($"Could not delete old delta state at '{DeltaPath}' (file may be locked). It will be overwritten.");
                     DeleteCheckpoint(resolvedCheckpointPath, "Prefer headers changed");
                     existingState = null;
+                    honourLatest = false;  // a discarded state is not a fresh run
                 }
             }
 
@@ -274,6 +287,7 @@ public class SyncMgxDelta : MgxCmdletBase
                     WriteVerbose($"Could not delete old delta state at '{DeltaPath}' (file may be locked). It will be overwritten.");
                 DeleteCheckpoint(resolvedCheckpointPath, "filter changed");
                 existingState = null;
+                honourLatest = false;  // a discarded state is not a fresh run
             }
         }
 
@@ -327,7 +341,14 @@ public class SyncMgxDelta : MgxCmdletBase
             requestUrl = BuildListUrl(VersionedBaseUrl, Uri,
                 new ODataListParams(false, Top, Top > 0 ? Top : 999, Filter, Property, null, null, 0, null));
 
-            if (Latest.IsPresent)
+            if (Latest.IsPresent && !honourLatest)
+            {
+                WriteWarning(
+                    "-Latest ignored: the previous delta state was discarded, so this run must "
+                    + "enumerate to rebuild it. Baselining from now would silently drop every "
+                    + "change since the last successful sync.");
+            }
+            else if (honourLatest)
             {
                 // "Sync from now": returns an empty page plus a deltaLink; the existing
                 // empty-page-still-saves-token path persists the baseline. The token form
