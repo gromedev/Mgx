@@ -230,6 +230,23 @@ public class SyncMgxDelta : MgxCmdletBase
                 return;
             }
 
+            // The deltaLink is absolute and carries its own version, so a run that omits
+            // -ApiVersion silently keeps syncing whichever version built the state - the
+            // caller believes they are on the default and are not. Empty means a pre-2.0.1
+            // state file: unknown, not mismatched, so upgrades are not broken by this check.
+            if (!string.IsNullOrEmpty(existingState.ApiVersion)
+                && !string.Equals(existingState.ApiVersion, ApiVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                ThrowTerminatingError(new ErrorRecord(
+                    new InvalidOperationException(
+                        $"Delta state was created against Graph {existingState.ApiVersion} "
+                        + $"but this run requests {ApiVersion}. Re-run with "
+                        + $"-ApiVersion {existingState.ApiVersion}, or use -FullSync to rebuild "
+                        + $"against {ApiVersion}."),
+                    "DeltaApiVersionMismatch", ErrorCategory.InvalidOperation, null));
+                return;
+            }
+
             // Detect resource/URI change between runs
             if (!string.Equals(existingState.Resource, Uri, StringComparison.OrdinalIgnoreCase))
             {
@@ -676,7 +693,8 @@ public class SyncMgxDelta : MgxCmdletBase
                         Prefer = prefer, // Normalized, like Select
                         Resource = Uri,
                         ItemCount = totalProcessed,
-                        GraphEndpoint = s_graphEndpoint
+                        GraphEndpoint = s_graphEndpoint,
+                        ApiVersion = ApiVersion
                     }.Save(deltaPath);
                     WriteVerbose($"Delta state saved to '{deltaPath}'.");
                 }

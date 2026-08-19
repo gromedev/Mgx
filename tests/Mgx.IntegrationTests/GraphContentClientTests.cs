@@ -88,8 +88,12 @@ public class GraphContentClientTests : IDisposable
 
         Assert.DoesNotContain("SECRETTOKEN", trace);
         Assert.DoesNotContain("tempauth", trace);
-        // The diagnostic value - host and path - survives.
-        Assert.Contains("contoso-my.sharepoint.com/_layouts/15/download.aspx?<redacted>", trace);
+        // Only scheme and host survive. The path goes too, deliberately: not every download
+        // host puts the capability in the query - some carry it in a path segment - and the
+        // tracer cannot tell those apart. The host answers the question -Debug is actually
+        // asked here ("where did this redirect go?"); the path adds little and can leak.
+        Assert.Contains("https://contoso-my.sharepoint.com/<redacted>", trace);
+        Assert.DoesNotContain("_layouts", trace);
     }
 
     // --- allowlist enforcement, both hops ---

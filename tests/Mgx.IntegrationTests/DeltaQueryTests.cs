@@ -232,6 +232,55 @@ public class DeltaQueryTests
         }
     }
 
+    [Fact]
+    public void DeltaState_RoundTrips_TheApiVersion_ItWasBuiltAgainst()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"delta-test-{Guid.NewGuid()}.json");
+        try
+        {
+            new DeltaState
+            {
+                DeltaLink = "https://graph.microsoft.com/beta/users/delta?$deltatoken=abc",
+                Resource = "/users/delta",
+                GraphEndpoint = "https://graph.microsoft.com",
+                ApiVersion = "beta"
+            }.Save(path);
+
+            Assert.Equal("beta", DeltaState.Load(path)!.ApiVersion);
+        }
+        finally
+        {
+            DeltaState.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void DeltaState_WrittenBefore_2_0_1_LoadsWithAnUnknownApiVersion()
+    {
+        // Upgrade path: state files in the wild have no apiVersion key. They must load as
+        // "unknown" so the cmdlet's mismatch check skips them, not fail or default to a
+        // version that would spuriously conflict with the run's own -ApiVersion.
+        var path = Path.Combine(Path.GetTempPath(), $"delta-test-{Guid.NewGuid()}.json");
+        try
+        {
+            File.WriteAllText(path, """
+                {
+                  "deltaLink": "https://graph.microsoft.com/v1.0/users/delta?$deltatoken=abc",
+                  "resource": "/users/delta",
+                  "graphEndpoint": "https://graph.microsoft.com"
+                }
+                """);
+
+            var loaded = DeltaState.Load(path);
+            Assert.NotNull(loaded);
+            Assert.Equal(string.Empty, loaded!.ApiVersion);
+        }
+        finally
+        {
+            DeltaState.Delete(path);
+        }
+    }
+
     // --- LoadWithResult tests (Fix 6) ---
 
     [Fact]

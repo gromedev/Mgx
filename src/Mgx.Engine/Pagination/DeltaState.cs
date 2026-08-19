@@ -40,6 +40,13 @@ public sealed class DeltaState
     [JsonPropertyName("graphEndpoint")]
     public string GraphEndpoint { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Graph API version the deltaLink was issued by. Empty on state files written before
+    /// 2.0.1, which is treated as "unknown" rather than a mismatch so upgrades keep working.
+    /// </summary>
+    [JsonPropertyName("apiVersion")]
+    public string ApiVersion { get; set; } = string.Empty;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true

@@ -79,6 +79,36 @@ public class RequestTraceTests
         Assert.Equal(payload, await response.Content.ReadAsStringAsync(Ct));
     }
 
+    [Theory]
+    // Query-borne capability: the SharePoint/OneDrive-for-Business download shape.
+    [InlineData("https://contoso-my.sharepoint.com/personal/x/_layouts/15/download.aspx?UniqueId=1&tempauth=THE_SECRET&ApiVersion=2.0", "THE_SECRET")]
+    // Path-borne capability: some download hosts put it in a path segment instead, so cutting
+    // the trace at '?' is not enough - only host-level truncation covers both.
+    [InlineData("https://public.bl.files.1drv.com/y4mTHE_SECRET/file.bin", "THE_SECRET")]
+    public async Task Redacts_the_capability_in_a_content_redirect_Location(string location, string secret)
+    {
+        var handler = new StubHttpMessageHandler().Enqueue(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Found);
+            response.Headers.Location = new Uri(location);
+            return response;
+        });
+        var (client, http, debug) = NewClient(handler, debugEnabled: true);
+        using var _ = http;
+
+        using var response = await client.SendAsync(HttpMethod.Get,
+            "https://graph.microsoft.com/v1.0/drives/d/items/i/content", cancellationToken: Ct);
+        client.DrainDebugMessages();
+
+        var trace = Assert.Single(debug, m => m.StartsWith("[Mgx] Response", StringComparison.Ordinal));
+        // A pre-authenticated URL grants the bytes without a bearer token. -Debug output is what
+        // users paste into issue reports, so the capability must never reach it.
+        Assert.DoesNotContain(secret, trace, StringComparison.Ordinal);
+        Assert.Contains("<redacted>", trace);
+        // The host is the diagnostic value and is safe to keep.
+        Assert.Contains(new Uri(location).Host, trace, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Redacts_credentials_from_the_traced_body()
     {

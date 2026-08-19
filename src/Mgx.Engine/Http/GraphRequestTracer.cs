@@ -97,16 +97,18 @@ internal static partial class GraphRequestTracer
     private static string Join(IEnumerable<string> values) => string.Join(", ", values);
 
     /// <summary>
-    /// A content 302's Location carries a pre-authenticated URL: its query string
-    /// (tempauth/SAS token) is a bearer-free capability for the file bytes, so tracing it
-    /// verbatim is a credential leak. Keep the host+path (the diagnostic value), drop the
-    /// query. The JSON-value redaction regex cannot catch header URLs, hence this hook.
+    /// A content 302's Location is a pre-authenticated URL: it grants the file bytes without a
+    /// bearer token, so tracing it verbatim writes a live credential into -Debug output. The
+    /// capability is not always in the query - some download hosts carry it in the path - so
+    /// keep only scheme and host, which is the whole diagnostic value of the header anyway.
+    /// The JSON-body redaction cannot reach header values, hence this hook.
     /// </summary>
     private static string RedactHeaderValue(string name, string value)
     {
         if (!name.Equals("Location", StringComparison.OrdinalIgnoreCase)) return value;
-        var cut = value.IndexOf('?');
-        return cut < 0 ? value : value[..cut] + "?<redacted>";
+        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            ? $"{uri.Scheme}://{uri.IdnHost}/<redacted>"
+            : "<redacted>";
     }
 
     /// <summary>Redact credential-looking JSON properties, then truncate.</summary>
