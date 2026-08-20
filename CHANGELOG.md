@@ -18,6 +18,8 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 - -Latest was honoured after a state invalidation, dropping every change since the last sync.
 - Delta resume dropped the interrupted run's items when an earlier run had already completed, and advanced the delta token past them.
 - Export resume dropped the interrupted run's items when an earlier export had already written the output file.
+- Export resume wrote a page's items twice when a run was interrupted twice inside the same page.
+- A denied or read-only output file ended a delta sync with an unhandled error on Windows.
 - Enumeration returned part of a collection without error when a nextLink was refused.
 - A delta sync stopped with an error when a page contained a non-object item.
 - Get-MgxContent left an unwritable -OutFile as an unhandled error naming a temp path.
