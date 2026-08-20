@@ -17,6 +17,9 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 
 - -Latest was honoured after a state invalidation, dropping every change since the last sync.
 - Delta resume dropped the interrupted run's items when an earlier run had already completed, and advanced the delta token past them.
+- Export resume dropped the interrupted run's items when an earlier export had already written the output file.
+- Enumeration returned part of a collection without error when a nextLink was refused.
+- A delta sync stopped with an error when a page contained a non-object item.
 - Get-MgxContent left an unwritable -OutFile as an unhandled error naming a temp path.
 - A non-Graph JSON error body threw from inside the exception it was being used to build, surfacing a CDN failure as a security refusal.
 - A $batch 429 set a pacing cap that nothing enforced and nothing cleared, so telemetry reported it forever.
