@@ -1,10 +1,11 @@
 # Mgx
+Microsoft Graph becomes difficult when a PowerShell process turns into a long-running, concurrent, stateful workload operating against a throttled and eventually consistent API. Sequential lookups are slow at scale, long-running requests can hang on dead connections, and scripts that do not explicitly handle throttling or transient failures can lose data or require manual recovery.
 
-Microsoft Graph PowerShell works well for ordinary scripting, but high-volume operations can become difficult to handle efficiently. Sequential lookups are slow at scale, long-running requests can hang on dead connections, and scripts that do not explicitly handle throttling or transient failures can lose data or require manual recovery.
+Given a large Graph workload, Mgx can execute it efficiently, preserve correctness, adapt to Graph's limits, survive transient failure and state changes, remain observable, and recover without forcing the caller to implement the machinery itself.
 
-Mgx adds concurrency, streaming pagination, batching, and resilience features to Microsoft Graph PowerShell while using the existing `Connect-MgGraph` authentication context.
+Mgx does this by adding concurrency, streaming pagination, batching, and resilience features to Microsoft Graph PowerShell while (optionally) using the existing `Connect-MgGraph` authentication context.
 
-In benchmarks, operations that benefit from concurrency and batching were **4–5× faster** than the Microsoft Graph SDK. On plain enumeration, where there is nothing to parallelize, it comes out about level with a tuned SDK - the difference being that it needs no tuning to get there. Mgx also provides resilience for throttling, transient failures, dead connections, and interrupted long-running operations: under injected `429` and `503` faults it completed 1,000 of 1,000 lookups with no failures, where a naive REST loop silently dropped 180.¹
+In benchmarks, operations that benefit from concurrency and batching were **4–5× faster** than the Microsoft Graph SDK. On plain enumeration, where there is nothing to parallelize, it comes out about level with a tuned SDK - the difference being that it needs no tuning to get there. Mgx also provides resilience for throttling, transient failures, dead connections, and interrupted long-running operations: enumerating a 100,000-user tenant while its request budget was held at the ceiling, it returned all 100,000, where a plain `Invoke-RestMethod` loop returned 1,700.¹
 
 <sup>¹ Tested under sustained throttle waves, injected 429/503 faults, dead sockets, and `kill -9` during export. See [`tests/benchmarks/`](tests/benchmarks/).</sup>
 
@@ -51,47 +52,71 @@ across the session and paces against the budget they are charged to. See
 
 <sup>Measured from `x-ms-resource-unit`. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table exactly. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity & Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
 
-### Resilience Under Faults & Throttling
+### Resilience under throttling
 
-1,000 lookups against a server injecting `429` on 15% of ids and `503` twice on a further 3%:
+Enumerating all 100,000 users of a test tenant while a second client held the application's
+resource-unit budget at its ceiling. Ground truth is `/users/$count`, which the directory
+serves from its own index rather than by walking pages, so it cannot inherit a pagination
+fault from the thing it is being used to check.
 
-| Contender                        | Retrieved     |    Lost | Wall time |
-| -------------------------------- | ------------: | ------: | --------: |
-| Mgx                              | **1,000** / 1,000 |   0 |    132.8s |
-| SDK + `Enable-MgxResilience`     | **1,000** / 1,000 |   0 |    211.6s |
-| Bare SDK                         | **1,000** / 1,000 |   0 |    211.8s |
-| `Invoke-RestMethod` loop, no retry |     820 / 1,000 | **180** |      1.0s |
+| Contender                          |             Retrieved | Missing | Duplicates | Wall time |
+| ---------------------------------- | --------------------: | ------: | ---------: | --------: |
+| `Invoke-MgxRequest -All`           | **100,000** / 100,000 |       0 |          0 |    715.2s |
+| `Get-MgUser -All`                  | **100,000** / 100,000 |       0 |          0 |    729.9s |
+| `Invoke-RestMethod` + fixed retry  |       8,000 / 100,000 |  92,000 |          0 |    120.0s |
+| `Invoke-RestMethod`, no retry      |       1,700 / 100,000 |  98,300 |          0 |      5.5s |
 
-The last row is the one worth looking at. It finishes in a second, reports no error, and returns
-82% of the data - the failure mode a script only discovers downstream, if at all. Retrieving
-everything costs two orders of magnitude more wall time, and that is the whole trade.
+The bottom row finishes in five and a half seconds holding 1.7% of the tenant. Both the SDK
+and Mgx return everything - the SDK's retry handler is correct here, and fifteen seconds
+between them across twelve minutes is not a difference worth reading into. What separates the
+table is whether a contender honors `Retry-After` at all, not which library it comes from.
 
-Adding `Enable-MgxResilience` to the SDK neither helps nor hurts against this fault profile,
-because the SDK's own retry handler already covers it. What it adds is not covered here: per-request
-body-read timeouts and periodic connection recycling, so a dead socket surfaces as a
-retryable error rather than an indefinite hang. The benchmark suite runs its SDK baselines
-inside watchdogged child processes for exactly that reason - bare SDK cmdlets have no default
+Run again with the budget untouched, all four return exactly 100,000 with no duplicates.
+The gap is produced by throttling, not by enumeration.
+
+Adding `Enable-MgxResilience` to the SDK neither helps nor hurts here, because the SDK's own
+retry handler already covers throttling. What it adds is not covered by this table: per-request
+body-read timeouts and periodic connection recycling, so a dead socket surfaces as a retryable
+error rather than an indefinite hang. The benchmark suite runs its SDK baselines inside
+watchdogged child processes for exactly that reason - bare SDK cmdlets have no default
 body-read timeout and have hung indefinitely during these runs.
 
-Read the mgx figure with its cause in view. This harness injects `429`s on a fixed schedule keyed
-on entity id, so the fault rate is **independent of how fast you send**. Adaptive pacing responds to
-those throttle signals by spacing subsequent requests - 447s of accumulated wait across 994 of 2,000
-requests - and on a mock whose faults cannot be avoided, that spacing is pure cost. It is the one
-condition where backing off can buy nothing.
+### Delta enumerations repeat themselves
 
-Against a real tenant the pacer behaves differently, because it only constrains while ramping from
-cold or while backing off from an observed throttle. Once slow start reaches the configured ceiling
-it deactivates, and with no throttling there is no adapted cap, so the gate is inert. Measured on the
-100k-user tenant, 8,000 concurrent reads with pacing on and off:
+A delta run does not paginate a snapshot, so one object can arrive on several pages of the
+same enumeration. Against a tenant of 15,779 groups, over 1,135 pages:
+
+| Contender                                 | Emitted | Distinct |
+| ----------------------------------------- | ------: | -------: |
+| `Invoke-RestMethod` over `/groups/delta`  | 172,740 |   17,467 |
+| `Sync-MgxDelta` over the same resource    | 172,740 |   17,467 |
+
+Ten objects handed back for every one the directory holds. Mgx does not deduplicate this: it
+is 126 seconds quicker over the same pages and exactly as repetitive. Deduplicating correctly
+means choosing which occurrence of an id wins when a single run reports the same object both
+live and `@removed`, and which occurrence is last is not knowable while streaming without
+retaining every id seen. Until that is settled, dedupe downstream on `id`.
+
+Distinct exceeds the group count because a full delta also returns tombstones for deleted
+groups - 16,324 of the objects above carry `@removed`.
+
+### What adaptive pacing costs when nothing is throttling
+
+The pacer only constrains while ramping from cold or while backing off from an observed throttle.
+Once slow start reaches the configured ceiling it deactivates, and with no throttling there is no
+adapted cap, so the gate is inert. Measured on the 100k-user tenant, 8,000 concurrent reads with
+pacing on and off:
 
 | | wall | throttle retries | pacing wait |
 | --- | ---: | ---: | ---: |
 | Adaptive pacing on *(default)* | 39.4s | 0 | 0s, 0 activations |
 | `-NoAdaptivePacing` | 40.3s | 0 | - |
 
-No 429s appeared at any concurrency the module permits; Graph absorbed the load by inflating latency
-from 113ms to ~1s instead. That is consistent with the throttling behaviour documented below, and it
-is why pacing reacts to `Retry-After` and latency drift rather than to a header that never arrives.
+No 429s appeared at any concurrency the module permits. It caps at 128, and this tenant sustained
+276 RU/s for 45s without refusing anything - a raw client only crosses the ceiling at around 200
+requests in flight, which is past what Mgx will issue. Graph absorbed the load by inflating latency
+from 113ms to ~1s instead. That is why pacing reacts to `Retry-After` and latency drift rather than
+to a header that never arrives.
 
 ### Memory Efficiency & Recovery
 
@@ -251,7 +276,7 @@ Both figures match the [documented cost table](https://learn.microsoft.com/en-us
 
 Three findings from pushing a single client until the tenant pushed back:
 
-- **The budget behaves like the documented token bucket.** The published limit for a tenant of this size is 8,000 RU per 10 s per *application + tenant pair* (800 RU/s). A single client sustained **882 RU/s with zero throttling** - about 10 % over, consistent with bucket burst capacity draining - and the first 429s appeared around **1,200 RU/s**, roughly 50 % over.
+- **The budget behaves like a token bucket, and burst hides its rate.** The published limit for a tenant of this size is 8,000 RU per 10 s per *application + tenant pair* (800 RU/s). Held at a fixed rate for 45 s from a single client: **276 RU/s never throttled**, 631 RU/s began refusing after 34 s, and 1,143 RU/s after 17 s. Once saturated the tenant served about **440 RU/s** however hard it was pushed. A short run at any of those rates shows nothing - the bucket starts full, so the first ~19,000 RU are free regardless of how fast they are spent, which is why a burst measurement reads as a much higher sustained ceiling than the tenant actually has.
 - **`x-ms-throttle-limit-percentage` was never emitted** - not at 1.5x the documented budget, and not while the tenant was actively returning 429s. Mgx therefore treats it as opportunistic and paces on 429 + `Retry-After` and latency drift, which are reliable.
 - **Batching does not buy cheaper units.** Unbatched requests sustained a *higher* RU/s before throttling than the same requests inside `$batch`. Batching saves round-trips, not budget.
 
