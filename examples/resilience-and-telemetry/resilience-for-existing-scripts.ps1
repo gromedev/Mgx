@@ -16,3 +16,9 @@ Enable-MgxResilience
 # retry and circuit breaker protection.
 $users = Get-MgUser -All -Property displayName, mail
 Write-Host "Got $($users.Count) users via SDK (with Mgx resilience)"
+
+<#
+Expected output:
+
+Got 28 users via SDK (with Mgx resilience)
+#>

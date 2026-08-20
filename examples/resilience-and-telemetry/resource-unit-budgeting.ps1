@@ -91,3 +91,44 @@ Why this matters
     was never observed in testing, even while the tenant was actively returning 429s. Do not
     build a control loop that depends on it; rely on 429 + Retry-After, which is reliable.
 "@ -ForegroundColor DarkGray
+
+<#
+Expected output:
+
+=== What each query shape costs ===
+
+Query                       ResourceUnits
+-----                       -------------
+group members (bare)                    3
+group members ($select)                 2
+transitiveMembers (bare)                4
+transitiveMembers ($select)             3
+single group read                       1
+users list ($top=25)                    2
+users list ($select)                    1
+
+
+=== Sizing a per-group fan-out over the whole tenant ===
+  groups in tenant   : 15,779
+  cost per group     : 3 RU  (transitiveMembers ($select))
+  total cost         : 47,337 RU
+  floor at 800 RU/s : 59s (1.0 min) of pure budget consumption
+
+  Dropping $select would cost 15,779 RU more (33% increase).
+
+=== Session telemetry ===
+  requests           : 9  (9 ok, 0 failed)
+  resource units     : 18
+  throttle retries   : 0
+  pacing waits       : 1496 ms over 8 activations
+  average cost       : 2.00 RU per request
+
+Why this matters
+  * Cost is a property of the query SHAPE, not the object count. Adding $select reduces it;
+    $expand increases it. Measure the shape you are about to run 15,000 times.
+  * A 403 or 400 costs 0 RU. A fan-out that fails uniformly consumes no budget and triggers no
+    throttling - it looks fast and healthy while measuring nothing. Check status, not duration.
+  * x-ms-throttle-limit-percentage is documented as a proximity warning above 0.8 of budget. It
+    was never observed in testing, even while the tenant was actively returning 429s. Do not
+    build a control loop that depends on it; rely on 429 + Retry-After, which is reliable.
+#>

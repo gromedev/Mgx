@@ -44,3 +44,18 @@ $mixed | ForEach-Object {
                else { '(no body)' }
     Write-Host ("  {0,-6} {1,-3} {2,-24} {3}" -f $_.Method, $_.Status, $_.Url, $summary)
 }
+
+<#
+Expected output:
+
+Batch returned 4 responses
+  200 /users?$top=5&$select=displayName,userPrincipalName 5 item(s)
+  200 /groups?$top=5&$select=displayName,groupTypes  5 item(s)
+  200 /applications?$top=5&$select=displayName,appId 5 item(s)
+  200 /subscribedSkus                                3 item(s)
+
+Mixed-method batch:
+  GET    200 /me                      MOD Administrator
+  GET    200 /organization            1 item(s)
+  GET    200 /users?$top=1            1 item(s)
+#>

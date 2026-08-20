@@ -18,3 +18,17 @@ foreach ($user in $enriched) {
     if (-not $licenses) { $licenses = "(none)" }
     Write-Host "$($user.displayName)  |  Manager: $mgr  |  Licenses: $licenses"
 }
+
+<#
+Expected output:
+
+Adele Vance  |  Manager: Nestor Wilke  |  Licenses: SPE_E5
+Alex Wilber  |  Manager: Megan Bowen  |  Licenses: SPE_E5
+Allan Deyoung  |  Manager: Nestor Wilke  |  Licenses: SPE_E5, EMSPREMIUM
+Brian Johnson  |  Manager: Lee Gu  |  Licenses: SPE_E3
+Cameron White  |  Manager: Adele Vance  |  Licenses: SPE_E3
+Christie Cline  |  Manager: Nestor Wilke  |  Licenses: SPE_E5
+Debra Berger  |  Manager: Nestor Wilke  |  Licenses: SPE_E5
+Delia Dennis  |  Manager: Allan Deyoung  |  Licenses: SPE_E5, EMSPREMIUM
+...
+#>

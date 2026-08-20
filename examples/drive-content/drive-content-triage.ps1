@@ -119,3 +119,36 @@ Write-Host "`n=== What triage saved ===" -ForegroundColor Cyan
 ''
 "  Scale that up: reading 4 KB of 112,000 files is ~460 MB regardless of whether those files"
 "  total 60 GB or 600 GB. The saving is the ratio, and it grows with the library."
+
+<#
+Expected output:
+
+Enumerating /me/drive ...
+  6 file(s) to triage
+
+=== Triage ===
+
+Name                       Size Kind    Read Note
+----                       ---- ----    ---- ----
+Q4-Revenue-Report.pdf 2,418,912 PDF     4096
+Contoso-Logo.png        148,326 PNG     4096
+Meeting-Notes.txt        12,480 TEXT    4096
+placeholder.txt               0 UNKNOWN    0
+telemetry.bin            65,536 UNKNOWN 4096
+Campaign-Assets.zip   5,242,880 ZIP     4096
+
+
+=== Fetching 2 selected file(s) whole ===
+  Q4-Revenue-Report.pdf                         2,418,912 bytes
+  Meeting-Notes.txt                                12,480 bytes
+
+=== What triage saved ===
+  files examined      : 6
+  total size on drive : 7,888,134 bytes
+  read for triage     : 20,480 bytes (0.26% of the total)
+  transferred overall : 2,451,872 bytes  (triage + the 2 full downloads)
+  resource units      : 9
+
+  Scale that up: reading 4 KB of 112,000 files is ~460 MB regardless of whether those files
+  total 60 GB or 600 GB. The saving is the ratio, and it grows with the library.
+#>

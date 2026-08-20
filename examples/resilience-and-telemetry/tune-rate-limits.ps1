@@ -24,3 +24,40 @@ Write-Host "Users: $($users.Count)"
 Set-MgxOption -Reset
 
 Get-MgxOption
+
+<#
+Expected output:
+
+Rate Limit Burst        : 200
+Rate Limit/sec          : 50
+No Rate Limit           : False
+No Adaptive Pacing      : False
+Queue Limit             : 500
+Max Retry Attempts      : 7
+Max Retry-After (s)     : 120
+Total Timeout (s)       : 300
+Attempt Timeout (s)     : 30
+CB Duration (s)         : 15
+CB Failure Ratio        : 0.1
+CB Min Throughput       : 40
+CB Sampling (s)         : 30
+Batch Chunk Concurrency : 1
+Batch Items/sec         : 20
+
+Users: 28
+Rate Limit Burst        : 200
+Rate Limit/sec          : 50
+No Rate Limit           : False
+No Adaptive Pacing      : False
+Queue Limit             : 500
+Max Retry Attempts      : 7
+Max Retry-After (s)     : 120
+Total Timeout (s)       : 300
+Attempt Timeout (s)     : 30
+CB Duration (s)         : 15
+CB Failure Ratio        : 0.1
+CB Min Throughput       : 40
+CB Sampling (s)         : 30
+Batch Chunk Concurrency : 1
+Batch Items/sec         : 20
+#>

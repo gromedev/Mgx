@@ -21,3 +21,17 @@ $stale |
     Sort-Object approximateLastSignInDateTime |
     Select-Object displayName, operatingSystem, approximateLastSignInDateTime, accountEnabled |
     Format-Table -AutoSize
+
+<#
+Expected output:
+
+Stale devices (90+ days): 5
+
+displayName      operatingSystem approximateLastSignInDateTime accountEnabled
+-----------      --------------- ----------------------------- --------------
+ISAIAHL-LAPTOP   Windows         9/13/2025 1:55:10 AM                   False
+ADELEV-SURFACE   Windows         1/17/2026 10:17:15 PM                   True
+CONTOSO-KIOSK-02 Windows         2/14/2026 3:15:20 AM                    True
+CONTOSO-MAC-04   macOS           4/10/2026 1:10:32 PM                    True
+MEGANB-IPAD      iOS             5/16/2026 5:23:58 AM                    True
+#>

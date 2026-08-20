@@ -110,3 +110,69 @@ $swOn.Stop()
 
 Show-PacingState "final"
 Set-MgxOption -Reset
+
+<#
+Expected output:
+
+=== 1. A cold session has no pacing state ===
+
+before any request
+  requests           : 0  (0 ok, 0 failed)
+  pacing waits       : 0 ms over 0 activations
+  throttle retries   : 0   rate-limiter waits: 0 ms
+  resource units     : 0
+  pacing state       : (no bucket has seen traffic yet)
+  last throttle %    : -1
+
+=== 2. Slow start on a cold directory workload ===
+  fetched 28 users in 0.4s
+
+after a directory read
+  requests           : 1  (1 ok, 0 failed)
+  pacing waits       : 0 ms over 0 activations
+  throttle retries   : 0   rate-limiter waits: 0 ms
+  resource units     : 1
+  pacing state       : directory: slow-start 4 rps, latency 241ms (1.0x of 241ms baseline)
+  last throttle %    : -1
+
+=== 3. A second workload gets its own independent bucket ===
+  drive reachable - watch a second bucket appear in the state line below
+
+after touching a second workload
+  requests           : 2  (2 ok, 0 failed)
+  pacing waits       : 0 ms over 0 activations
+  throttle retries   : 0   rate-limiter waits: 0 ms
+  resource units     : 2
+  pacing state       : drive: slow-start 4 rps; directory: slow-start 4 rps, latency 241ms (1.0x of 241ms baseline)
+  last throttle %    : -1
+
+=== 4. Did Graph ever send the proximity header? ===
+  LastThrottlePercentage = -1
+
+  Negative means Graph has not sent x-ms-throttle-limit-percentage on any response in this
+  session. That is the expected result. In testing it was never emitted, including during runs
+  that were actively being throttled 8,203 times - so a control loop built on it would be dead
+  code that looks like a feature.
+
+  What the pacer uses instead, in order of reliability:
+    1. 429 + Retry-After  - unambiguous, always honored
+    2. latency drift      - throughput fell ~19x under load before recovering
+    3. this percentage    - welcome when present, assumed absent
+
+=== 5. A/B: the same fan-out with pacing off ===
+  8 lookups, pacing OFF : 0.71s
+  8 lookups, pacing ON  : 1.93s
+  difference             : 1.22s
+
+  A cold bucket pays slow start; a warm one usually pays nothing. The cost that matters is the
+  one you avoid - a throttled fan-out that collapses from 322 rps to 17 rps and takes 15 minutes
+  to drain.
+
+final
+  requests           : 18  (18 ok, 0 failed)
+  pacing waits       : 6193 ms over 8 activations
+  throttle retries   : 0   rate-limiter waits: 0 ms
+  resource units     : 18
+  pacing state       : drive: slow-start 4 rps; directory: slow-start 8 rps, latency 198ms (0.9x of 224ms baseline)
+  last throttle %    : -1
+#>

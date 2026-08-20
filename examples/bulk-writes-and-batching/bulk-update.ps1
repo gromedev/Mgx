@@ -24,3 +24,9 @@ $results = $userIds `
 $ok   = ($results | Where-Object { $_.Status -lt 400 }).Count
 $fail = ($results | Where-Object { $_.Status -ge 400 }).Count
 Write-Host "Updated: $ok  Failed: $fail"
+
+<#
+Expected output:
+
+Updated: 3  Failed: 0
+#>

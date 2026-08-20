@@ -29,3 +29,16 @@ $targets | Select-Object displayName, mail, createdDateTime | Format-Table -Auto
 
 # Preview - remove -WhatIf to execute
 $targets | Invoke-MgxRequest '/users/{id}' -Method DELETE -WhatIf
+
+<#
+Expected output:
+
+Targets: 2
+
+displayName   mail                        createdDateTime
+-----------   ----                        ---------------
+Bianca Pisani bianca.pisani@fabrikam.com  7/3/2025 8:13:54 PM
+Raul Razo     raul.razo@woodgrovebank.com 12/30/2025 11:43:39 AM
+
+What if: Performing the operation "Bulk write" on target "DELETE 2 items via /users/{id}".
+#>

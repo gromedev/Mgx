@@ -14,3 +14,13 @@ $allMembers = Invoke-MgxRequest /groups -All -Property id,displayName |
 
 Write-Host "Total members across all groups: $($allMembers.Count)"
 $allMembers | Group-Object '@odata.type' | Format-Table Name, Count -AutoSize
+
+<#
+Expected output:
+
+Total members across all groups: 30
+
+Name                  Count
+----                  -----
+#microsoft.graph.user    30
+#>

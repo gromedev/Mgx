@@ -21,3 +21,13 @@ $result = Export-MgxCollection /users `
     -Property id,displayName,mail,department,jobTitle,accountEnabled
 
 Write-Host "Exported $($result.ItemCount) users to $outputFile"
+
+<#
+Expected output:
+
+Exported 28 users to ./users.jsonl
+
+users.jsonl (first 2 lines):
+{"displayName":"Adele Vance","jobTitle":"Retail Manager","accountEnabled":true,"department":"Re...
+{"displayName":"Alex Wilber","jobTitle":"Marketing Assistant","accountEnabled":true,"department...
+#>

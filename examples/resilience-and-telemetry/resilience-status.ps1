@@ -23,3 +23,17 @@ Write-Host "Got $($users.Count) users via SDK (with resilience)"
 # Remove injection - restore original SDK behavior
 Disable-MgxResilience
 Get-MgxResilience   # IsEnabled: False, IsActive: False
+
+<#
+Expected output:
+
+IsEnabled : False
+IsActive  : False
+
+IsEnabled : True
+IsActive  : True
+
+Got 5 users via SDK (with resilience)
+IsEnabled : False
+IsActive  : False
+#>

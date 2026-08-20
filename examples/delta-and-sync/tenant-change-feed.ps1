@@ -62,3 +62,21 @@ if ($new.Count -gt 0) {
     Write-Host "Review new/changed service principals:"
     $new | Select-Object appDisplayName, appId, accountEnabled | Format-Table -AutoSize
 }
+
+<#
+Expected output:
+
+First run: baselining groups from now (no initial enumeration).
+Groups changed: 3  |  Service principals: 3 changed, 0 removed
+Review new/changed service principals:
+
+appDisplayName            appId                                accountEnabled
+--------------            -----                                --------------
+Contoso Expense Portal    dbc7b719-a215-42e9-bf03-7f78957e21a9           True
+Contoso HR Sync           01d9b6b1-564d-4c5d-843f-10c58eccdffd           True
+Contoso Reporting Service 14b89564-33a9-402c-ab8e-2bc84a7164ab          False
+
+tenant-feed/groups-feed.jsonl (first 2 lines):
+{"displayName":"Mark 8 Project Team","groupTypes":["Unified"],"id":"5cf66b99-8a06-436a-8107-644...
+{"displayName":"Engineering All Hands","groupTypes":["Unified"],"id":"24ffeed6-38b4-4bee-ae29-f...
+#>

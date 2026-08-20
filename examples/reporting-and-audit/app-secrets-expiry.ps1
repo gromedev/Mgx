@@ -33,3 +33,14 @@ if ($expiring) {
 } else {
     Write-Host "No credentials expiring within 30 days."
 }
+
+<#
+Expected output:
+
+App                       Type        ExpiresOn  DaysLeft
+---                       ----        ---------  --------
+Contoso Partner Portal    Certificate 2026-08-23        2
+Contoso Expense Portal    Secret      2026-08-26        5
+Contoso HR Sync           Certificate 2026-09-10       20
+Contoso Field Service App Secret      2026-09-17       27
+#>

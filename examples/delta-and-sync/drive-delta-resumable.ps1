@@ -34,3 +34,16 @@ Write-Host "$($live.Count) live items, $(@($items | Where-Object deleted).Count)
 # Tip - track changes WITHOUT the initial enumeration: baseline from now
 # with -Latest, then every later run returns only changes:
 #   Sync-MgxDelta /me/drive/root/delta -DeltaPath $deltaFile -Latest
+
+<#
+Expected output:
+
+VERBOSE: No existing delta state. Performing full initial sync.
+VERBOSE: Delta state saved to '/tmp/tenant-sync/drive-delta.json'.
+VERBOSE: Delta sync complete: 11 items in 0.2s. Output: /tmp/tenant-sync/drive-items.jsonl
+10 live items, 1 deleted
+
+drive-items.jsonl (first 2 lines):
+{"id":"01381BR3EHVNURTDV4B1GIK7R5GN7ON4SL","name":"Q4-Revenue-Report.pdf","size":2418912,"lastM...
+{"id":"019NF2ODIGGGJDG696J7PRMO65G9CEUEJ2","name":"Meeting-Notes.txt","size":12480,"lastModifie...
+#>

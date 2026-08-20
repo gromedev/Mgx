@@ -41,3 +41,28 @@ if (Test-Path $deadLetterFile) {
     $retry | Invoke-MgxBatchRequest
     Remove-Item $deadLetterFile
 }
+
+<#
+Expected output:
+
+Invoke-MgxBatchRequest: /tmp/mgx-examples/dead-letter-retry.ps1:33
+Line |
+  33 |  ...  = $requests | Invoke-MgxBatchRequest -DeadLetterPath $deadLetterFile
+     |                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | POST /users: Request_BadRequest: Another object with the same value for property
+     | userPrincipalName already exists.
+...
+WARNING: 10 of 50 batch items failed after all retry attempts. Check $Error for details on each failed item.
+Created: 40
+Failed:  10
+Retrying failed items...
+
+Name                           Value
+----                           -----
+Status                         400
+Url                            /users
+Body                           {[error, System.Collections.Hashtable]}
+Method                         POST
+...
+WARNING: 10 of 10 batch items failed after all retry attempts. Check $Error for details on each failed item.
+#>
