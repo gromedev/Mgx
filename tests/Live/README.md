@@ -22,14 +22,18 @@ pwsh -c 'Invoke-Pester -Path ./tests/Live'
 Missing credentials is a **failure**, not a skip. A live suite that skips itself when
 unconfigured is one that silently stops running.
 
-The directory cmdlets want a tenant with enough objects to page — a few hundred users is
-plenty. `Get-MgxContent` needs `Files.Read.All`/`Sites.Read.All`, which a directory-only app
-registration will not have, so those two tests are skipped unless you point them at a drive
-item on a tenant that does:
+The tests size themselves from the tenant, so a 19-user directory and a 100,000-user one both
+work. **Prefer a tenant with a SharePoint licence**: `Get-MgxContent` is the only cmdlet that
+needs one, and without it those two tests skip, so a tenant that has it is the only place the
+suite covers everything. Point it at any drive item:
 
 ```bash
 export MGX_LIVE_CONTENT_URI='/drives/<driveId>/items/<itemId>/content'
 ```
+
+A tenant with no SharePoint answers every sites/drives call with `BadRequest: Tenant does not
+have a SPO license`, and no permission grant changes that — the content roles can be present and
+still inert.
 
 ## Keeping them honest
 
