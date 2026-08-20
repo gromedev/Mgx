@@ -970,22 +970,6 @@ Describe 'Sync-MgxDelta State Management' {
         "$warnings" | Should -BeLike '*does not contain*delta*'
     }
 
-    It 'Should detect endpoint mismatch in delta state' {
-        $dp = Join-Path $script:testDir 'endpoint-mismatch.json'
-        @{
-            deltaLink = 'https://graph.microsoft.us/v1.0/users/delta?$deltatoken=abc'
-            select = ''
-            filter = $null
-            resource = '/users/delta'
-            lastSync = (Get-Date).ToString('o')
-            itemCount = 10
-            graphEndpoint = 'https://graph.microsoft.us'
-        } | ConvertTo-Json | Set-Content $dp
-
-        { Sync-MgxDelta -Uri '/users/delta' -DeltaPath $dp -ErrorAction Stop } |
-            Should -Throw '*graph.microsoft.us*graph.microsoft.com*'
-    }
-
     It 'Should detect resource mismatch in delta state' {
         $dp = Join-Path $script:testDir 'resource-mismatch.json'
         @{
@@ -1040,38 +1024,6 @@ Describe 'Sync-MgxDelta State Management' {
         } catch { }
         $warnings | Should -Not -BeNullOrEmpty
         "$warnings" | Should -BeLike '*Filter changed*'
-    }
-
-    It 'Should reject tampered deltaLink with wrong host (SSRF)' {
-        $dp = Join-Path $script:testDir 'ssrf.json'
-        @{
-            deltaLink = 'https://evil.com/v1.0/users/delta?$deltatoken=stolen'
-            select = ''
-            filter = $null
-            resource = '/users/delta'
-            lastSync = (Get-Date).ToString('o')
-            itemCount = 10
-            graphEndpoint = 'https://graph.microsoft.com'
-        } | ConvertTo-Json | Set-Content $dp
-
-        { Sync-MgxDelta -Uri '/users/delta' -DeltaPath $dp -ErrorAction Stop } |
-            Should -Throw '*invalid or untrusted*'
-    }
-
-    It 'Should reject tampered deltaLink with wrong resource path' {
-        $dp = Join-Path $script:testDir 'path-tamper.json'
-        @{
-            deltaLink = 'https://graph.microsoft.com/v1.0/me/messages?$deltatoken=abc'
-            select = ''
-            filter = $null
-            resource = '/users/delta'
-            lastSync = (Get-Date).ToString('o')
-            itemCount = 10
-            graphEndpoint = 'https://graph.microsoft.com'
-        } | ConvertTo-Json | Set-Content $dp
-
-        { Sync-MgxDelta -Uri '/users/delta' -DeltaPath $dp -ErrorAction Stop } |
-            Should -Throw '*path*does not match*'
     }
 
     It 'Should warn on corrupt delta state file' {
@@ -1139,6 +1091,218 @@ Describe 'Sync-MgxDelta State Management' {
         # Should NOT warn about property selection change
         $selectWarnings = $warnings | Where-Object { "$_" -like '*Property selection changed*' }
         $selectWarnings | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Sync-MgxDelta Session Endpoint' {
+    # These scenarios need a session that is connected to a non-default endpoint. Each runs
+    # in a child pwsh: a custom Graph environment plus Connect-MgGraph -AccessToken gives a
+    # connected session without a tenant, and the child process keeps that connection (and
+    # the module's static endpoint state) out of this one.
+    BeforeAll {
+        $script:modulePath = Join-Path $PSScriptRoot '../../module/mgx.psd1'
+        $script:testDir = Join-Path ([System.IO.Path]::GetTempPath()) "mgx-endpoint-tests-$(New-Guid)"
+        New-Item -ItemType Directory -Path $script:testDir -Force | Out-Null
+
+        $script:graphAuthAvailable = [bool](Get-Module -ListAvailable Microsoft.Graph.Authentication)
+
+        # Same re-exec probe as 'Should unload cleanly when no Graph request ever ran':
+        # a dotnet-tool PowerShell install has no re-executable host.
+        $script:hostExe = @(
+            (Get-Process -Id $PID).Path
+            (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+        ) | Where-Object { $_ -and (Split-Path $_ -Leaf) -like 'pwsh*' } | Select-Object -First 1
+        if ($script:hostExe) {
+            $probeOk = $null
+            try { $probeOk = & $script:hostExe -NoProfile -Command '"alive"' 2>$null } catch { $probeOk = $null }
+            if ($probeOk -ne 'alive') { $script:hostExe = $null }
+        }
+
+        # Custom environments persist across sessions, so every name is tracked and swept
+        # in AfterAll in case a child dies before its own cleanup runs.
+        $script:envNames = [System.Collections.Generic.List[string]]::new()
+
+        function Get-SkipReason {
+            if (-not $script:hostExe) { return 'this host cannot launch a child pwsh' }
+            if (-not $script:graphAuthAvailable) { return 'Microsoft.Graph.Authentication is not installed' }
+            return $null
+        }
+
+        function Invoke-ConnectedChild {
+            param([string]$GraphEndpoint, [string]$Body)
+
+            $envName = "MgxTest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+            $script:envNames.Add($envName)
+            $child = @"
+Import-Module Microsoft.Graph.Authentication
+Import-Module '$script:modulePath'
+try {
+    Add-MgEnvironment -Name '$envName' -GraphEndpoint '$GraphEndpoint' -AzureADEndpoint 'https://login.microsoftonline.com' | Out-Null
+    Connect-MgGraph -Environment '$envName' -AccessToken (ConvertTo-SecureString 'not-a-real-token' -AsPlainText -Force) -NoWelcome
+    # -AccessToken leaves TenantId empty, and an empty TenantId reads as "not connected".
+    [Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance.AuthContext.TenantId = 'test-tenant'
+$Body
+}
+finally {
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    Remove-MgEnvironment -Name '$envName' -ErrorAction SilentlyContinue | Out-Null
+}
+"@
+            & $script:hostExe -NoProfile -Command $child 2>&1 | ForEach-Object { "$_" }
+        }
+
+        function New-DeltaStateFile {
+            param([string]$Name, [string]$DeltaLink, [string]$GraphEndpoint)
+
+            $dp = Join-Path $script:testDir $Name
+            @{
+                deltaLink = $DeltaLink
+                select = ''
+                filter = $null
+                resource = '/users/delta'
+                lastSync = (Get-Date).ToString('o')
+                itemCount = 10
+                graphEndpoint = $GraphEndpoint
+            } | ConvertTo-Json | Set-Content $dp
+            return $dp
+        }
+
+        function Get-FreePort {
+            $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $probe.Start()
+            $port = ([System.Net.IPEndPoint]$probe.LocalEndpoint).Port
+            $probe.Stop()
+            return $port
+        }
+    }
+
+    AfterAll {
+        if (Test-Path $script:testDir) { Remove-Item $script:testDir -Recurse -Force }
+        if ($script:hostExe -and $script:graphAuthAvailable -and $script:envNames.Count -gt 0) {
+            $names = "'" + ($script:envNames -join "','") + "'"
+            & $script:hostExe -NoProfile -Command "Import-Module Microsoft.Graph.Authentication; foreach (`$n in @($names)) { Remove-MgEnvironment -Name `$n -ErrorAction SilentlyContinue | Out-Null }" 2>$null | Out-Null
+        }
+    }
+
+    It 'Should send the first request of a session to the connected endpoint' {
+        $reason = Get-SkipReason
+        if (-not $reason -and -not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
+            $reason = 'Start-ThreadJob is not available'
+        }
+        if ($reason) { Set-ItResult -Skipped -Because $reason; return }
+
+        $port = Get-FreePort
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("http://localhost:$port/")
+        $listener.Start()
+        $served = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $server = Start-ThreadJob -ScriptBlock {
+            $listener = $using:listener
+            $served = $using:served
+            $body = [System.Text.Encoding]::UTF8.GetBytes(
+                '{"value":[{"id":"u1"},{"id":"u2"}],' +
+                '"@odata.deltaLink":"http://localhost:' + $using:port + '/v1.0/users/delta?$deltatoken=first"}')
+            while ($listener.IsListening) {
+                try { $context = $listener.GetContext() } catch { break }
+                $served.Enqueue($context.Request.Url.PathAndQuery)
+                $context.Response.ContentType = 'application/json'
+                $context.Response.OutputStream.Write($body, 0, $body.Length)
+                $context.Response.Close()
+            }
+        }
+
+        $dp = Join-Path $script:testDir 'first-call.json'
+        try {
+            # Set-MgxOption does not initialize the transport, so Sync-MgxDelta is still the
+            # first cmdlet of the session to build the client; the tight limits keep a
+            # regression (which sends this request to the default endpoint instead of the
+            # connected one) from stalling the suite on retries.
+            $out = Invoke-ConnectedChild -GraphEndpoint "http://localhost:$port" -Body @"
+    Set-MgxOption -MaxRetryAttempts 1 -AttemptTimeoutSeconds 15 -TotalTimeoutSeconds 30
+    try {
+        `$changes = Sync-MgxDelta /users/delta -DeltaPath '$dp' -ErrorAction Stop
+        Write-Output "SYNCED=`$(@(`$changes).Count)"
+    } catch {
+        Write-Output "ERROR-ID=`$(`$_.FullyQualifiedErrorId)"
+    }
+"@
+            ($out -join ' ') | Should -BeLike '*SYNCED=2*'
+            $requests = @($served)
+            $requests | Should -Not -BeNullOrEmpty -Because 'the first request of the session must reach the connected endpoint'
+            $requests[0] | Should -BeLike '/v1.0/users/delta*'
+        }
+        finally {
+            $listener.Stop()
+            $listener.Close()
+            Stop-Job $server -ErrorAction SilentlyContinue
+            Remove-Job $server -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Should detect endpoint mismatch in delta state' {
+        $reason = Get-SkipReason
+        if ($reason) { Set-ItResult -Skipped -Because $reason; return }
+
+        $port = Get-FreePort
+        $dp = New-DeltaStateFile -Name 'endpoint-mismatch.json' `
+            -DeltaLink 'https://graph.microsoft.us/v1.0/users/delta?$deltatoken=abc' `
+            -GraphEndpoint 'https://graph.microsoft.us'
+
+        $out = Invoke-ConnectedChild -GraphEndpoint "http://localhost:$port" -Body @"
+    try {
+        Sync-MgxDelta /users/delta -DeltaPath '$dp' -ErrorAction Stop
+        Write-Output 'NO-ERROR'
+    } catch {
+        Write-Output "ERROR-ID=`$(`$_.FullyQualifiedErrorId)"
+        Write-Output "ERROR-MSG=`$(`$_.Exception.Message)"
+    }
+"@
+        $text = $out -join ' '
+        $text | Should -BeLike '*DeltaEndpointMismatch*'
+        $text | Should -BeLike '*graph.microsoft.us*'
+        # The error must name the endpoint the session is connected to, not the default.
+        $text | Should -BeLike "*localhost:$port*"
+    }
+
+    It 'Should reject tampered deltaLink with wrong host (SSRF)' {
+        $reason = Get-SkipReason
+        if ($reason) { Set-ItResult -Skipped -Because $reason; return }
+
+        $port = Get-FreePort
+        $dp = New-DeltaStateFile -Name 'ssrf.json' `
+            -DeltaLink 'https://evil.com/v1.0/users/delta?$deltatoken=stolen' `
+            -GraphEndpoint "http://localhost:$port"
+
+        $out = Invoke-ConnectedChild -GraphEndpoint "http://localhost:$port" -Body @"
+    try {
+        Sync-MgxDelta /users/delta -DeltaPath '$dp' -ErrorAction Stop
+        Write-Output 'NO-ERROR'
+    } catch {
+        Write-Output "ERROR-MSG=`$(`$_.Exception.Message)"
+    }
+"@
+        ($out -join ' ') | Should -BeLike '*invalid or untrusted*'
+    }
+
+    It 'Should reject tampered deltaLink with wrong resource path' {
+        $reason = Get-SkipReason
+        if ($reason) { Set-ItResult -Skipped -Because $reason; return }
+
+        # https so the link passes host validation and reaches the path check.
+        $port = Get-FreePort
+        $dp = New-DeltaStateFile -Name 'path-tamper.json' `
+            -DeltaLink "https://localhost:$port/v1.0/me/messages?`$deltatoken=abc" `
+            -GraphEndpoint "https://localhost:$port"
+
+        $out = Invoke-ConnectedChild -GraphEndpoint "https://localhost:$port" -Body @"
+    try {
+        Sync-MgxDelta /users/delta -DeltaPath '$dp' -ErrorAction Stop
+        Write-Output 'NO-ERROR'
+    } catch {
+        Write-Output "ERROR-MSG=`$(`$_.Exception.Message)"
+    }
+"@
+        ($out -join ' ') | Should -BeLike '*path*does not match*'
     }
 }
 

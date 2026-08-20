@@ -197,8 +197,9 @@ public class SyncMgxDelta : MgxCmdletBase
         string requestUrl;
 
         // LoadWithResult distinguishes "not found" from "corrupt".
-        // Validate delta state BEFORE GetClient() so validation errors
-        // are surfaced without requiring a Graph connection.
+        // The endpoint-independent state checks run BEFORE GetClient() so their
+        // errors surface without requiring a Graph connection; the checks that
+        // compare against the session's endpoint run after it.
         var (existingState, loadResult) = DeltaState.LoadWithResult(resolvedDeltaPath);
         // -Latest means "baseline from now, return nothing". That is right for a first run and
         // catastrophic after a state invalidation: the user is told a full re-sync is starting,
@@ -230,18 +231,6 @@ public class SyncMgxDelta : MgxCmdletBase
 
         if (existingState != null)
         {
-            // Validate graph endpoint matches current session
-            if (!string.Equals(existingState.GraphEndpoint, s_graphEndpoint, StringComparison.OrdinalIgnoreCase))
-            {
-                ThrowTerminatingError(new ErrorRecord(
-                    new InvalidOperationException(
-                        $"Delta state was created against '{existingState.GraphEndpoint}' "
-                        + $"but current session is connected to '{s_graphEndpoint}'. "
-                        + "Use -FullSync to start fresh, or reconnect to the original endpoint."),
-                    "DeltaEndpointMismatch", ErrorCategory.InvalidOperation, null));
-                return;
-            }
-
             // The deltaLink is absolute and carries its own version, so a run that omits
             // -ApiVersion silently keeps syncing whichever version built the state - the
             // caller believes they are on the default and are not. Empty means a pre-2.0.1
@@ -320,8 +309,28 @@ public class SyncMgxDelta : MgxCmdletBase
             }
         }
 
+        // GetClient() sits between the two validation halves on purpose. It runs after the
+        // state-file checks above so their errors surface without a Graph connection, and
+        // before everything below because it is the only thing that refreshes s_graphEndpoint
+        // from the session: on the first call of a session the endpoint comparison and the
+        // request URL would otherwise be built against the default endpoint instead of the
+        // connected one. Invoke-MgxRequest sequences GetClient() first for the same reason.
+        var client = GetClient();
+
         if (existingState != null)
         {
+            // Validate graph endpoint matches current session
+            if (!string.Equals(existingState.GraphEndpoint, s_graphEndpoint, StringComparison.OrdinalIgnoreCase))
+            {
+                ThrowTerminatingError(new ErrorRecord(
+                    new InvalidOperationException(
+                        $"Delta state was created against '{existingState.GraphEndpoint}' "
+                        + $"but current session is connected to '{s_graphEndpoint}'. "
+                        + "Use -FullSync to start fresh, or reconnect to the original endpoint."),
+                    "DeltaEndpointMismatch", ErrorCategory.InvalidOperation, null));
+                return;
+            }
+
             // SSRF validation: deltaLink is untrusted (from a file on disk)
             var deltaUri = new System.Uri(s_graphEndpoint);
             var validated = NextLinkValidator.Validate(existingState.DeltaLink, deltaUri);
@@ -399,8 +408,6 @@ public class SyncMgxDelta : MgxCmdletBase
             }
         }
 
-        // GetClient() after validation so delta state errors surface without Graph connection
-        var client = GetClient();
         ExecuteDeltaSync(client, requestUrl, resolvedDeltaPath, resolvedOutputPath,
             resolvedCheckpointPath, normalizedSelect, normalizedPrefer, currentFilter, sw);
     }
