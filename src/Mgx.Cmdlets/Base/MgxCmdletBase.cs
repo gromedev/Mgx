@@ -764,10 +764,12 @@ public abstract class MgxCmdletBase : MgxCmdletCore
 
     /// <summary>
     /// The temp a checkpoint names, or null when it cannot be used. A checkpoint is untrusted
-    /// input once it is on disk, so the recorded name must be a bare file name and must not be
-    /// the output itself - resolving either would have the output appended to a copy of itself
-    /// and then deleted as the spent temp. The file must also be at least as long as the
-    /// checkpoint promised, since a shorter one means the items it counted are not all there.
+    /// input once it is on disk, so the recorded name must be one a run could actually have
+    /// written - "{output}.{32-hex}.tmp" - and must not be the output itself. Anything else
+    /// (the checkpoint file, the delta state, a crafted path) would be copied into the output
+    /// as data and then deleted as the spent temp. The file must also be at least as long as
+    /// the checkpoint promised, since a shorter one means the items it counted are not all
+    /// there.
     /// </summary>
     private static string? ResolveNamedTemp(string outputPath, string tempFileName, long dataLength)
     {
@@ -776,6 +778,7 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return null;
         if (!string.Equals(tempFileName, Path.GetFileName(tempFileName), StringComparison.Ordinal))
             return null;
+        if (!IsRunTempName(Path.GetFileName(outputPath), tempFileName)) return null;
         var tempPath = Path.Combine(dir, tempFileName);
         if (string.Equals(Path.GetFullPath(tempPath), Path.GetFullPath(outputPath),
                 StringComparison.OrdinalIgnoreCase))
@@ -783,6 +786,25 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         if (!File.Exists(tempPath)) return null;
         if (new FileInfo(tempPath).Length < dataLength) return null;
         return tempPath;
+    }
+
+    /// <summary>
+    /// True when <paramref name="candidate"/> is a name a fresh run gives its temp:
+    /// the output's own name, a dot, 32 lowercase hex digits (Guid "N"), and ".tmp".
+    /// </summary>
+    private static bool IsRunTempName(string outputFileName, string candidate)
+    {
+        var prefix = outputFileName + ".";
+        const string suffix = ".tmp";
+        if (candidate.Length != prefix.Length + 32 + suffix.Length) return false;
+        if (!candidate.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        if (!candidate.EndsWith(suffix, StringComparison.Ordinal)) return false;
+        for (var i = prefix.Length; i < prefix.Length + 32; i++)
+        {
+            if (candidate[i] is (>= '0' and <= '9') or (>= 'a' and <= 'f')) continue;
+            return false;
+        }
+        return true;
     }
 
     /// <summary>

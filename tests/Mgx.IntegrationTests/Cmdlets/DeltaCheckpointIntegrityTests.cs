@@ -357,6 +357,43 @@ public class DeltaCheckpointIntegrityTests
         finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
+    /// <summary>
+    /// The recorded temp name accepts only what a run could have written: the output's name,
+    /// 32 hex digits, ".tmp". A checkpoint naming any other file - here, the checkpoint
+    /// itself - would have that file's bytes copied into the output as data and the file
+    /// deleted as the spent temp.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_naming_a_file_that_is_not_a_temp_does_not_consume_it()
+    {
+        var env = NewEnv();
+        try
+        {
+            File.WriteAllLines(env.OutputPath, ["{\"id\":\"a1\"}", "{\"id\":\"a2\"}"]);
+            new PaginationCheckpoint
+            {
+                Resource = DeltaLink1,
+                NextLink = Page2Url,
+                ItemsCollected = 2,
+                TempFile = Path.GetFileName(env.CheckpointPath),
+                DataLength = 10, // shorter than the checkpoint file, so the length guard passes
+            }.Save(env.CheckpointPath);
+
+            var handler = new MockHttpHandler();
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
+            InjectMock(handler);
+
+            Sync(env);
+
+            // The unusable name reads as "items are in no file": re-enumerate, output replaced.
+            Assert.Equal(
+                ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                Ids(env.OutputPath));
+        }
+        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+    }
+
     // ---------------------------------------------------------------- D10
 
     /// <summary>
