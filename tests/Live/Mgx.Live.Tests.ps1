@@ -24,6 +24,16 @@ BeforeAll {
     . "$repo/tests/benchmarks/common.ps1"
     Import-MgxLocal
     Connect-MgxBenchmark | Out-Null
+
+    # Sized from the tenant rather than assumed. These tests have to hold on a 19-user tenant
+    # and a 100,000-user one: a live suite that only passes against one directory is one that
+    # gets switched off the first time it meets another.
+    $tok = Get-BenchAppToken
+    $script:UserCount = [int](Invoke-RestMethod -Uri 'https://graph.microsoft.com/v1.0/users/$count' `
+        -Headers @{ Authorization = "Bearer $tok"; ConsistencyLevel = 'eventual' })
+    # Enough to need more than one page where the tenant allows it, never more than it holds.
+    $script:Slice = [Math]::Min(150, $script:UserCount)
+    $script:SmallSlice = [Math]::Min(5, $script:UserCount)
 }
 
 Describe 'Invoke-MgxRequest' {
@@ -37,24 +47,26 @@ Describe 'Invoke-MgxRequest' {
         Invoke-MgxRequest /users -Filter "startsWith(displayName,'b')" -Top 1 | Should -Not -BeNullOrEmpty
     }
     It 'caps the total at -Top' {
-        (Invoke-MgxRequest /users -Top 150 -Property id | Measure-Object).Count | Should -Be 150
+        (Invoke-MgxRequest /users -Top $script:Slice -Property id | Measure-Object).Count |
+            Should -Be $script:Slice
     }
     It 'caps the total at -Top even with -All' {
-        (Invoke-MgxRequest /users -All -Top 150 -Property id | Measure-Object).Count | Should -Be 150
+        (Invoke-MgxRequest /users -All -Top $script:Slice -Property id | Measure-Object).Count |
+            Should -Be $script:Slice
     }
 }
 
 Describe 'Invoke-MgxBatchRequest' {
     It 'executes a batch of relative URIs' {
-        $ids = Invoke-MgxRequest /users -Top 5 -Property id | ForEach-Object { $_.id }
+        $ids = Invoke-MgxRequest /users -Top $script:SmallSlice -Property id | ForEach-Object { $_.id }
         $res = $ids | ForEach-Object { "/users/$_" } | Invoke-MgxBatchRequest -Method GET
-        ($res | Measure-Object).Count | Should -Be 5
+        ($res | Measure-Object).Count | Should -Be $script:SmallSlice
     }
 }
 
 Describe 'Expand-MgxRelation' {
     It 'fans out over a relation' {
-        $users = Invoke-MgxRequest /users -Top 5 -Property id,displayName
+        $users = Invoke-MgxRequest /users -Top $script:SmallSlice -Property id,displayName
         $r = $users | Expand-MgxRelation -Uri '/users/{id}/manager' -As manager -SkipNotFound -SkipForbidden
         $r | Should -Not -BeNull
     }
@@ -64,8 +76,8 @@ Describe 'Export-MgxCollection' {
     It 'writes one JSONL line per object' {
         $f = Join-Path ([IO.Path]::GetTempPath()) "mgxlive-$([Guid]::NewGuid().ToString('N')).jsonl"
         try {
-            Export-MgxCollection /users -OutputFile $f -Top 100 -Property id | Out-Null
-            (Get-Content $f).Count | Should -Be 100
+            Export-MgxCollection /users -OutputFile $f -Top $script:Slice -Property id | Out-Null
+            (Get-Content $f).Count | Should -Be $script:Slice
         } finally { Remove-Item $f -ErrorAction SilentlyContinue }
     }
 }
@@ -117,7 +129,8 @@ Describe 'Enable-MgxResilience' {
     }
     It 'leaves SDK cmdlets working' {
         Enable-MgxResilience | Out-Null
-        (Get-MgUser -Top 2 -Property id | Measure-Object).Count | Should -Be 2
+        (Get-MgUser -Top ([Math]::Min(2, $script:UserCount)) -Property id | Measure-Object).Count |
+            Should -Be ([Math]::Min(2, $script:UserCount))
     }
 }
 
