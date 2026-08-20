@@ -97,6 +97,10 @@ public sealed class ResilientGraphClient : IDisposable
             VerboseWriter(msg);
     }
 
+    // For engine components that already report through this client's buffered channel
+    // (PageIterator runs on the enumeration thread, where a cmdlet cannot WriteWarning).
+    internal void EnqueueWarning(string message) => _pendingWarnings.Enqueue(message);
+
     // Same threading contract as DrainVerboseMessages.
     public void DrainWarningMessages()
     {

@@ -39,6 +39,46 @@ public class SsrfValidationTests
         Assert.Equal(1, handler.RequestCount); // Only initial request, no second page fetch
     }
 
+    /// <summary>
+    /// A refused deltaLink is dropped, not thrown: by the time it arrives every item has been
+    /// delivered, so the enumeration completes and only the token fails to advance. The drop
+    /// must not be silent - without a warning the caller reports "no delta token received"
+    /// and misdiagnoses a refused token as an endpoint that does not support delta.
+    /// </summary>
+    [Fact]
+    public async Task PageIterator_RejectedDeltaLink_CompletesWithAWarningInsteadOfSavingIt()
+    {
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, """
+        {
+            "value": [{"id": "user1"}, {"id": "user2"}],
+            "@odata.deltaLink": "https://evil.com/steal-token?$deltatoken=abc"
+        }
+        """);
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new ResilientGraphClient(httpClient, new ResilientGraphClientOptions { NoRateLimit = true });
+        var iterator = new PageIterator(client);
+
+        string? capturedDeltaLink = null;
+        var items = new List<JsonElement>();
+        await foreach (var item in iterator.StreamAllWithCountAsync(
+            "https://graph.microsoft.com/v1.0/users/delta", 0, null,
+            onDeltaLink: dl => capturedDeltaLink = dl))
+        {
+            items.Add(item);
+        }
+
+        Assert.Equal(2, items.Count);            // the enumeration completed
+        Assert.Null(capturedDeltaLink);          // the poisoned token was never surfaced
+        Assert.Equal(1, handler.RequestCount);   // and never fetched
+
+        var warnings = new List<string>();
+        client.WarningWriter = warnings.Add;
+        client.DrainWarningMessages();
+        Assert.Contains(warnings, w => w.Contains("deltaLink") && w.Contains("failed validation"));
+    }
+
     [Fact]
     public async Task PageIterator_RejectsNextLink_HttpScheme()
     {
