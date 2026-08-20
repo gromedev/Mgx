@@ -15,4 +15,4 @@ $disabled = Invoke-MgxRequest /users `
     -ConsistencyLevel eventual
 
 Write-Host "Disabled accounts: $($disabled.Count)"
-$disabled | Sort-Object createdDateTime | Format-Table displayName, mail, createdDateTime -AutoSize
+$disabled | Sort-Object createdDateTime | Select-Object displayName, mail, createdDateTime | Format-Table -AutoSize

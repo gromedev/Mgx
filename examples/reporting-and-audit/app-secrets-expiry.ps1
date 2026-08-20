@@ -20,9 +20,9 @@ $expiring = foreach ($app in $apps) {
         if ($expiry -le $warningDate) {
             [PSCustomObject]@{
                 App        = $app.displayName
-                Type       = if ($cred.PSObject.Properties.Name -contains 'secretText') { 'Secret' } else { 'Certificate' }
+                Type       = if ($cred.ContainsKey('secretText')) { 'Secret' } else { 'Certificate' }
                 ExpiresOn  = $expiry.ToString('yyyy-MM-dd')
-                DaysLeft   = [math]::Floor(($expiry - (Get-Date)).TotalDays)
+                DaysLeft   = [int][math]::Floor(($expiry - (Get-Date)).TotalDays)
             }
         }
     }

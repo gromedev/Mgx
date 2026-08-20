@@ -60,5 +60,5 @@ Write-Host ("Groups changed: {0}  |  Service principals: {1} changed, {2} remove
     $groupChanges.Count, $new.Count, $removed.Count)
 if ($new.Count -gt 0) {
     Write-Host "Review new/changed service principals:"
-    $new | Format-Table appDisplayName, appId, accountEnabled -AutoSize
+    $new | Select-Object appDisplayName, appId, accountEnabled | Format-Table -AutoSize
 }

@@ -14,7 +14,7 @@ Get-MgxResilience
 
 # Inject
 Enable-MgxResilience
-Get-MgxResilience   # IsInjected: True
+Get-MgxResilience   # IsEnabled: True, IsActive: True
 
 # SDK cmdlets now have retry + circuit breaker
 $users = Get-MgUser -Top 5 -Property displayName
@@ -22,4 +22,4 @@ Write-Host "Got $($users.Count) users via SDK (with resilience)"
 
 # Remove injection - restore original SDK behavior
 Disable-MgxResilience
-Get-MgxResilience   # IsInjected: False
+Get-MgxResilience   # IsEnabled: False, IsActive: False

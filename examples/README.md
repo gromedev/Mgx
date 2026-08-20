@@ -83,15 +83,15 @@ Every Mgx cmdlet is demonstrated in at least one script:
 
 | Cmdlet | Scripts |
 |--------|---------|
-| `Invoke-MgxRequest` | get-all-users, beta-endpoint, get-managers-fan-out, enrich-users-with-manager, chained-relation-expansion, group-members-multipage, disabled-accounts-report, guest-users-report, stale-devices-report, app-secrets-expiry, conditional-access-export, bulk-delete-whatif, partial-content-hash, drive-content-triage, telemetry, tune-rate-limits, benchmark-resilience, resource-unit-budgeting, pacing-observability |
+| `Invoke-MgxRequest` | get-all-users, beta-endpoint, get-managers-fan-out, enrich-users-with-manager, chained-relation-expansion, group-members-multipage, disabled-accounts-report, guest-users-report, stale-devices-report, app-secrets-expiry, conditional-access-export, bulk-delete-whatif, partial-content-hash, drive-content-triage, telemetry, tune-rate-limits, tenant-resilience-comparison, resource-unit-budgeting, pacing-observability |
 | `Invoke-MgxBatchRequest` | bulk-update, dead-letter-retry, mixed-endpoint-batch |
-| `Export-MgxCollection` | export-users-to-jsonl, export-sign-in-logs, benchmark-resilience |
+| `Export-MgxCollection` | export-users-to-jsonl, export-sign-in-logs, tenant-resilience-comparison |
 | `Expand-MgxRelation` | enrich-users-with-manager, chained-relation-expansion |
 | `Sync-MgxDelta` | delta-sync, drive-delta-resumable, tenant-change-feed |
-| `Enable-MgxResilience` | resilience-for-existing-scripts, resilience-status, benchmark-resilience |
-| `Disable-MgxResilience` | resilience-status, benchmark-resilience |
+| `Enable-MgxResilience` | resilience-for-existing-scripts, resilience-status, tenant-resilience-comparison |
+| `Disable-MgxResilience` | resilience-status, tenant-resilience-comparison |
 | `Get-MgxResilience` | resilience-status |
 | `Set-MgxOption` | tune-rate-limits, pacing-observability |
 | `Get-MgxOption` | tune-rate-limits |
-| `Get-MgxTelemetry` | telemetry, benchmark-resilience, resource-unit-budgeting, pacing-observability, partial-content-hash, drive-content-triage |
+| `Get-MgxTelemetry` | telemetry, tenant-resilience-comparison, resource-unit-budgeting, pacing-observability, partial-content-hash, drive-content-triage |
 | `Get-MgxContent` | partial-content-hash, drive-content-triage |

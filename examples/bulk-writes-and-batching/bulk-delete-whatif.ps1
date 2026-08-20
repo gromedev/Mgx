@@ -25,7 +25,7 @@ if ($targets.Count -eq 0) {
     return
 }
 
-$targets | Format-Table displayName, mail, createdDateTime -AutoSize
+$targets | Select-Object displayName, mail, createdDateTime | Format-Table -AutoSize
 
 # Preview - remove -WhatIf to execute
 $targets | Invoke-MgxRequest '/users/{id}' -Method DELETE -WhatIf

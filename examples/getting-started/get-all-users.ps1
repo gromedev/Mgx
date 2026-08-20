@@ -9,4 +9,5 @@
 Import-Module Mgx
 
 Invoke-MgxRequest /users -All -Property displayName,mail,department,jobTitle |
-    Format-Table displayName, mail, department, jobTitle -AutoSize
+    Select-Object displayName, mail, department, jobTitle |
+    Format-Table -AutoSize

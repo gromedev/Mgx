@@ -15,4 +15,4 @@ $changes = Sync-MgxDelta /users/delta `
     -Property id,displayName,mail,accountEnabled
 
 Write-Host "Changes since last sync: $($changes.Count)"
-$changes | Format-Table id, displayName, mail, accountEnabled -AutoSize
+$changes | Select-Object id, displayName, mail, accountEnabled | Format-Table -AutoSize

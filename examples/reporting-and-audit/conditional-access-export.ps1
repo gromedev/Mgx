@@ -13,7 +13,7 @@ $policies = Invoke-MgxRequest /identity/conditionalAccess/policies `
     -Property id,displayName,state,createdDateTime,modifiedDateTime
 
 Write-Host "Conditional Access policies: $($policies.Count)"
-$policies | Sort-Object displayName | Format-Table displayName, state, modifiedDateTime -AutoSize
+$policies | Sort-Object displayName | Select-Object displayName, state, modifiedDateTime | Format-Table -AutoSize
 
 # Export full policy details to JSON for backup/audit
 $policies | ConvertTo-Json -Depth 10 | Out-File "./conditional-access-policies.json"

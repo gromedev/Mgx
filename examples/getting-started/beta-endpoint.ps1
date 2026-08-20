@@ -14,4 +14,4 @@ $users = Invoke-MgxRequest /users `
     -Top 10 `
     -Property id,displayName,customSecurityAttributes
 
-$users | Format-Table id, displayName -AutoSize
+$users | Select-Object id, displayName | Format-Table -AutoSize
