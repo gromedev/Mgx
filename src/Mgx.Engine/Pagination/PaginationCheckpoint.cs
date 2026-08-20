@@ -73,9 +73,12 @@ public sealed class PaginationCheckpoint
             // Treat as no checkpoint; caller will start fresh.
             return null;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // File locked or inaccessible; treat as no checkpoint.
+            // Locked, or the account cannot read it; treat as no checkpoint either way. Windows
+            // reports a denying ACL as UnauthorizedAccessException, which is not an IOException,
+            // so catching only the latter made an unreadable checkpoint throw on Windows and
+            // resume cleanly everywhere else.
             return null;
         }
     }
@@ -116,7 +119,7 @@ public sealed class PaginationCheckpoint
             }
             return true;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return false;
         }

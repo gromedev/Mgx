@@ -73,8 +73,11 @@ public sealed class DeltaState
         {
             return (null, DeltaLoadResult.Corrupt);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            // Windows reports a denying ACL as UnauthorizedAccessException, which is not an
+            // IOException - catching only the latter made unreadable state throw there and read
+            // as absent everywhere else.
             return (null, DeltaLoadResult.NotFound);
         }
     }
@@ -122,7 +125,7 @@ public sealed class DeltaState
                 if (File.Exists(tmpPath)) File.Delete(tmpPath);
                 return true;
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 return false;
             }

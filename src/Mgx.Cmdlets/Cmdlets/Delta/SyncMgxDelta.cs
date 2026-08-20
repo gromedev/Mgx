@@ -909,6 +909,18 @@ public class SyncMgxDelta : MgxCmdletBase
                     ErrorCategory.WriteError, OutputFile));
                 return;
             }
+            catch (UnauthorizedAccessException ex)
+            {
+                // Not an IOException, so the catch above never saw it. It is what Windows raises
+                // for a denying ACL, a read-only file, or an -OutputFile naming a directory, and
+                // leaving it out made every one of those an unhandled error there while the same
+                // failure was a clean error record on Unix. Export-MgxCollection already reports
+                // it this way.
+                DrainClientMessages();
+                WriteError(new ErrorRecord(ex, "AccessDenied",
+                    ErrorCategory.PermissionDenied, OutputFile));
+                return;
+            }
             catch (Exception)
             {
                 // Drain buffered messages for unexpected exception types
