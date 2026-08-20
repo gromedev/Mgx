@@ -404,7 +404,20 @@ public class ExportMgxCollection : MgxCmdletBase
                         }
                         if (!promoted)
                         {
-                            try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                            // A surviving checkpoint counts items that exist only in this temp:
+                            // every checkpoint site flushes the writer before recording the
+                            // position, so the temp always holds at least what it promises.
+                            // Deleting it made the next run's recovery find the checkpoint
+                            // naming a missing file and start the export over - resume worked
+                            // after a kill or a Ctrl-C but never after a handled error, which
+                            // is the common way a long export dies. Keep the temp for the next
+                            // run to promote; it is deleted by promotion or by the stale-temp
+                            // sweep once the checkpoint is gone.
+                            var resumable = cpPath != null && File.Exists(cpPath);
+                            if (!resumable)
+                            {
+                                try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
+                            }
                         }
                     }
                     throw; // re-throw to retry catch or outer catch blocks

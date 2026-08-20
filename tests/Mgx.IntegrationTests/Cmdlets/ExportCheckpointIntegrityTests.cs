@@ -144,13 +144,83 @@ public class ExportCheckpointIntegrityTests
             Assert.Equal(2, cp!.ItemsCollected);   // it counted u1 and u2...
             Assert.Equal(["{\"id\":\"u1\"}"], Lines(output));  // ...which are not in the output
 
-            // Run 3: the documented resume.
-            handler.Queue(HttpStatusCode.OK, Page1);
+            // Run 3: the documented resume. Only the page the dead run never reached.
             handler.Queue(HttpStatusCode.OK, Page2);
             var reported = Export(output, checkpoint, all: true);
 
             Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
             Assert.Equal(3, reported);
+            Assert.Empty(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+        }
+        finally
+        {
+            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A fresh checkpointed export that dies on a transient error. The checkpoint survives and
+    /// counts items that exist only in the temp, so the temp has to survive with it - deleting
+    /// it leaves the checkpoint naming a missing file, and the next run starts the export over.
+    /// A kill or a Ctrl-C already kept the data; a handled error must not be the one way to
+    /// lose the position.
+    /// </summary>
+    [Fact]
+    public void A_transient_failure_keeps_the_temp_the_checkpoint_names()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            InjectMock(handler);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.InternalServerError, ServerError);
+            Export(output, checkpoint, all: true);
+
+            var cp = PaginationCheckpoint.Load(checkpoint);
+            Assert.NotNull(cp);
+            Assert.NotNull(cp!.TempFile);
+            Assert.True(File.Exists(Path.Combine(dir, cp.TempFile!)),
+                "the checkpoint names a temp that is no longer on disk");
+        }
+        finally
+        {
+            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// And the run after that failure resumes: it promotes the kept temp, fetches the page the
+    /// checkpoint recorded rather than the first one, and ends with every item exactly once.
+    /// </summary>
+    [Fact]
+    public void An_export_resumes_after_a_transient_failure_rather_than_starting_over()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            InjectMock(handler);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.InternalServerError, ServerError);
+            Export(output, checkpoint, all: true);
+
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var before = handler.Requests.Count;
+            var reported = Export(output, checkpoint, all: true);
+
+            Assert.Contains("skiptoken=P2", handler.Requests[before]);
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+            Assert.False(File.Exists(checkpoint));
             Assert.Empty(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
         }
         finally
@@ -183,10 +253,11 @@ public class ExportCheckpointIntegrityTests
             handler.Queue(HttpStatusCode.InternalServerError, ServerError);
             Export(output, checkpoint, all: true);
 
-            handler.Queue(HttpStatusCode.OK, Page1);
             handler.Queue(HttpStatusCode.OK, Page2);
+            var before = handler.Requests.Count;
             var reported = Export(output, checkpoint, all: true);
 
+            Assert.Contains("skiptoken=P2", handler.Requests[before]);
             Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
             Assert.Equal(3, reported);
         }
