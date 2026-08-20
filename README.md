@@ -112,7 +112,7 @@ pacing on and off:
 | Adaptive pacing on *(default)* | 39.4s | 0 | 0s, 0 activations |
 | `-NoAdaptivePacing` | 40.3s | 0 | - |
 
-No 429s appeared at any concurrency the module permits. It caps at 128, and this tenant sustained
+No 429s appeared at any concurrency the module permits. It caps at 128, and this tenant took
 276 RU/s for 45s without refusing anything - a raw client only crosses the ceiling at around 200
 requests in flight, which is past what Mgx will issue. Graph absorbed the load by inflating latency
 from 113ms to ~1s instead. That is why pacing reacts to `Retry-After` and latency drift rather than
@@ -276,7 +276,7 @@ Both figures match the [documented cost table](https://learn.microsoft.com/en-us
 
 Three findings from pushing a single client until the tenant pushed back:
 
-- **The budget behaves like a token bucket, and burst hides its rate.** The published limit for a tenant of this size is 8,000 RU per 10 s per *application + tenant pair* (800 RU/s). Held at a fixed rate for 45 s from a single client: **276 RU/s never throttled**, 631 RU/s began refusing after 34 s, and 1,143 RU/s after 17 s. Once saturated the tenant served about **440 RU/s** however hard it was pushed. A short run at any of those rates shows nothing - the bucket starts full, so the first ~19,000 RU are free regardless of how fast they are spent, which is why a burst measurement reads as a much higher sustained ceiling than the tenant actually has.
+- **The budget behaves like a token bucket, and burst hides its rate.** The published limit for a tenant of this size is 8,000 RU per 10 s per *application + tenant pair* (800 RU/s). Held at a fixed rate for 45 s from a single client: 631 RU/s began refusing after 34 s, 1,143 RU/s after 17 s, and once saturated the tenant served about **440 RU/s** however hard it was pushed. **276 RU/s was never refused** - though 45 s at that rate spends less than the bucket, so the clean run alone proves little; what marks it sustainable is sitting well under the 440 RU/s the tenant serves while refusing. A short run at any of those rates shows nothing - the bucket starts full, so the first ~19,000 RU are free regardless of how fast they are spent, which is why a burst measurement reads as a much higher sustained ceiling than the tenant actually has. Re-measure with [`tests/benchmarks/13-resource-unit-rate.ps1`](tests/benchmarks/13-resource-unit-rate.ps1).
 - **`x-ms-throttle-limit-percentage` was never emitted** - not at 1.5x the documented budget, and not while the tenant was actively returning 429s. Mgx therefore treats it as opportunistic and paces on 429 + `Retry-After` and latency drift, which are reliable.
 - **Batching does not buy cheaper units.** Unbatched requests sustained a *higher* RU/s before throttling than the same requests inside `$batch`. Batching saves round-trips, not budget.
 
