@@ -744,6 +744,107 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     /// <c>output.{guid}.tmp</c> on fresh runs).
     /// </summary>
     /// <summary>
+    /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
+    /// where every such file is an orphan by definition.
+    /// </summary>
+    protected void DeleteStaleTemps(string outputPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            foreach (var stale in Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp").ToList())
+            {
+                try
+                {
+                    File.Delete(stale);
+                    WriteVerbose($"Deleted an orphaned temp file from an earlier interrupted run: {Path.GetFileName(stale)}");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    WriteWarning($"Could not delete orphaned temp file '{stale}': {ex.Message}. Delete it manually.");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort; a sweep failure must never stop the run.
+        }
+    }
+
+    /// <summary>
+    /// The temp a checkpoint names, or null when it cannot be used. A checkpoint is untrusted
+    /// input once it is on disk, so the recorded name must be a bare file name and must not be
+    /// the output itself - resolving either would have the output appended to a copy of itself
+    /// and then deleted as the spent temp. The file must also be at least as long as the
+    /// checkpoint promised, since a shorter one means the items it counted are not all there.
+    /// </summary>
+    private static string? ResolveNamedTemp(string outputPath, string tempFileName, long dataLength)
+    {
+        if (dataLength <= 0) return null;
+        var dir = Path.GetDirectoryName(outputPath);
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return null;
+        if (!string.Equals(tempFileName, Path.GetFileName(tempFileName), StringComparison.Ordinal))
+            return null;
+        var tempPath = Path.Combine(dir, tempFileName);
+        if (string.Equals(Path.GetFullPath(tempPath), Path.GetFullPath(outputPath),
+                StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (!File.Exists(tempPath)) return null;
+        if (new FileInfo(tempPath).Length < dataLength) return null;
+        return tempPath;
+    }
+
+    /// <summary>
+    /// Replace the output with the first <paramref name="dataLength"/> bytes of a named temp,
+    /// then remove the temp. This is what an interrupted export needs, as against the appending
+    /// form a delta sync needs: an export is a snapshot, and a fresh run that finishes moves its
+    /// temp over whatever the output held, so recovering an unfinished one has to reach that
+    /// same file. Appending instead would leave the previous export's rows in front of this
+    /// one's. Returns false when the temp is absent or shorter than the checkpoint promised,
+    /// which means the caller must not resume past the items it counted.
+    /// </summary>
+    protected static bool TryPromoteNamedTemp(string outputPath, string tempFileName, long dataLength)
+    {
+        try
+        {
+            var tempPath = ResolveNamedTemp(outputPath, tempFileName, dataLength);
+            if (tempPath == null) return false;
+
+            // Staged like the other forms, so the destination is replaced in one Move rather
+            // than truncated and refilled in place.
+            var adoptPath = outputPath + ".adopt";
+            using (var writer = new FileStream(adoptPath, FileMode.Create, FileAccess.Write))
+            {
+                using var temp = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
+                var buffer = new byte[81920];
+                long remaining = dataLength;
+                while (remaining > 0)
+                {
+                    var read = temp.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                    if (read <= 0) break;
+                    writer.Write(buffer, 0, read);
+                    remaining -= read;
+                }
+                if (remaining > 0)
+                {
+                    writer.Dispose();
+                    File.Delete(adoptPath);
+                    return false;
+                }
+            }
+            File.Move(adoptPath, outputPath, overwrite: true);
+            try { File.Delete(tempPath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Append the first <paramref name="dataLength"/> bytes of a named temp file to the output,
     /// then remove the temp. Unlike the glob-and-newest form, this adopts exactly the file the
     /// checkpoint recorded, so a leftover from an unrelated run cannot be merged in.
@@ -756,21 +857,8 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     {
         try
         {
-            if (dataLength <= 0) return false;
-            var dir = Path.GetDirectoryName(outputPath);
-            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
-            // A name, never a path: a checkpoint is untrusted input once it is on disk.
-            if (!string.Equals(tempFileName, Path.GetFileName(tempFileName), StringComparison.Ordinal))
-                return false;
-            var tempPath = Path.Combine(dir, tempFileName);
-            // Naming the output as its own temp would append the file to itself and then
-            // delete it. Fresh runs never write such a name, but a checkpoint on disk is
-            // whatever it says it is.
-            if (string.Equals(Path.GetFullPath(tempPath), Path.GetFullPath(outputPath),
-                    StringComparison.OrdinalIgnoreCase))
-                return false;
-            if (!File.Exists(tempPath)) return false;
-            if (new FileInfo(tempPath).Length < dataLength) return false;
+            var tempPath = ResolveNamedTemp(outputPath, tempFileName, dataLength);
+            if (tempPath == null) return false;
 
             // Staged like the glob form: build the combined file first so the destination is
             // replaced in one Move rather than mutated in place.

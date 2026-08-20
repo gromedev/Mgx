@@ -140,14 +140,14 @@ public class ExportMgxCollection : MgxCmdletBase
         // adopt it: trim to exactly the item count the checkpoint recorded (content
         // past the last flush may be missing or torn) and promote it to the output
         // path. Only when no usable temp exists is the checkpoint truly stale.
-        if (cpPath != null && File.Exists(cpPath) && !File.Exists(outputPath))
+        if (cpPath != null && File.Exists(cpPath))
         {
             var orphanCp = PaginationCheckpoint.Load(cpPath);
-            if (orphanCp?.NextLink != null && TryAdoptOrphanedTemp(outputPath, orphanCp.ItemsCollected))
+            if (orphanCp?.NextLink != null)
             {
-                WriteWarning($"Recovered {orphanCp.ItemsCollected} items from an interrupted export's temp file. Resuming from checkpoint.");
+                ReconcileCheckpointWithFiles(cpPath, outputPath, orphanCp);
             }
-            else
+            else if (!File.Exists(outputPath))
             {
                 WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
                 PaginationCheckpoint.Delete(cpPath);
@@ -242,7 +242,19 @@ public class ExportMgxCollection : MgxCmdletBase
                 // This protects any pre-existing output file from truncation if
                 // the Graph request fails on the first page.
                 // Use GUID to prevent collision when multiple exports target the same file.
+                if (!append)
+                {
+                    // No resume is pending, so every "{output}.{guid}.tmp" on disk is an orphan.
+                    // Leaving them is not inert: the pre-length adoption path picks the NEWEST
+                    // match with only a line count to go on, so a survivor of an unrelated run is
+                    // adoptable by some later crash's checkpoint.
+                    DeleteStaleTemps(outputPath);
+                }
                 var writePath = append ? outputPath : $"{outputPath}.{Guid.NewGuid():N}.tmp";
+                // What the checkpoint sites below should say about WHERE the counted items are.
+                // A resumed run appends to the output itself, so it has no temp to name.
+                string? checkpointTempFile = append ? null : Path.GetFileName(writePath);
+                long? checkpointDataLength = null;
                 long itemCount = 0;
                 int pageItemsWritten = 0;
                 long totalWritten = resumedItemCount;
@@ -268,12 +280,15 @@ public class ExportMgxCollection : MgxCmdletBase
                                     try
                                     {
                                         writer.Flush();
+                                        checkpointDataLength = writer.BaseStream.Position;
                                         new PaginationCheckpoint
                                         {
                                             Resource = url,
                                             NextLink = info.NextPageUrl,
                                             ItemsCollected = totalWritten,
-                                            PageItemsAlreadyWritten = 0
+                                            PageItemsAlreadyWritten = 0,
+                                            TempFile = checkpointTempFile,
+                                            DataLength = checkpointDataLength
                                         }.Save(cpPath);
                                     }
                                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -308,12 +323,15 @@ public class ExportMgxCollection : MgxCmdletBase
                                     {
                                         try
                                         {
+                                            checkpointDataLength = writer.BaseStream.Position;
                                             new PaginationCheckpoint
                                             {
                                                 Resource = url,
                                                 NextLink = currentFetchUrl,
                                                 ItemsCollected = totalWritten,
-                                                PageItemsAlreadyWritten = pageItemsWritten
+                                                PageItemsAlreadyWritten = pageItemsWritten,
+                                                TempFile = checkpointTempFile,
+                                                DataLength = checkpointDataLength
                                             }.Save(cpPath);
                                         }
                                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -356,15 +374,23 @@ public class ExportMgxCollection : MgxCmdletBase
                         {
                             try
                             {
+                                // Move first, then record. A checkpoint that named the output
+                                // before the move existed would describe a file that is not
+                                // there yet, and a move that then failed would leave it saying
+                                // so. The length is the temp's, taken before the move, because
+                                // it is the same bytes under a different name afterwards.
+                                var promotedLength = new FileInfo(writePath).Length;
+                                File.Move(writePath, outputPath, overwrite: true);
+                                promoted = true;
                                 new PaginationCheckpoint
                                 {
                                     Resource = url,
                                     NextLink = currentFetchUrl,
                                     ItemsCollected = totalWritten,
-                                    PageItemsAlreadyWritten = pageItemsWritten
+                                    PageItemsAlreadyWritten = pageItemsWritten,
+                                    TempFile = null,
+                                    DataLength = promotedLength
                                 }.Save(cpPath);
-                                File.Move(writePath, outputPath, overwrite: true);
-                                promoted = true;
                             }
                             catch (Exception promoteEx) when (promoteEx is IOException or UnauthorizedAccessException)
                             {
@@ -475,4 +501,76 @@ public class ExportMgxCollection : MgxCmdletBase
     private Dictionary<string, string>? BuildHeaders() =>
         BuildRequestHeaders(ConsistencyLevel, Headers);
 
+    /// <summary>
+    /// Put the files into the state the checkpoint claims, or delete the checkpoint. A
+    /// checkpoint records which file its items were written to and how many bytes of that file
+    /// they occupy, which makes three cases decidable instead of guessed.
+    ///
+    /// A temp is named, so the interrupted run was fresh and its items are in that temp while
+    /// the output still holds a PREVIOUS export. An export is a snapshot and a fresh run that
+    /// finishes moves its temp over the output, so recovery promotes the temp the same way -
+    /// appending would leave the previous export's rows in front of this one's.
+    ///
+    /// None is named, so the run was appending to the output and its items are already there,
+    /// past the recorded length only if it wrote more after its last save. Cutting back to that
+    /// length is what stops those from being written twice.
+    ///
+    /// Neither is recorded, so the checkpoint predates this and is handled as it was before.
+    ///
+    /// When the counted items turn out to be in no file, nothing has been promoted and no token
+    /// has moved, so starting over costs a pass and loses nothing, while resuming past them
+    /// would drop them from the output for good.
+    /// </summary>
+    private void ReconcileCheckpointWithFiles(string checkpointPath, string outputPath, PaginationCheckpoint checkpoint)
+    {
+        if (checkpoint.DataLength is not { } dataLength)
+        {
+            // Written before any of this was recorded. Adoption then has only a line count and
+            // the newest matching temp to go on, which is safe to attempt only when there is no
+            // output it could be merged into - exactly the case this path used to be limited to.
+            if (!File.Exists(outputPath))
+            {
+                if (TryAdoptOrphanedTemp(outputPath, checkpoint.ItemsCollected))
+                    WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted export's temp file. Resuming from checkpoint.");
+                else
+                {
+                    WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                    PaginationCheckpoint.Delete(checkpointPath);
+                }
+            }
+            return;
+        }
+
+        if (checkpoint.TempFile != null)
+        {
+            if (TryPromoteNamedTemp(outputPath, checkpoint.TempFile, dataLength))
+            {
+                WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted export's temp file. Resuming from checkpoint.");
+                // Those items are the output now. Repoint the checkpoint at it before anything
+                // else can fail, so a second interruption cannot promote the same temp again.
+                checkpoint.TempFile = null;
+                checkpoint.DataLength = new FileInfo(outputPath).Length;
+                try { checkpoint.Save(checkpointPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    WriteWarning($"Checkpoint save failed after recovery: {ex.Message}");
+                }
+                return;
+            }
+
+            WriteWarning(
+                $"The interrupted export's temp file is missing or incomplete, so the {checkpoint.ItemsCollected} items it "
+                + "recorded are not on disk. Exporting again from the beginning; nothing is lost.");
+            PaginationCheckpoint.Delete(checkpointPath);
+            return;
+        }
+
+        if (!TryTrimOutputToCheckpoint(outputPath, dataLength))
+        {
+            WriteWarning(
+                $"'{outputPath}' no longer holds the {checkpoint.ItemsCollected} items the resume checkpoint records. "
+                + "Exporting again from the beginning; nothing is lost.");
+            PaginationCheckpoint.Delete(checkpointPath);
+        }
+    }
 }

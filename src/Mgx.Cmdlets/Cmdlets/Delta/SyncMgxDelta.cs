@@ -415,34 +415,6 @@ public class SyncMgxDelta : MgxCmdletBase
                 "Delete it manually before the next run.");
     }
 
-    /// <summary>
-    /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
-    /// where every such file is an orphan by definition.
-    /// </summary>
-    private void DeleteStaleTemps(string outputPath)
-    {
-        try
-        {
-            var dir = Path.GetDirectoryName(outputPath);
-            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
-            foreach (var stale in Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp").ToList())
-            {
-                try
-                {
-                    File.Delete(stale);
-                    WriteVerbose($"Deleted an orphaned temp file from an earlier interrupted run: {Path.GetFileName(stale)}");
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    WriteWarning($"Could not delete orphaned temp file '{stale}': {ex.Message}. Delete it manually.");
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Best effort; a sweep failure must never stop the sync.
-        }
-    }
 
     /// <summary>
     /// Put the files into the state the checkpoint claims, or delete the checkpoint. A
