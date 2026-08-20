@@ -37,9 +37,10 @@ Describe 'Invoke-MgxRequest' {
         Invoke-MgxRequest /users -Filter "startsWith(displayName,'b')" -Top 1 | Should -Not -BeNullOrEmpty
     }
     It 'caps the total at -Top' {
-        # -Top is documented as capping the total result set. Kept separate from -All because
-        # combining them does not currently honor it - see the note in tests/Live/README.md.
         (Invoke-MgxRequest /users -Top 150 -Property id | Measure-Object).Count | Should -Be 150
+    }
+    It 'caps the total at -Top even with -All' {
+        (Invoke-MgxRequest /users -All -Top 150 -Property id | Measure-Object).Count | Should -Be 150
     }
 }
 

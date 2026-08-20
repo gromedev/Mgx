@@ -294,7 +294,11 @@ public class InvokeMgxRequest : MgxCmdletBase
                     includeCount: !string.IsNullOrEmpty(CountVariable) || includeAutoCount,
                     noPageSize: suppressTop);
                 var iterator = new PageIterator(GetClient());
-                var maxItems = (All.IsPresent || Top <= 0) ? 0 : Top;
+                // -All says how far to page, -Top says how much to return, and they are not the
+                // same question: -All used to zero the cap, so asking for a bounded slice of a
+                // large collection walked all of it. Worse, -Top also sets the page size, so the
+                // walk ran at the slice's page size - 150 rows at a time across the whole tenant.
+                var maxItems = Top > 0 ? Top : 0;
                 var headers = BuildHeaders();
                 long itemCount = 0;
 
@@ -598,8 +602,8 @@ public class InvokeMgxRequest : MgxCmdletBase
         for (int i = 0; i < uniqueIds.Count; i++)
             urlToSourceId[urls[i]] = uniqueIds[i];
 
-        // Respect -Top limit per URL
-        var maxItems = (All.IsPresent || Top <= 0) ? 0 : Top;
+        // Respect -Top limit per URL, -All or not.
+        var maxItems = Top > 0 ? Top : 0;
 
         // Pass headers to FetchAllAsync
         var fanOutResult = fanOut.FetchAllAsync(urls, maxItems, headers, CancellationToken)
