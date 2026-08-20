@@ -256,7 +256,12 @@ public class ExportMgxCollection : MgxCmdletBase
                 string? checkpointTempFile = append ? null : Path.GetFileName(writePath);
                 long? checkpointDataLength = null;
                 long itemCount = 0;
-                int pageItemsWritten = 0;
+                // Seeded from the resume skip, not 0. PageIterator drops the skipped items before
+                // this loop ever sees them, so a counter starting at 0 records only the NEWLY
+                // written items of a resumed first page. A mid-page checkpoint saved there then
+                // claims fewer items of that page than the output holds, and the next resume skips
+                // too few and writes the difference twice.
+                int pageItemsWritten = resume?.SkipOnFirstPage ?? 0;
                 long totalWritten = resumedItemCount;
                 long? reportedODataCount = null;
 

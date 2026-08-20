@@ -281,4 +281,116 @@ public class ExportCheckpointIntegrityTests
             try { Directory.Delete(dir, true); } catch { }
         }
     }
+
+    /// <summary>
+    /// The same shape as the delta case: an export resumed partway into a page has its first
+    /// items dropped by the iterator before it sees them, so a checkpoint saved while still on
+    /// that page has to count them too. Counting only what this run wrote makes the next resume
+    /// skip too few and write the difference twice.
+    /// </summary>
+    [Fact]
+    public void An_export_resumed_into_a_page_does_not_duplicate_it_on_a_second_interruption()
+    {
+        const string RefusedLink = "https://not-graph.example.com/v1.0/users?$skiptoken=P2";
+        const string Page2Link = "https://graph.microsoft.com/v1.0/users?$skiptoken=P2";
+
+        static string Item(int i) => $"{{\"id\":\"p{i}\"}}";
+        static string BigPage(string nextLink) =>
+            $"{{\"value\":[{string.Join(",", Enumerable.Range(0, 1000).Select(Item))}],"
+            + $"\"@odata.nextLink\":\"{nextLink}\"}}";
+
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            InjectMock(handler);
+
+            // One real run, only so the checkpoint on disk carries the exact URL the cmdlet
+            // builds for these parameters.
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.InternalServerError, ServerError);
+            Export(output, checkpoint, all: true);
+            var resource = PaginationCheckpoint.Load(checkpoint)!.Resource;
+            foreach (var t in Directory.GetFiles(dir, "out.jsonl.*.tmp")) File.Delete(t);
+
+            // Ctrl-C 500 items into the first page: that run promoted what it had written and
+            // recorded the output, 500 items in, all 500 from the page in flight.
+            File.WriteAllLines(output, Enumerable.Range(0, 500).Select(Item));
+            new PaginationCheckpoint
+            {
+                Resource = resource,
+                NextLink = "https://graph.microsoft.com/v1.0/users?$skiptoken=P1",
+                ItemsCollected = 500,
+                PageItemsAlreadyWritten = 500,
+                TempFile = null,
+                DataLength = new FileInfo(output).Length,
+            }.Save(checkpoint);
+
+            // The resumed run writes the other 500 items, saves the mid-page checkpoint item
+            // 1000 triggers, and is then refused the page's nextLink - so it dies before the
+            // page boundary and that mid-page save is what survives.
+            handler.Queue(HttpStatusCode.OK, BigPage(RefusedLink));
+            Export(output, checkpoint, all: true);
+
+            Assert.Equal(1000, Lines(output).Length);
+            var mid = PaginationCheckpoint.Load(checkpoint)!;
+            Assert.Equal(1000, mid.ItemsCollected);
+            Assert.Equal(1000, mid.PageItemsAlreadyWritten);
+
+            handler.Queue(HttpStatusCode.OK, BigPage(Page2Link));
+            handler.Queue(HttpStatusCode.OK, """{"value":[{"id":"tail"}]}""");
+            Export(output, checkpoint, all: true);
+
+            var lines = Lines(output);
+            Assert.Equal(lines.Length, lines.Distinct().Count());
+            Assert.Equal(1001, lines.Length);
+        }
+        finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// A checkpoint is untrusted input once it is on disk. A negative recorded length reached
+    /// SetLength, which rejects it with an exception the recovery path does not catch - so the
+    /// run died naming neither the checkpoint nor the file, and left the checkpoint behind to
+    /// fail the same way on every retry.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_recording_a_negative_length_does_not_wedge_the_export()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            InjectMock(handler);
+
+            File.WriteAllText(output, "{\"id\":\"u1\"}\n{\"id\":\"u2\"}\n");
+            new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users?$top=999",
+                NextLink = "https://graph.microsoft.com/v1.0/users?$skiptoken=P2",
+                ItemsCollected = 2,
+                PageItemsAlreadyWritten = 0,
+                TempFile = null,
+                DataLength = -1
+            }.Save(checkpoint);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var reported = Export(output, checkpoint, all: true);
+
+            // The unusable checkpoint is discarded and the export runs from the beginning.
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+            Assert.False(File.Exists(checkpoint));
+        }
+        finally
+        {
+            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
 }
