@@ -23,6 +23,7 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 - Export resume started the export over when the interrupted run had died on a transient error.
 - A resume checkpoint naming a file that was never a temp consumed it as data.
 - A refused delta token was reported as an endpoint not supporting delta queries.
+- Sync-MgxDelta as a session's first cmdlet sent its request to the public cloud endpoint.
 - A denied or read-only output file ended a delta sync with an unhandled error on Windows.
 - A missing drive item suggested retrying in beta instead of reporting the item absent.
 - Enumeration returned part of a collection without error when a nextLink was refused.
@@ -32,6 +33,7 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 - A $batch 429 set a pacing cap that nothing enforced and nothing cleared, so telemetry reported it forever.
 - Get-MgxContent ignored Retry-After when a download host sent it as an HTTP date.
 - Get-Help was missing the examples for -CheckpointPath, -Latest, -Prefer, adaptive pacing, and two Get-MgxContent endpoints, and did not document Set-MgxOption -BatchChunkConcurrency.
+- Seven examples rendered blank tables, and one reported password secrets as certificates.
 - Repeat 429s could raise the adaptive cap above -RateLimitPerSecond.
 - Delta state did not record its API version, so runs omitting -ApiVersion silently synced the other one.
 - -Debug wrote pre-authenticated download URLs verbatim, from redirect headers and from response bodies.
@@ -41,6 +43,7 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 - Two-hop content downloads were reported as failed requests.
 - Adaptive pacing fired synchronized bursts when sleep times were clamped.
 - Enable-MgxResilience recorded no telemetry: request counts, HTTP time and rate-limiter wait all stayed 0.
+- Invoke-MgGraphRequest with a relative URI failed while resilience was enabled.
 - $batch envelopes were bucketed as Other rather than their target workload.
 - Slow start opened above ceilings set below 4 rps.
 - ResiliencePipelineFactory.Reset() reverted configuration and kept batch pacer state across credential changes.
