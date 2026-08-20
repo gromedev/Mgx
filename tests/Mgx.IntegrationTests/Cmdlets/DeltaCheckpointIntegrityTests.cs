@@ -431,4 +431,69 @@ public class DeltaCheckpointIntegrityTests
         }
         finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
     }
+
+    // ---------------------------------------------------------------- D12
+
+    /// <summary>
+    /// A resumed run starts partway into a page, and PageIterator drops the skipped items before
+    /// the consumer ever sees them. A mid-page checkpoint saved while still on that first page
+    /// therefore has to count the skipped items as well as the new ones - it records a position
+    /// in the page, not how much this run wrote. Counting only the new ones understates the
+    /// output, and the next resume skips too few and writes the difference a second time.
+    /// </summary>
+    [Fact]
+    public void A_second_interruption_on_a_resumed_page_does_not_duplicate_its_items()
+    {
+        const string RefusedLink = "https://not-graph.example.com/v1.0/users/delta?$skiptoken=P2";
+        const string Page2Link = "https://graph.microsoft.com/v1.0/users/delta?$skiptoken=P2";
+
+        static string Item(int i) => $"{{\"id\":\"p{i}\"}}";
+        static string Page(string nextLink) =>
+            $"{{\"value\":[{string.Join(",", Enumerable.Range(0, 1000).Select(Item))}],"
+            + $"\"@odata.nextLink\":\"{nextLink}\"}}";
+
+        var env = NewEnv();
+        try
+        {
+            // Ctrl-C 500 items into the first page: the run promoted what it had written and
+            // recorded the output, 500 items in, all 500 of them from the page in flight.
+            File.WriteAllLines(env.OutputPath, Enumerable.Range(0, 500).Select(Item));
+            new PaginationCheckpoint
+            {
+                Resource = DeltaLink1,
+                NextLink = DeltaLink1,
+                ItemsCollected = 500,
+                PageItemsAlreadyWritten = 500,
+                TempFile = null,
+                DataLength = new FileInfo(env.OutputPath).Length,
+            }.Save(env.CheckpointPath);
+
+            var handler = new MockHttpHandler();
+            // The resumed run writes the other 500 items of the page, saves the mid-page
+            // checkpoint that item 1000 triggers, and is then refused the page's nextLink -
+            // so it dies before the page boundary and that mid-page save is what survives.
+            handler.QueueResponse(HttpStatusCode.OK, Page(RefusedLink));
+            // The run after it re-fetches the same page, this time paginating to the end.
+            handler.QueueResponse(HttpStatusCode.OK, Page(Page2Link));
+            handler.QueueResponse(HttpStatusCode.OK,
+                """{"value":[{"id":"tail"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D2"}""");
+            InjectMock(handler);
+
+            Sync(env);
+
+            Assert.Equal(1000, Ids(env.OutputPath).Length);
+            var checkpoint = PaginationCheckpoint.Load(env.CheckpointPath)!;
+            Assert.Equal(1000, checkpoint.ItemsCollected);
+            // 1000 items of this page are in the output, not the 500 this run put there.
+            Assert.Equal(1000, checkpoint.PageItemsAlreadyWritten);
+
+            Sync(env);
+
+            var ids = Ids(env.OutputPath);
+            Assert.Equal(ids.Length, ids.Distinct().Count());
+            Assert.Equal(1001, ids.Length);
+            Assert.Equal("{\"id\":\"tail\"}", ids[^1]);
+        }
+        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+    }
 }
