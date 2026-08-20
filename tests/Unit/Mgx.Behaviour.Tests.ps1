@@ -1421,6 +1421,78 @@ Describe 'HttpClient Ownership Disposal Guard' {
     }
 }
 
+Describe 'Enable-MgxResilience SDK Client Wrap' {
+    It 'Should keep the SDK BaseAddress on the wrapped client' {
+        # Invoke-MgGraphRequest resolves a relative -Uri against GraphHttpClient.BaseAddress
+        # before any handler runs, so the wrapper Enable-MgxResilience installs must carry
+        # the original client's BaseAddress or every relative-URI SDK call dies on the spot.
+        #
+        # Runs in a child process: the wrap mutates GraphSession.Instance and connects a
+        # mock session, neither of which may leak into the parent suite. No tenant and no
+        # listener are needed - the endpoint points at a dead port because Enable's init
+        # probe only has to run, not succeed, for the SDK to build its HttpClient.
+        if (-not (Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
+            Set-ItResult -Skipped -Because 'Microsoft.Graph.Authentication is not installed'
+            return
+        }
+
+        $modulePath = Join-Path $PSScriptRoot '../../module/mgx.psd1'
+        # Add-MgEnvironment PERSISTS custom environments, so the name is unique per run
+        # and removed again in the probe's finally block.
+        $envName = 'MgxWrap' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+        $probe = @"
+Import-Module Microsoft.Graph.Authentication
+Import-Module '$modulePath' -Force
+Add-MgEnvironment -Name $envName -GraphEndpoint 'http://localhost:59997' ``
+    -AzureADEndpoint 'https://login.microsoftonline.com' | Out-Null
+try {
+    Connect-MgGraph -Environment $envName ``
+        -AccessToken (ConvertTo-SecureString 'mock-token-not-validated' -AsPlainText -Force) -NoWelcome
+    # -AccessToken auth leaves AuthContext.TenantId empty, and Mgx's auth fingerprint
+    # treats an empty TenantId as "not connected" (1.0.4 identity fix). Give it a value.
+    [Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance.AuthContext.TenantId = 'mock-tenant'
+    Enable-MgxResilience -WarningAction SilentlyContinue
+    `$wrapped = [Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance.GraphHttpClient
+    Write-Output ('WRAPPED [' + `$wrapped.BaseAddress + ']')
+    Disable-MgxResilience
+    `$restored = [Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance.GraphHttpClient
+    Write-Output ('RESTORED [' + `$restored.BaseAddress + ']')
+}
+finally {
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    Remove-MgEnvironment -Name $envName -ErrorAction SilentlyContinue | Out-Null
+}
+"@
+        # Same host re-exec dance as 'Should unload cleanly': prove the host can spawn a
+        # child before blaming mgx for a dotnet-tool install that cannot.
+        $hostExe = @(
+            (Get-Process -Id $PID).Path
+            (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+        ) | Where-Object { $_ -and (Split-Path $_ -Leaf) -like 'pwsh*' } | Select-Object -First 1
+
+        if (-not $hostExe) {
+            Set-ItResult -Skipped -Because 'this host cannot re-exec itself (dotnet-tool PowerShell install)'
+            return
+        }
+        $probeOk = $null
+        try { $probeOk = & $hostExe -NoProfile -Command '"alive"' 2>$null } catch { $probeOk = $null }
+        if ($probeOk -ne 'alive') {
+            Set-ItResult -Skipped -Because "host '$hostExe' cannot be launched as a child process"
+            return
+        }
+
+        $result = @(& $hostExe -NoProfile -Command $probe)
+        $restoredLine = $result | Where-Object { $_ -like 'RESTORED *' }
+        $wrappedLine = $result | Where-Object { $_ -like 'WRAPPED *' }
+
+        # Disable restores the original SDK client, so RESTORED is the BaseAddress the
+        # wrapper was built from; the wrap must have carried it over verbatim.
+        $restoredLine | Should -Not -BeNullOrEmpty
+        $restoredLine | Should -Not -Be 'RESTORED []' -Because 'the original SDK client carries a BaseAddress'
+        $wrappedLine | Should -Be ('WRAPPED ' + ($restoredLine -replace '^RESTORED '))
+    }
+}
+
 Describe 'Sync-MgxDelta ExecuteDeltaSync Tests' -Tag 'Live' {
     BeforeAll {
         $script:liveConnected = $null -ne (Get-MgContext -ErrorAction SilentlyContinue)

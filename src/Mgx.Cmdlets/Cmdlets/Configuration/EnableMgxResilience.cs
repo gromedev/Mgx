@@ -258,8 +258,13 @@ public class EnableMgxResilience : PSCmdlet
             };
             ActiveHandler = resilientHandler;
 
+            // BaseAddress must come along: Invoke-MgGraphRequest resolves a relative -Uri
+            // against the active client's BaseAddress before any handler runs. Default
+            // request headers are NOT copied - the bridge delegates to sdkClient.SendAsync,
+            // which applies the original client's defaults to each request anyway.
             return new HttpClient(resilientHandler)
             {
+                BaseAddress = sdkClient.BaseAddress,
                 Timeout = sdkClient.Timeout
             };
         }
