@@ -15,10 +15,14 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 
 ### Fixed
 
-- -Latest was honoured after a state invalidation, dropping every change since the last sync.
+- -Latest was honored after a state invalidation, dropping every change since the last sync.
 - Delta resume dropped the interrupted run's items when an earlier run had already completed, and advanced the delta token past them.
 - Export resume dropped the interrupted run's items when an earlier export had already written the output file.
 - Export resume wrote a page's items twice when a run was interrupted twice inside the same page.
+- Delta resume kept the previous sync's rows in front of the interrupted sync's output.
+- Export resume started the export over when the interrupted run had died on a transient error.
+- A resume checkpoint naming a file that was never a temp consumed it as data.
+- A refused delta token was reported as an endpoint not supporting delta queries.
 - A denied or read-only output file ended a delta sync with an unhandled error on Windows.
 - Enumeration returned part of a collection without error when a nextLink was refused.
 - A delta sync stopped with an error when a page contained a non-object item.
@@ -45,7 +49,7 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 
 - Graph delta responses repeat objects across pages; deduplicate on id, or baseline with -Latest.
 - Adaptive pacing applies to every request except batch outer POSTs.
-- Measured throttling behaviour: resource unit budgets are scoped per application and tenant, and x-ms-throttle-limit-percentage is not emitted.
+- Measured throttling behavior: resource unit budgets are scoped per application and tenant, and x-ms-throttle-limit-percentage is not emitted.
 
 ## 2.0.1
 
