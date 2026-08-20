@@ -910,6 +910,12 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     {
         try
         {
+            // A checkpoint is untrusted input once it is on disk, and SetLength rejects a
+            // negative length with an ArgumentOutOfRangeException the catch below does not
+            // cover - so a hand-edited length escaped as a terminating error naming neither the
+            // checkpoint nor the file, and left itself on disk to fail the same way next run.
+            // ResolveNamedTemp already guards its own length; this is the same guard.
+            if (dataLength < 0) return false;
             if (!File.Exists(outputPath)) return false;
             var actual = new FileInfo(outputPath).Length;
             if (actual < dataLength) return false;
