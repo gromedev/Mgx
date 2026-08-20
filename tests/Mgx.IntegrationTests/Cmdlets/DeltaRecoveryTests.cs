@@ -306,6 +306,75 @@ public class DeltaRecoveryTests
     }
 
     /// <summary>
+    /// A resume opens the output itself for append, and a denying ACL or read-only bit there
+    /// raises UnauthorizedAccessException - which does not derive from IOException, so a
+    /// handler catching only the latter turns an ordinary permission failure into an unhandled
+    /// error. It must surface the same way an unwritable path does everywhere else: as an
+    /// AccessDenied error record.
+    /// </summary>
+    [Fact]
+    public void A_denied_output_ends_the_resume_as_an_error_record_not_an_unhandled_failure()
+    {
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-recovery-{Guid.NewGuid():N}")).FullName;
+        var deltaPath = Path.Combine(dir, "state.json");
+        var checkpointPath = Path.Combine(dir, "run.checkpoint");
+        var outputPath = Path.Combine(dir, "out.jsonl");
+
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, Baseline);                        // run 1
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);                    // run 2, page 1
+        handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);    // run 2 dies
+        handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage2);                    // run 3 resumes
+
+        InjectMock(handler);
+        try
+        {
+            Sync(deltaPath, checkpointPath, outputPath);
+            Sync(deltaPath, checkpointPath, outputPath);
+
+            // The shape a promoted cancellation leaves: the checkpoint points at the output
+            // itself, so the resume opens that file directly rather than merging a temp over
+            // it - a merge's rename would replace the file, permissions and all.
+            var checkpoint = PaginationCheckpoint.Load(checkpointPath)!;
+            checkpoint.TempFile = null;
+            checkpoint.DataLength = new FileInfo(outputPath).Length;
+            checkpoint.Save(checkpointPath);
+
+            if (OperatingSystem.IsWindows())
+                File.SetAttributes(outputPath, File.GetAttributes(outputPath) | FileAttributes.ReadOnly);
+            else
+                File.SetUnixFileMode(outputPath, UnixFileMode.UserRead);
+
+            using var ps = Shell();
+            ps.AddCommand("Sync-MgxDelta")
+              .AddParameter("Uri", "/users/delta")
+              .AddParameter("DeltaPath", deltaPath)
+              .AddParameter("CheckpointPath", checkpointPath)
+              .AddParameter("OutputFile", outputPath);
+            var escaped = Record.Exception(() => ps.Invoke());
+
+            Assert.Null(escaped);
+            Assert.Contains(ps.Streams.Error,
+                e => e.FullyQualifiedErrorId.StartsWith("AccessDenied", StringComparison.Ordinal));
+        }
+        finally
+        {
+            CleanupMock();
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                    File.SetAttributes(outputPath, File.GetAttributes(outputPath) & ~FileAttributes.ReadOnly);
+                else
+                    File.SetUnixFileMode(outputPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            catch { }
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
     /// A run that dies before any page boundary leaves no checkpoint, so there is nothing to
     /// resume and nothing the temp is needed for. It must not be left behind: a stale temp is
     /// adoptable by a later run whose checkpoint happens to match the output name.
