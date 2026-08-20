@@ -1041,13 +1041,38 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         $"Wait {s_clientOptions.CircuitBreakerDurationSeconds}s or run Get-MgxTelemetry for details. " +
         $"Tune with Set-MgxOption -CircuitBreakerFailureRatio / -CircuitBreakerMinThroughput.";
 
-    protected void WriteBetaHintIfApplicable(HttpStatusCode statusCode, string apiVersion)
+    /// <summary>
+    /// Codes measured to mean the PATH was fine and the OBJECT was not there, so a beta hint
+    /// over them sends the caller to re-run a request that fails there too. Only codes with
+    /// demonstrated semantics belong here. Request_ResourceNotFound does NOT qualify: Graph
+    /// returns it both for a missing directory object and for a beta-only segment on v1.0
+    /// (measured against /users/{id} and /users/{id}/profile), so it cannot be told apart and
+    /// the hedged hint stays. itemNotFound is the drive service reporting an absent item - an
+    /// unknown drive segment is a 400, not a 404, so the ambiguity does not arise there.
+    /// </summary>
+    private static readonly HashSet<string> ObjectMissingCodes = new(StringComparer.OrdinalIgnoreCase)
     {
-        if (statusCode == HttpStatusCode.NotFound &&
-            string.Equals(apiVersion, "v1.0", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteWarning("This endpoint may only be available in beta. Retry with -ApiVersion beta.");
-        }
+        "itemNotFound",
+    };
+
+    /// <summary>True when the exception is a Graph 404 that names a missing object.</summary>
+    protected static bool IsObjectMissing(Exception ex) =>
+        ex is GraphServiceException { StatusCode: HttpStatusCode.NotFound } g
+        && g.ErrorCode != null
+        && ObjectMissingCodes.Contains(g.ErrorCode);
+
+    protected void WriteBetaHintIfApplicable(HttpStatusCode statusCode, string apiVersion,
+        string? errorCode = null)
+    {
+        if (statusCode != HttpStatusCode.NotFound ||
+            !string.Equals(apiVersion, "v1.0", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        // A missing user, group or drive item is not an absent endpoint.
+        if (errorCode != null && ObjectMissingCodes.Contains(errorCode))
+            return;
+
+        WriteWarning("This endpoint may only be available in beta. Retry with -ApiVersion beta.");
     }
 
     protected static ErrorCategory MapStatusToCategory(HttpStatusCode statusCode) => statusCode switch
@@ -1076,7 +1101,7 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         {
             case GraphServiceException gex:
                 if (apiVersion != null)
-                    WriteBetaHintIfApplicable(gex.StatusCode, apiVersion);
+                    WriteBetaHintIfApplicable(gex.StatusCode, apiVersion, gex.ErrorCode);
                 WriteError(new ErrorRecord(gex, gex.ErrorCode ?? "GraphError",
                     MapStatusToCategory(gex.StatusCode), target));
                 return true;
