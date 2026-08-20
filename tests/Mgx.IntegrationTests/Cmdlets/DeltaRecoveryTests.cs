@@ -88,8 +88,10 @@ public class DeltaRecoveryTests
     /// The steady-state failure: a completed run, then a run that dies on a transient 500
     /// partway through. The dead run's temp holds the pages the checkpoint counts. If that
     /// temp is discarded, the next run sees checkpoint + output + no temp - which is the
-    /// ROUTINE "nothing to adopt" state - resumes in append mode, and the token advances
-    /// past pages that were never written anywhere.
+    /// ROUTINE "nothing to promote" state - resumes in append mode, and the token advances
+    /// past pages that were never written anywhere. And recovery must land on what a clean
+    /// run 2 would have produced: promotion replaces the completed run's rows, which the
+    /// caller has already consumed, rather than appending behind them.
     /// </summary>
     [Fact]
     public void A_transient_error_midrun_does_not_strand_the_pages_the_checkpoint_counts()
@@ -128,11 +130,91 @@ public class DeltaRecoveryTests
 
             Sync(deltaPath, checkpointPath, outputPath);
             Assert.Equal(
-                ["{\"id\":\"a1\"}", "{\"id\":\"a2\"}", "{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
                 File.ReadAllLines(outputPath));
             Assert.Contains("$deltatoken=D2", DeltaState.Load(deltaPath)!.DeltaLink);
             Assert.False(File.Exists(checkpointPath));
             Assert.Empty(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+        }
+        finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// The semantics every recovery path has to agree with: a completed sync's output is that
+    /// sync's changes alone. A fresh run writes to a temp and moves it over the output, so the
+    /// previous sync's rows - already consumed by whatever reads the file - do not accumulate.
+    /// </summary>
+    [Fact]
+    public void A_completed_sync_replaces_the_previous_syncs_output()
+    {
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-recovery-{Guid.NewGuid():N}")).FullName;
+        var deltaPath = Path.Combine(dir, "state.json");
+        var checkpointPath = Path.Combine(dir, "run.checkpoint");
+        var outputPath = Path.Combine(dir, "out.jsonl");
+
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, Baseline);        // run 1: a1,a2
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);    // run 2: b1,b2
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage2);    // run 2: b3
+
+        InjectMock(handler);
+        try
+        {
+            Sync(deltaPath, checkpointPath, outputPath);
+            Assert.Equal(["{\"id\":\"a1\"}", "{\"id\":\"a2\"}"], File.ReadAllLines(outputPath));
+
+            Sync(deltaPath, checkpointPath, outputPath);
+            Assert.Equal(
+                ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                File.ReadAllLines(outputPath));
+        }
+        finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// A checkpoint that predates the recorded temp name and length cannot say which file its
+    /// items are in, so against an existing output it must not guess: an appending run's items
+    /// are in the output, a fresh run's are in a temp, and merging the wrong one either repeats
+    /// rows or hands a stale file to the resume. Re-enumerating from the token loses nothing.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_that_does_not_name_its_file_reenumerates_rather_than_guessing()
+    {
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-recovery-{Guid.NewGuid():N}")).FullName;
+        var deltaPath = Path.Combine(dir, "state.json");
+        var checkpointPath = Path.Combine(dir, "run.checkpoint");
+        var outputPath = Path.Combine(dir, "out.jsonl");
+
+        var handler = new MockHttpHandler();
+        handler.QueueResponse(HttpStatusCode.OK, Baseline);                        // run 1
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);                    // run 2, page 1
+        handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);    // run 2 dies
+        handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);                    // run 3 re-enumerates
+        handler.QueueResponse(HttpStatusCode.OK, ChangesPage2);
+
+        InjectMock(handler);
+        try
+        {
+            Sync(deltaPath, checkpointPath, outputPath);
+            Sync(deltaPath, checkpointPath, outputPath);
+
+            // The same position as recorded, minus the fields that locate the items.
+            var checkpoint = PaginationCheckpoint.Load(checkpointPath)!;
+            checkpoint.TempFile = null;
+            checkpoint.DataLength = null;
+            checkpoint.Save(checkpointPath);
+            var before = handler.Requests.Count;
+
+            Sync(deltaPath, checkpointPath, outputPath);
+
+            Assert.Contains("$deltatoken=D1", handler.Requests[before].RequestUri!.ToString());
+            Assert.Equal(
+                ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                File.ReadAllLines(outputPath));
+            Assert.Contains("$deltatoken=D2", DeltaState.Load(deltaPath)!.DeltaLink);
         }
         finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
     }

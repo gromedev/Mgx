@@ -3,10 +3,11 @@ using System.Reflection;
 namespace Mgx.IntegrationTests.Engine.Pagination;
 
 /// <summary>
-/// Orphan-temp adoption after a JSONL sync is interrupted. The case that matters is the
-/// steady-state one: a run that SUCCEEDED, then a run that crashed. Adoption previously
-/// required the output file to be absent, so that sequence skipped it and the crashed run's
-/// items were dropped while the delta token advanced past them.
+/// Orphan-temp adoption after a JSONL run is interrupted, for checkpoints that predate the
+/// recorded temp name and length. With only a line count and a glob to go on, adoption is
+/// safe solely when no output exists; against an existing output it must refuse and leave the
+/// caller to re-enumerate, since nothing ties the newest temp to the run the checkpoint is
+/// actually about.
 /// </summary>
 public class OrphanAdoptionTests
 {
@@ -43,7 +44,7 @@ public class OrphanAdoptionTests
     }
 
     [Fact]
-    public void Preserves_a_completed_runs_output_and_appends_the_crashed_runs_items()
+    public void Refuses_when_an_output_already_exists()
     {
         var dir = NewDir();
         try
@@ -51,13 +52,15 @@ public class OrphanAdoptionTests
             var output = Path.Combine(dir, "out.jsonl");
             // Run 1 completed.
             File.WriteAllLines(output, ["{\"id\":\"run1-1\"}", "{\"id\":\"run1-2\"}"]);
-            // Run 2 crashed: temp holds 3 lines, checkpoint promises 2.
+            // Run 2 crashed: a temp is on disk, but nothing says it is run 2's rather than a
+            // survivor of some unrelated enumeration against the same output name.
             File.WriteAllLines($"{output}.def.tmp", ["{\"id\":\"run2-1\"}", "{\"id\":\"run2-2\"}", "{\"id\":\"unflushed\"}"]);
 
-            Assert.True(Invoke(output, 2));
+            Assert.False(Invoke(output, 2));
 
+            // The output is untouched; recovery falls to re-enumeration, not a guessed merge.
             Assert.Equal(
-                ["{\"id\":\"run1-1\"}", "{\"id\":\"run1-2\"}", "{\"id\":\"run2-1\"}", "{\"id\":\"run2-2\"}"],
+                ["{\"id\":\"run1-1\"}", "{\"id\":\"run1-2\"}"],
                 File.ReadAllLines(output));
         }
         finally { Directory.Delete(dir, true); }

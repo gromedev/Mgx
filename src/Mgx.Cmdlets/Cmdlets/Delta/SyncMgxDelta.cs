@@ -419,10 +419,24 @@ public class SyncMgxDelta : MgxCmdletBase
     /// <summary>
     /// Put the files into the state the checkpoint claims, or delete the checkpoint. A
     /// checkpoint records which file its items were written to and how many bytes of that file
-    /// they occupy, which makes three cases decidable instead of guessed:
-    /// a temp is named, so the run was fresh and the output holds only what preceded it;
-    /// none is named, so the run was appending and the output holds them;
-    /// nothing is recorded, so the checkpoint predates this and is handled as it was before.
+    /// they occupy, which makes three cases decidable instead of guessed.
+    ///
+    /// A temp is named, so the interrupted run was fresh and its items are in that temp while
+    /// the output still holds the PREVIOUS sync's rows. Those rows were the previous run's
+    /// result, already replaced by every path that completes - a fresh run that finishes moves
+    /// its temp over the output, and a cancellation promotes the same way - so recovery
+    /// promotes too. Appending instead would put rows the caller has already consumed back in
+    /// front of this sync's.
+    ///
+    /// None is named, so the run was appending to the output and its items are already there,
+    /// past the recorded length only if it wrote more after its last save. Cutting back to that
+    /// length is what stops those from being written twice.
+    ///
+    /// Neither is recorded, so the checkpoint cannot say which file its items are in, and an
+    /// appending run's checkpoint cannot be told from a fresh one's. When no output exists the
+    /// ambiguity is harmless - everything the run wrote is in its temp - but against an
+    /// existing output the only recovery that cannot lose or repeat items is re-enumerating.
+    ///
     /// When the counted items turn out to be in no file, the delta link has not moved, so
     /// re-enumerating costs time and loses nothing while resuming past them loses them for good.
     /// </summary>
@@ -430,23 +444,32 @@ public class SyncMgxDelta : MgxCmdletBase
     {
         if (checkpoint.DataLength is not { } dataLength)
         {
-            if (TryAdoptOrphanedTemp(outputPath, checkpoint.ItemsCollected))
-                WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
-            else if (!File.Exists(outputPath))
+            if (!File.Exists(outputPath))
             {
-                WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
-                PaginationCheckpoint.Delete(checkpointPath);
+                if (TryAdoptOrphanedTemp(outputPath, checkpoint.ItemsCollected))
+                    WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
+                else
+                {
+                    WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                    PaginationCheckpoint.Delete(checkpointPath);
+                }
+                return;
             }
+
+            WriteWarning(
+                "The resume checkpoint does not record which file the interrupted sync's items are in. "
+                + "Re-enumerating from the last saved delta token; no changes are lost.");
+            PaginationCheckpoint.Delete(checkpointPath);
             return;
         }
 
         if (checkpoint.TempFile != null)
         {
-            if (TryAdoptNamedTemp(outputPath, checkpoint.TempFile, dataLength))
+            if (TryPromoteNamedTemp(outputPath, checkpoint.TempFile, dataLength))
             {
                 WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
-                // Those items live in the output now. Repoint the checkpoint at it immediately,
-                // so a second interruption cannot adopt the same temp a second time.
+                // Those items are the output now. Repoint the checkpoint at it immediately,
+                // so a second interruption cannot promote the same temp a second time.
                 checkpoint.TempFile = null;
                 checkpoint.DataLength = new FileInfo(outputPath).Length;
                 try { checkpoint.Save(checkpointPath); }
@@ -508,16 +531,11 @@ public class SyncMgxDelta : MgxCmdletBase
                 if (checkpointPath != null && File.Exists(checkpointPath))
                 {
                     // JSONL crash: the checkpoint survives but the output was never promoted from
-                    // its temp file. Adopt the temp (trimmed to the checkpointed count) so resume
-                    // appends to real data instead of declaring staleness.
-                    //
-                    // This used to require the output to be ABSENT, which meant the common
-                    // steady-state sequence - a successful run, then a crashed one - skipped
-                    // adoption entirely: resume restarted at checkpoint.NextLink and the crashed
-                    // run's items, sitting in the orphaned temp, were never emitted, while the
-                    // delta token advanced past them on success. TryAdoptOrphanedTemp now appends
-                    // to an existing output instead of overwriting it, so ADOPTION no longer needs
-                    // the guard - but the deletion branch below still does.
+                    // its temp file. Promote the temp (trimmed to the checkpointed length) so
+                    // resume appends to real data instead of declaring staleness. Without this
+                    // the resume restarts at checkpoint.NextLink and the crashed run's items,
+                    // sitting only in the temp, are never emitted - while the delta token
+                    // advances past them on success.
                     if (outputPath != null)
                     {
                         var orphanCp = PaginationCheckpoint.Load(checkpointPath);
@@ -770,11 +788,11 @@ public class SyncMgxDelta : MgxCmdletBase
                                 // the position, so the temp always holds at least ItemsCollected.
                                 // Deleting it leaves the checkpoint pointing past data that is
                                 // nowhere - and the next run then finds a checkpoint, an output
-                                // and no temp, which is the routine "nothing to adopt" state, so
+                                // and no temp, which is the routine "nothing to promote" state, so
                                 // it resumes in APPEND mode against an output that never received
                                 // these pages and the delta token advances past them.
-                                // Keep the temp for the next run to adopt. It is deleted by
-                                // adoption, by a later fresh run's own failure once the checkpoint
+                                // Keep the temp for the next run to promote. It is deleted by
+                                // promotion, by a later fresh run's own failure once the checkpoint
                                 // is gone, or on the missing-output path below.
                                 var resumable = checkpointPath != null && File.Exists(checkpointPath);
                                 if (!resumable)

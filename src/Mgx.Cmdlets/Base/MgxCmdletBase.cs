@@ -734,16 +734,6 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     }
 
     /// <summary>
-    /// Recovers a fresh-run JSONL job that was interrupted before its temp file was
-    /// promoted (kill/crash: the temp survives; the checkpoint reflects the last
-    /// flush). Copies exactly <paramref name="itemCount"/> lines from the newest
-    /// matching temp file to the output path - content beyond the last flush may
-    /// be absent or torn - then removes the temp. Returns false when nothing
-    /// usable exists, leaving the caller to the stale-checkpoint path.
-    /// Shared by Export-MgxCollection and Sync-MgxDelta (both write
-    /// <c>output.{guid}.tmp</c> on fresh runs).
-    /// </summary>
-    /// <summary>
     /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
     /// where every such file is an orphan by definition.
     /// </summary>
@@ -797,12 +787,14 @@ public abstract class MgxCmdletBase : MgxCmdletCore
 
     /// <summary>
     /// Replace the output with the first <paramref name="dataLength"/> bytes of a named temp,
-    /// then remove the temp. This is what an interrupted export needs, as against the appending
-    /// form a delta sync needs: an export is a snapshot, and a fresh run that finishes moves its
-    /// temp over whatever the output held, so recovering an unfinished one has to reach that
-    /// same file. Appending instead would leave the previous export's rows in front of this
-    /// one's. Returns false when the temp is absent or shorter than the checkpoint promised,
-    /// which means the caller must not resume past the items it counted.
+    /// then remove the temp. A fresh run that finishes moves its temp over whatever the output
+    /// held, so recovering an unfinished one has to reach that same file; appending instead
+    /// would leave the previous run's rows - already consumed - in front of this one's. Unlike
+    /// the glob-and-newest form, this takes exactly the file the checkpoint recorded, so a
+    /// leftover from an unrelated run cannot be merged in. Bytes rather than lines: the length
+    /// was taken from the writer's own position, so it cannot disagree with itself about line
+    /// endings or a torn final line. Returns false when the temp is absent or shorter than the
+    /// checkpoint promised, which means the caller must not resume past the items it counted.
     /// </summary>
     protected static bool TryPromoteNamedTemp(string outputPath, string tempFileName, long dataLength)
     {
@@ -845,62 +837,6 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     }
 
     /// <summary>
-    /// Append the first <paramref name="dataLength"/> bytes of a named temp file to the output,
-    /// then remove the temp. Unlike the glob-and-newest form, this adopts exactly the file the
-    /// checkpoint recorded, so a leftover from an unrelated run cannot be merged in.
-    /// Returns false when the temp is absent or shorter than the checkpoint promised, which
-    /// means the items it counted are in no file and the caller must not resume past them.
-    /// Bytes rather than lines: the length was taken from the writer's own position, so it
-    /// cannot disagree with itself about line endings or a torn final line.
-    /// </summary>
-    protected static bool TryAdoptNamedTemp(string outputPath, string tempFileName, long dataLength)
-    {
-        try
-        {
-            var tempPath = ResolveNamedTemp(outputPath, tempFileName, dataLength);
-            if (tempPath == null) return false;
-
-            // Staged like the glob form: build the combined file first so the destination is
-            // replaced in one Move rather than mutated in place.
-            var adoptPath = outputPath + ".adopt";
-            using (var writer = new FileStream(adoptPath, FileMode.Create, FileAccess.Write))
-            {
-                if (File.Exists(outputPath))
-                {
-                    using var prior = new FileStream(outputPath, FileMode.Open, FileAccess.Read);
-                    prior.CopyTo(writer);
-                }
-                using var temp = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
-                var buffer = new byte[81920];
-                long remaining = dataLength;
-                while (remaining > 0)
-                {
-                    var read = temp.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
-                    if (read <= 0) break;
-                    writer.Write(buffer, 0, read);
-                    remaining -= read;
-                }
-                if (remaining > 0)
-                {
-                    writer.Dispose();
-                    File.Delete(adoptPath);
-                    return false;
-                }
-            }
-            File.Move(adoptPath, outputPath, overwrite: true);
-            // The merge is done. A temp that will not delete is litter, not a failure - saying
-            // otherwise would tell the caller nothing was adopted when everything was.
-            try { File.Delete(tempPath); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-            return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
     /// Cut the output back to the length a checkpoint recorded for it, dropping anything the
     /// interrupted run wrote after its last save. Those items are re-fetched, so dropping them
     /// is what keeps a resume from duplicating them. Returns false when the output is shorter
@@ -930,11 +866,23 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         }
     }
 
+    /// <summary>
+    /// Recovers a fresh-run JSONL job that was interrupted before its temp file was promoted,
+    /// from a checkpoint that predates the recorded temp name and length. With only a line
+    /// count and the newest matching temp to go on, this is safe solely when no output exists:
+    /// everything the run wrote is then in its temp, and creating the output from it is what a
+    /// finishing run's own promotion would have done. Against an existing output there is no
+    /// way to tell whose items the temp holds, so the caller must re-enumerate instead.
+    /// Copies exactly <paramref name="itemCount"/> lines - content beyond the last flush may
+    /// be absent or torn - then removes the temp. Returns false when nothing usable exists,
+    /// leaving the caller to the stale-checkpoint path.
+    /// </summary>
     protected static bool TryAdoptOrphanedTemp(string outputPath, long itemCount)
     {
         try
         {
             if (itemCount <= 0) return false;
+            if (File.Exists(outputPath)) return false;
             var dir = Path.GetDirectoryName(outputPath);
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
             var temp = Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp")
@@ -943,29 +891,12 @@ public abstract class MgxCmdletBase : MgxCmdletCore
                 .FirstOrDefault();
             if (temp == null) return false;
 
-            // The output may already hold a COMPLETED run's items: success, then a crash on the
-            // next run, leaves a valid output file and an orphaned temp side by side. Adoption
-            // used to Move over the destination, which is why the caller guarded it on the output
-            // being absent - and that guard silently discarded the crashed run's items instead.
-            // Preserve what is there and append to it; build the combined file first so the
-            // destination is replaced in one Move rather than mutated in place.
-            // Staging costs peak disk equal to output + temp, briefly, rather than temp alone.
-            // That is deliberate: appending straight to the output would halve the peak but
-            // lose atomicity, and a merge that dies halfway would leave a half-written output
-            // with no staging file to recover from. On a full volume this fails and the caller
-            // keeps its checkpoint, which is the safe direction.
-            var existing = File.Exists(outputPath) ? outputPath : null;
+            // Staged so the output appears in one Move. A merge that dies halfway leaves only
+            // the staging file behind, and the caller keeps its checkpoint - the safe direction.
             long copied = 0;
             var adoptPath = outputPath + ".adopt";
             using (var writer = new StreamWriter(adoptPath, append: false))
             {
-                if (existing != null)
-                {
-                    using var prior = new StreamReader(existing);
-                    string? kept;
-                    while ((kept = prior.ReadLine()) != null) writer.WriteLine(kept);
-                }
-
                 using var reader = new StreamReader(temp.FullName);
                 string? line;
                 while (copied < itemCount && (line = reader.ReadLine()) != null)
