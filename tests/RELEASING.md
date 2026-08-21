@@ -3,6 +3,8 @@
 `main` carries one commit per release. There are no merge commits: a release is `dev` squashed
 onto `main`, tagged, then published.
 
+Every command below runs from the repository root, not from this directory.
+
 ## Before
 
 1. **Both suites, both platforms.**
