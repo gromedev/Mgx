@@ -737,6 +737,24 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
     /// where every such file is an orphan by definition.
     /// </summary>
+    /// <summary>
+    /// True when nothing else holds the file. FileShare.None is honoured between .NET processes
+    /// on both Windows and Unix, so a writer that has it open makes this fail rather than let a
+    /// sweep take a file out from under it.
+    /// </summary>
+    private static bool CanTakeExclusively(string path)
+    {
+        try
+        {
+            using var _ = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     protected void DeleteStaleTemps(string outputPath)
     {
         try
@@ -745,6 +763,17 @@ public abstract class MgxCmdletBase : MgxCmdletCore
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
             foreach (var stale in Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp").ToList())
             {
+                // "Orphan" is an assumption about a file this run did not create, and a second
+                // export running against the same output right now owns a file matching the same
+                // glob. Windows refuses to delete a file someone holds open, so it declined by
+                // accident; Unix does not, and the other run went on writing into an unlinked
+                // inode and lost everything it had fetched. Ask for the file exclusively first -
+                // if that fails, someone is using it and it is not an orphan.
+                if (!CanTakeExclusively(stale))
+                {
+                    WriteVerbose($"Left '{Path.GetFileName(stale)}' alone: another run is writing to it.");
+                    continue;
+                }
                 try
                 {
                     File.Delete(stale);
