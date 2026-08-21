@@ -284,7 +284,6 @@ public class ExpandMgxRelation : MgxCmdletBase
     {
         // Cache converted results per ID to avoid redundant JsonToHashtable calls
         // when multiple buffer objects share the same ID
-        var convertedCache = new Dictionary<string, object?>();
         HashSet<string>? flattenWarned = Flatten.IsPresent ? [] : null;
 
         foreach (var obj in _buffer)
@@ -295,30 +294,29 @@ public class ExpandMgxRelation : MgxCmdletBase
 
             if (id != null && resultsById.ContainsKey(id))
             {
-                if (!convertedCache.TryGetValue(id, out relationValue))
-                {
-                    var items = resultsById[id];
-                    var converted = items.Select(JsonToHashtable).ToArray();
+                // Converted per input object rather than once per id. Two inputs carrying the
+                // same id used to receive the SAME hashtables, so writing to one output's
+                // relation silently rewrote the others'. The conversion only repeats when an id
+                // actually appears twice, which is the same case that made the sharing visible.
+                var items = resultsById[id];
+                var converted = items.Select(JsonToHashtable).ToArray();
 
-                    if (Flatten.IsPresent)
+                if (Flatten.IsPresent)
+                {
+                    if (converted.Length <= 1)
                     {
-                        if (converted.Length <= 1)
-                        {
-                            relationValue = converted.Length == 1 ? converted[0] : null;
-                        }
-                        else
-                        {
-                            if (flattenWarned!.Add(id))
-                                WriteWarning($"-Flatten: entity '{id}' returned {converted.Length} items instead of 1. Returning array.");
-                            relationValue = converted;
-                        }
+                        relationValue = converted.Length == 1 ? converted[0] : null;
                     }
                     else
                     {
+                        if (flattenWarned!.Add(id))
+                            WriteWarning($"-Flatten: entity '{id}' returned {converted.Length} items instead of 1. Returning array.");
                         relationValue = converted;
                     }
-
-                    convertedCache[id] = relationValue;
+                }
+                else
+                {
+                    relationValue = converted;
                 }
             }
 
