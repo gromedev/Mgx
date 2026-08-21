@@ -30,6 +30,14 @@ $results.sdk = Measure-BenchMedian -Name 'SDK Get-MgUser -All' -Runs $Runs -Scri
     @{ count = $n }
 }
 
+# The README footnote compares the SDK tuned against the SDK as it comes. Without this arm that
+# ratio was a claim with nothing behind it - it said ten times, and it is three.
+$results.sdkDefault = Measure-BenchMedian -Name 'SDK Get-MgUser -All (default page)' -Runs $Runs -Script {
+    $n = 0
+    Get-MgUser -All -Property $props | ForEach-Object { $n++ }
+    @{ count = $n }
+}
+
 $results.rest = Measure-BenchMedian -Name 'raw Invoke-RestMethod' -Runs $Runs -Script {
     $tok = Get-BenchAppToken
     $headers = @{ Authorization = "Bearer $tok" }
@@ -55,7 +63,7 @@ $results.ttfrSdk = Measure-BenchMedian -Name 'SDK time-to-first' -Runs $Runs -Sc
 
 Write-Host ''
 Write-Host '=== LIST USERS ==='
-foreach ($k in 'mgx', 'sdk', 'rest') {
+foreach ($k in 'mgx', 'sdk', 'sdkDefault', 'rest') {
     $m = $results[$k].Median
     Write-Host ("{0,-24} {1,8:F1}s  count={2}  peakWS={3}MB" -f $results[$k].Name, ($m.ElapsedMs / 1000), $m.Output.count, $m.PeakWorkingSetMB)
 }

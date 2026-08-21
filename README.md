@@ -12,6 +12,7 @@ In benchmarks, operations that benefit from concurrency and batching were **4–
 ## Quick start
 
 ```powershell
+Install-Module Microsoft.Graph.Authentication   # Connect-MgGraph lives here
 Install-Module Mgx
 Connect-MgGraph -Scopes "User.Read.All"
 Invoke-MgxRequest /users -All -Property displayName,mail
@@ -40,7 +41,7 @@ Invoke-MgxRequest /users -All -Property displayName,mail
 | **User report** *(1k users + groups)* |  **23.9s** |             107.9s |                         205.8s |       **4.5×** |
 | **Full delta enumeration** *(130,233 items)* | **145.6s** |              - |                              - |              - |
 
-<sup>¹ Both figures are the SDK at `-PageSize 999`, which is what the benchmark runs. At the SDK's *default* 100-item page size the same enumeration takes roughly ten times as long — the practical difference is that mgx needs no tuning to be fast, not that it out-runs a tuned SDK on plain enumeration.</sup>
+<sup>¹ Both figures are the SDK at `-PageSize 999`, which is what the benchmark runs. At the SDK's *default* page size the same enumeration takes **3.0x** as long (168.2s against 57.0s, same tenant, same properties) — the practical difference is that mgx needs no tuning to be fast, not that it out-runs a tuned SDK on plain enumeration.</sup>
 
 Graph charges resource units per request, by the shape of the query rather than by which client
 sent it - so every column above spends the same: about 102 units for the enumeration, 5,002 for
@@ -102,15 +103,23 @@ groups - 16,324 of the objects above carry `@removed`.
 
 ### What adaptive pacing costs when nothing is throttling
 
-The pacer only constrains while ramping from cold or while backing off from an observed throttle.
-Once slow start reaches the configured ceiling it deactivates, and with no throttling there is no
-adapted cap, so the gate is inert. Measured on the 100k-user tenant, 8,000 concurrent reads with
-pacing on and off:
+It depends entirely on how long the run is, and the honest answer is "nothing on a long one,
+a lot on a short one".
 
-| | wall | throttle retries | pacing wait |
-| --- | ---: | ---: | ---: |
-| Adaptive pacing on *(default)* | 39.4s | 0 | 0s, 0 activations |
-| `-NoAdaptivePacing` | 40.3s | 0 | - |
+The pacer opens cold at 4 rps and doubles each clean second until it reaches the ceiling, then
+deactivates. A run long enough to finish ramping pays for the ramp once and never notices. A run
+that finishes *during* it pays for the whole thing. Both measured on the 100k-user tenant:
+
+| workload | pacing on *(default)* | `-NoAdaptivePacing` |
+| --- | ---: | ---: |
+| 8,000 concurrent reads | 39.4s | 40.3s |
+| 50 lookups, concurrency 8, cold session | 4.5s | 1.1s |
+
+The large run is free - 0 pacing activations, 0 throttle retries, and the paced run is if
+anything the faster of the two. The small one costs about **4x**, and the reason is visible in
+telemetry: roughly 29 seconds of accumulated `AdaptivePacingWaitMs` spread across a fan-out that
+would otherwise take one. If your work is short, interactive, and against a tenant you are not
+hammering, `Set-MgxOption -NoAdaptivePacing` is the switch.
 
 No 429s appeared at any concurrency the module permits. It caps at 128, and this tenant took
 700 RU/s for 90s without refusing anything - a raw client only crosses the ceiling at around 200

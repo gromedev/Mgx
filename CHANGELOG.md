@@ -27,6 +27,7 @@ Adds proactive throttle avoidance, ranged content downloads, and resumable enume
 - A denied or read-only output file ended a delta sync with an unhandled error on Windows.
 - A missing drive item suggested retrying in beta instead of reporting the item absent.
 - -Top was ignored when combined with -All, returning the whole collection.
+- Get-Help described output shapes and parameters from before 2.0.0.
 - Enumeration returned part of a collection without error when a nextLink was refused.
 - A delta sync stopped with an error when a page contained a non-object item.
 - Get-MgxContent left an unwritable -OutFile as an unhandled error naming a temp path.
