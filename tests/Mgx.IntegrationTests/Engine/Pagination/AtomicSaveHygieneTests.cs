@@ -1,0 +1,41 @@
+using Mgx.Engine.Pagination;
+
+namespace Mgx.IntegrationTests;
+
+/// <summary>
+/// Both state files are written to "&lt;path&gt;.tmp" and renamed, so a crash cannot leave a
+/// half-written file. A save that FAILS should not leave the staging file either - adoption and
+/// recovery already have to reason about stray files beside the output.
+/// </summary>
+[Collection("Pipeline")]
+public class AtomicSaveHygieneTests
+{
+    private static string NewDir() =>
+        Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-atomic-{Guid.NewGuid():N}")).FullName;
+
+    [Fact]
+    public void A_failed_checkpoint_save_leaves_no_staging_file()
+    {
+        var dir = NewDir();
+        var target = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            // The rename cannot land on a directory, so the save fails after the staging file
+            // has been written - the window this is about.
+            Directory.CreateDirectory(target);
+
+            var cp = new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users",
+                NextLink = "https://graph.microsoft.com/v1.0/users?$skiptoken=x",
+                ItemsCollected = 1
+            };
+            Assert.ThrowsAny<Exception>(() => cp.Save(target));
+
+            Assert.False(File.Exists(target + ".tmp"),
+                "the staging file outlived the save that failed to promote it");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+}

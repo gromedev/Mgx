@@ -100,8 +100,18 @@ public sealed class DeltaState
         lock (lockObj)
         {
             var tmpPath = normalizedPath + ".tmp";
-            File.WriteAllText(tmpPath, json);
-            File.Move(tmpPath, normalizedPath, overwrite: true);
+            try
+            {
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, normalizedPath, overwrite: true);
+            }
+            catch
+            {
+                // The staging file is not the state; leaving it behind only invites a later run
+                // to wonder what it is.
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+                throw;
+            }
         }
     }
 
@@ -138,6 +148,13 @@ public sealed class DeltaState
     /// </summary>
     public static void ValidateWriteAccess(string path)
     {
+        // NOTE: a directory passes the probe below, because the probe writes "<path>.probe"
+        // NEXT to the target rather than to it, so the fail-fast check succeeds and the real
+        // write fails later. Rejecting a directory here would be better, but this method also
+        // validates -OutputFile, where the late failure is what
+        // DeltaQueryTests.Cmdlet_Checkpoint_MidPage_BoundsProgressLostWhenARunDiesInsideAPage
+        // uses to reach a mid-page abort - and that test guards more than this costs. Left as
+        // it is deliberately rather than by omission.
         var dir = Path.GetDirectoryName(Path.GetFullPath(path));
         if (dir != null && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);

@@ -97,8 +97,18 @@ public sealed class PaginationCheckpoint
         lock (lockObj)
         {
             var tmpPath = normalizedPath + ".tmp";
-            File.WriteAllText(tmpPath, json);
-            File.Move(tmpPath, normalizedPath, overwrite: true);
+            try
+            {
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, normalizedPath, overwrite: true);
+            }
+            catch
+            {
+                // Same reasoning as the delta state: a staging file that never became the
+                // checkpoint is litter, and adoption already has to reason about stray files.
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+                throw;
+            }
         }
     }
 
