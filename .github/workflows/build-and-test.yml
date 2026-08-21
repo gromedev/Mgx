@@ -30,6 +30,14 @@ jobs:
       - name: Restore
         run: dotnet restore Mgx.slnx
 
+      - name: Install platyPS
+        shell: pwsh
+        run: |
+          # build.ps1 regenerates the compiled help from module/help and refuses to build without
+          # this. Help that is not regenerated ships stale, which is how Get-Help came to describe
+          # output shapes two releases out of date.
+          Install-PSResource -Name platyPS -TrustRepository -Scope AllUsers
+
       - name: Build module
         shell: pwsh
         run: ./build.ps1 -Configuration Release
@@ -130,6 +138,14 @@ jobs:
         run: |
           dotnet tool install --global PowerShell --version '${{ matrix.psversion }}.*'
           "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install platyPS
+        shell: pwsh
+        run: |
+          # build.ps1 regenerates the compiled help from module/help and refuses to build without
+          # this. Help that is not regenerated ships stale, which is how Get-Help came to describe
+          # output shapes two releases out of date.
+          Install-PSResource -Name platyPS -TrustRepository -Scope AllUsers
 
       - name: Build module
         shell: pwsh
