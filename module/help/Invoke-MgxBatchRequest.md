@@ -160,7 +160,7 @@ Accept wildcard characters: False
 ```
 
 ### -DeadLetterPath
-Path to a JSONL file where failed batch items (status >= 400) are appended. Each line contains Url, Method, Body (with sensitive fields redacted), Status, Error, and Timestamp. The file can be re-piped to Invoke-MgxBatchRequest for retry: `Get-Content dead.jsonl | ConvertFrom-Json | Invoke-MgxBatchRequest`.
+Path to a JSONL file where failed batch items (status >= 400) are appended, along with any that were never sent because an earlier chunk failed. Each line contains Url, Method, Body (with sensitive fields redacted), Status, Error, and Timestamp. It is a record of what to retry, not a request you can replay directly: the redaction that keeps passwords out of the file also means a redacted Body is no longer the body that was sent. Read it to decide what to resubmit, and supply the sensitive fields again yourself.
 
 ```yaml
 Type: String
@@ -309,7 +309,7 @@ String URLs, or hashtables or PSCustomObjects with Url, Method, and Body members
 ## OUTPUTS
 
 ### System.Collections.Hashtable
-Per-request results with Url, Method, Status, and Body keys. Results can be piped back into this cmdlet to retry failed items.
+Per-request results with Url, Method, Status, and Body keys, plus NotSent on any operation that was never sent because an earlier chunk failed. Body here is the RESPONSE body - for a failure that is the error envelope, not the request - so piping results straight back resubmits the wrong thing. Use Url and Method to rebuild the requests you want to retry.
 
 ## NOTES
 Each batch item is retried individually on 429 (throttled) or 5xx errors (for idempotent methods). POST requests only retry on 429 because POST is non-idempotent - retrying a failed POST on 5xx could create duplicates if the server processed the request before the error. This matches the Kiota SDK retry behavior. Source: [Microsoft Graph error responses and resource types](https://learn.microsoft.com/en-us/graph/errors)
