@@ -111,8 +111,11 @@ if ($orphans) {
 $helpSource = Join-Path $PSScriptRoot 'module/help'
 $helpOutput = Join-Path $ModuleRoot 'en-US'
 if (Test-Path $helpSource) {
-    if (Get-Module -ListAvailable platyPS) {
-        Import-Module platyPS -ErrorAction Stop
+    # Already-imported counts: -ListAvailable only searches PSModulePath, so a platyPS loaded
+    # from an explicit path (Save-Module into a folder, then Import-Module by path - which is how
+    # a CI box without a profile gets one) looked absent and failed the build.
+    if ((Get-Module platyPS) -or (Get-Module -ListAvailable platyPS)) {
+        if (-not (Get-Module platyPS)) { Import-Module platyPS -ErrorAction Stop }
         New-ExternalHelp -Path $helpSource -OutputPath $helpOutput -Force | Out-Null
         Write-Host "Regenerated compiled help from module/help" -ForegroundColor DarkGray
     }
