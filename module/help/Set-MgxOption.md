@@ -193,7 +193,7 @@ Accept wildcard characters: False
 ```
 
 ### -NoRateLimit
-Disable the client-side rate limiter entirely.
+Disable the client-side rate limiter entirely. This also disables batch item pacing, so any -BatchItemsPerSecond you set alongside it has no effect; Set-MgxOption warns when both are given.
 
 ```yaml
 Type: SwitchParameter

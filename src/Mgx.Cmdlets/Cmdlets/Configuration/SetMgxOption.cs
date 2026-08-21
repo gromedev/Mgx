@@ -74,6 +74,17 @@ public class SetMgxOption : PSCmdlet
     [Parameter]
     public SwitchParameter Reset { get; set; }
 
+    /// <summary>
+    /// Parameters PowerShell adds to every cmdlet. Present in BoundParameters, but none of them
+    /// is a change to an option.
+    /// </summary>
+    private static readonly HashSet<string> CommonParameterNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Verbose", "Debug", "ErrorAction", "WarningAction", "InformationAction", "ProgressAction",
+        "ErrorVariable", "WarningVariable", "InformationVariable", "OutVariable", "OutBuffer",
+        "PipelineVariable", "WhatIf", "Confirm",
+    };
+
     protected override void ProcessRecord()
     {
         var bound = MyInvocation.BoundParameters;
@@ -94,8 +105,12 @@ public class SetMgxOption : PSCmdlet
         }
 
         // No parameters passed: nothing to do (avoids unnecessary pipeline rebuild
-        // which would destroy circuit breaker failure history)
-        if (bound.Count == 0)
+        // which would destroy circuit breaker failure history).
+        //
+        // Counted without the common parameters, which BoundParameters includes: -Verbose alone
+        // made this look like a real change, so `Set-MgxOption -Verbose` rebuilt the pipeline and
+        // discarded exactly the history this guard was written to keep.
+        if (!bound.Keys.Cast<string>().Any(k => !CommonParameterNames.Contains(k)))
         {
             WriteVerbose("No parameters specified. Options unchanged.");
             return;
@@ -138,6 +153,19 @@ public class SetMgxOption : PSCmdlet
         {
             WriteWarning($"AttemptTimeoutSeconds ({options.AttemptTimeoutSeconds}) >= TotalTimeoutSeconds ({options.TotalTimeoutSeconds}). " +
                         "Retries are effectively disabled because the total timeout will fire on the first attempt.");
+        }
+
+        // -NoRateLimit switches off batch item pacing as well, which is a second mechanism
+        // against Graph's server-side WRITE throttle rather than the client-side limiter. Both
+        // are documented separately and -BatchItemsPerSecond 0 is the documented way to turn
+        // pacing off, so a caller who set both deserves to hear that one of them lost.
+        if (options.NoRateLimit && bound.ContainsKey(nameof(BatchItemsPerSecond))
+            && options.BatchItemsPerSecond > 0)
+        {
+            WriteWarning(
+                $"-NoRateLimit also disables batch item pacing, so -BatchItemsPerSecond "
+                + $"{options.BatchItemsPerSecond} has no effect. Drop -NoRateLimit to keep pacing, "
+                + "or set -BatchItemsPerSecond 0 to disable it explicitly.");
         }
 
         MgxCmdletBase.SetClientOptions(options);
