@@ -52,7 +52,8 @@ function Get-FileKind {
 }
 
 Write-Host "Enumerating $DrivePath ..." -ForegroundColor Cyan
-$items = @(Invoke-MgxRequest "$DrivePath/root/children?`$top=200&`$select=id,name,size,file" -All |
+$items = @(Invoke-MgxRequest "$DrivePath/root/children" -All -PageSize 200 `
+        -Property id,name,size,file |
     Where-Object { $_.ContainsKey('file') } |
     Select-Object -First $MaxFiles)
 

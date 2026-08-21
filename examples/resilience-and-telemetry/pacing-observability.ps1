@@ -37,7 +37,7 @@ Write-Host "`n=== 2. Slow start on a cold directory workload ===" -ForegroundCol
 # cap only bites once a fan-out is in flight, which is exactly the case that gets throttled
 # before it has returned a single item.
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$users = Invoke-MgxRequest '/users?$top=5&$select=id,displayName' -All
+$users = Invoke-MgxRequest /users -All -PageSize 5 -Top 25 -Property id,displayName
 $sw.Stop()
 "  fetched $(@($users).Count) users in $($sw.Elapsed.TotalSeconds.ToString('F1'))s"
 Show-PacingState "after a directory read"
