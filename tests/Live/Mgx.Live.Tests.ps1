@@ -1,6 +1,4 @@
 <#
-    Every exported cmdlet, driven against a real tenant the way a caller drives it.
-
     These exist because the rest of the suite mocks HTTP. A mocked test proves the code does
     what it was written to do; it cannot prove the request that leaves the process is one Graph
     accepts. Enable-MgxResilience shipped a wrapper client with no BaseAddress and a green

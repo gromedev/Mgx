@@ -1,7 +1,5 @@
 # Live tests
 
-Every exported cmdlet, run against a real tenant, the way a caller runs it.
-
 The rest of the suite mocks HTTP. That proves the code does what it was written to do; it
 cannot prove the request leaving the process is one Graph accepts. `Enable-MgxResilience`
 shipped a wrapper client with no `BaseAddress` — every relative-URI SDK call threw before
