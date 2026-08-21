@@ -102,7 +102,7 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 ### None
 
 ## NOTES
-The SDK's built-in RetryHandler still runs inside the wrapped chain. Retries can compound, bounded by the total timeout (default 300s) and circuit breaker.
+The SDK's built-in RetryHandler still runs inside the wrapped chain, and it answers 429 and 503 itself. Two consequences, both measured: retries compound (four intended attempts can reach the wire eight times, because the SDK sleeps Retry-After inside the call and Mgx's own attempt timeout then fires), and a throttle never reaches Mgx's pipeline - so the adaptive pacer does not learn from it and Get-MgxTelemetry reports ThrottleRetries as 0 through a live throttle, booking the waiting as OtherRetries instead. The total timeout (default 300s) bounds the compounding; the circuit breaker does not, because the exhaustion path surfaces as an AggregateException that its predicate does not match. Use the Invoke-Mgx* cmdlets where throttle-aware pacing matters.
 
 ## RELATED LINKS
 [Disable-MgxResilience](Disable-MgxResilience.md)

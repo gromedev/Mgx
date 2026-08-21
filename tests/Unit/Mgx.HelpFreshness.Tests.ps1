@@ -48,6 +48,72 @@ Describe 'Compiled help matches its markdown source' {
             Should -BeNullOrEmpty -Because 'the MAML is generated from module/help; run ./build.ps1 to regenerate it'
     }
 
+    It 'carries the synopsis, description, outputs and examples its markdown gives' {
+        # The parameter check below was the whole guard, so a SYNOPSIS saying the wrong thing
+        # entirely, a replaced OUTPUTS section, or a renamed example all shipped green. Sections
+        # are compared by their opening sentence: the generator reflows prose, so a prefix is
+        # what can be compared honestly.
+        $mismatches = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($md in Get-ChildItem $script:HelpDir -Filter '*.md') {
+            $cmdlet = $md.BaseName
+            $lines  = Get-Content $md.FullName
+            $node = $script:MamlXml.helpItems.command |
+                Where-Object { $_.details.name.Trim() -eq $cmdlet } | Select-Object -First 1
+            if (-not $node) { $mismatches.Add("$cmdlet : absent from MAML"); continue }
+
+            function SectionText([string[]] $l, [string] $heading) {
+                $out = [System.Collections.Generic.List[string]]::new()
+                $in = $false
+                foreach ($line in $l) {
+                    if ($line -match "^## $heading\s*$") { $in = $true; continue }
+                    if ($in -and $line -match '^#{1,3} ') { break }
+                    if ($in -and $line.Trim()) { $out.Add($line) }
+                }
+                Normalize ($out -join ' ')
+            }
+            function Head([string] $t, [int] $n = 50) {
+                if ($t.Length -gt $n) { $t.Substring(0, $n) } else { $t }
+            }
+
+            $wantSyn = SectionText $lines 'SYNOPSIS'
+            $gotSyn  = Normalize $node.details.description.para
+            if ($wantSyn -and $gotSyn -notlike "*$(Head $wantSyn)*") {
+                $mismatches.Add("$cmdlet SYNOPSIS : markdown '$(Head $wantSyn)...' MAML '$(Head $gotSyn)...'")
+            }
+
+            $wantOut = SectionText $lines 'OUTPUTS'
+            $gotOut  = Normalize (($node.returnValues.returnValue.type.name | ForEach-Object { $_ }) -join ' ')
+            if ($wantOut -and $gotOut) {
+                # OUTPUTS opens with the type name under a ### heading; compare that token.
+                $wantType = ($lines | Where-Object { $_ -match '^### ' } | ForEach-Object { $_ } |
+                    Select-Object -First 0)
+                $typeLine = $null
+                $inOut = $false
+                foreach ($line in $lines) {
+                    if ($line -match '^## OUTPUTS\s*$') { $inOut = $true; continue }
+                    if ($inOut -and $line -match '^## ') { break }
+                    if ($inOut -and $line -match '^### (.+)$') { $typeLine = $Matches[1].Trim(); break }
+                }
+                if ($typeLine -and $gotOut -notlike "*$typeLine*") {
+                    $mismatches.Add("$cmdlet OUTPUTS : markdown '$typeLine' MAML '$(Head $gotOut 60)'")
+                }
+            }
+
+            $mdExamples = @($lines | Where-Object { $_ -match '^### Example' })
+            $mamlExamples = @($node.examples.example)
+            for ($i = 0; $i -lt [Math]::Min($mdExamples.Count, $mamlExamples.Count); $i++) {
+                $want = Normalize ($mdExamples[$i] -replace '^### ', '')
+                $got  = Normalize $mamlExamples[$i].title
+                if ($got -notlike "*$want*") {
+                    $mismatches.Add("$cmdlet example $($i + 1) : markdown '$want' MAML '$got'")
+                }
+            }
+        }
+
+        ($mismatches -join "`n") | Should -BeNullOrEmpty -Because 'run ./build.ps1 to regenerate the compiled help'
+    }
+
     It 'documents every parameter with the description its markdown gives' {
         $mismatches = [System.Collections.Generic.List[string]]::new()
 
@@ -84,5 +150,39 @@ Describe 'Compiled help matches its markdown source' {
         }
 
         ($mismatches -join "`n") | Should -BeNullOrEmpty -Because 'run ./build.ps1 to regenerate the compiled help'
+    }
+}
+
+Describe 'Documented output types match the cmdlets' {
+    # The guard above keeps the MAML matching its markdown. It cannot see markdown that is simply
+    # wrong about the code - both files said PSObject while the cmdlets declared and emitted
+    # their own types. This compares the documentation against [OutputType].
+    It 'every cmdlet documents the type it declares' {
+        $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        Import-Module "$repo/module/mgx.psd1" -Force
+        $wrong = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($cmd in Get-Command -Module mgx -CommandType Cmdlet) {
+            $declared = @($cmd.OutputType | ForEach-Object { $_.Type.FullName } | Where-Object { $_ })
+            if (-not $declared) { continue }
+
+            $md = Join-Path $repo "module/help/$($cmd.Name).md"
+            if (-not (Test-Path $md)) { continue }
+
+            $documented = $null
+            $inOutputs = $false
+            foreach ($line in Get-Content $md) {
+                if ($line -match '^## OUTPUTS\s*$') { $inOutputs = $true; continue }
+                if ($inOutputs -and $line -match '^## ')      { break }
+                if ($inOutputs -and $line -match '^### (.+)$') { $documented = $Matches[1].Trim(); break }
+            }
+            if (-not $documented) { continue }
+
+            if ($declared -notcontains $documented) {
+                $wrong.Add("$($cmd.Name): documents '$documented', declares '$($declared -join ", ")'")
+            }
+        }
+
+        ($wrong -join "`n") | Should -BeNullOrEmpty -Because 'module/help OUTPUTS should name the type the cmdlet emits'
     }
 }

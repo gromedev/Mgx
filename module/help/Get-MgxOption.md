@@ -46,7 +46,7 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 
 ## OUTPUTS
 
-### System.Management.Automation.PSObject
+### Mgx.Cmdlets.Models.MgxOptionOutput
 A PSObject with properties for each configuration setting.
 
 ## NOTES

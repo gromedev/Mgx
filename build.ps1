@@ -117,8 +117,9 @@ if (Test-Path $helpSource) {
         Write-Host "Regenerated compiled help from module/help" -ForegroundColor DarkGray
     }
     else {
-        Write-Warning ("platyPS is not installed, so module/en-US/Mgx.Cmdlets.dll-Help.xml was " +
-            "NOT regenerated and may be stale. Install-Module platyPS -Scope CurrentUser.")
+        throw ("platyPS is not installed, so module/en-US/Mgx.Cmdlets.dll-Help.xml cannot be " +
+            "regenerated and would ship stale - which is how Get-Help came to describe output " +
+            "shapes removed two releases earlier. Install-Module platyPS -Scope CurrentUser.")
     }
 }
 

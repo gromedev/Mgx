@@ -78,7 +78,7 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 
 ## OUTPUTS
 
-### System.Management.Automation.PSObject
+### Mgx.Cmdlets.Models.MgxTelemetryOutput
 Telemetry summary with request counts, retry/throttle breakdown, and timing.
 
 ## NOTES
