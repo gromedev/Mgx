@@ -321,7 +321,7 @@ Query parameters ($select, $filter) are encoded into the delta token on the firs
 
 Supported delta endpoints include: /users/delta, /groups/delta, /applications/delta, /servicePrincipals/delta, /devices/delta, /directoryRoles/delta, and many others. Source: [Use delta query to track changes in Microsoft Graph data](https://learn.microsoft.com/en-us/graph/delta-query-overview)
 
-### Duplicate objects across pages
+DUPLICATE OBJECTS ACROSS PAGES
 
 Graph does not guarantee that an object appears only once in a delta response: it "can't ensure that entities are unified in a single response." Deduplicate by `id` before treating emitted objects as change events.
 

@@ -104,6 +104,24 @@ if ($orphans) {
     throw "Module integrity check failed: Mgx assemblies found in Dependencies/ (should only be in root): $($orphans.Name -join ', ')"
 }
 
+# Compiled help is generated from module/help/*.md, and nothing regenerated it: the shipped
+# MAML drifted two releases behind its own source, so Get-Help documented output shapes removed
+# in 2.0.0, denied a parameter added in 2.1.0, and gave a range the cmdlet rejects. Regenerating
+# on every build is what stops the two diverging again.
+$helpSource = Join-Path $PSScriptRoot 'module/help'
+$helpOutput = Join-Path $ModuleRoot 'en-US'
+if (Test-Path $helpSource) {
+    if (Get-Module -ListAvailable platyPS) {
+        Import-Module platyPS -ErrorAction Stop
+        New-ExternalHelp -Path $helpSource -OutputPath $helpOutput -Force | Out-Null
+        Write-Host "Regenerated compiled help from module/help" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Warning ("platyPS is not installed, so module/en-US/Mgx.Cmdlets.dll-Help.xml was " +
+            "NOT regenerated and may be stale. Install-Module platyPS -Scope CurrentUser.")
+    }
+}
+
 Write-Host "`nBuild complete!" -ForegroundColor Green
 Write-Host "Module output: $ModuleRoot" -ForegroundColor Yellow
 Write-Host "`nTo use:" -ForegroundColor Cyan

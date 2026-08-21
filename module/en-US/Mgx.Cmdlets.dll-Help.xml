@@ -340,11 +340,11 @@ Enable-MgxResilience   # Re-inject for the new connection</dev:code>
         <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
           <maml:name>InputObject</maml:name>
           <maml:description>
-            <maml:para>The object to enrich with related data. Accepts any PSObject from the pipeline. Must have a property matching -IdProperty (default: id) whose value is substituted into the -Uri template.</maml:para>
+            <maml:para>The object to enrich with related data. Accepts a hashtable (what the Mgx cmdlets emit) or a PSCustomObject from the pipeline. Must have a member matching -IdProperty (default: id) whose value is substituted into the -Uri template. The relation is attached in the same shape the object arrived in.</maml:para>
           </maml:description>
-          <command:parameterValue required="true" variableLength="false">PSObject</command:parameterValue>
+          <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
           <dev:type>
-            <maml:name>PSObject</maml:name>
+            <maml:name>Object</maml:name>
             <maml:uri />
           </dev:type>
           <dev:defaultValue>None</dev:defaultValue>
@@ -352,7 +352,7 @@ Enable-MgxResilience   # Re-inject for the new connection</dev:code>
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Flatten</maml:name>
           <maml:description>
-            <maml:para>Unwrap single-value relations. When the endpoint returns exactly one item (or a singleton object like /manager), the result is attached as a single PSObject instead of a one-element array. If multiple items are returned, a warning is emitted and the array is returned as-is.</maml:para>
+            <maml:para>Unwrap single-value relations. When the endpoint returns exactly one item (or a singleton object like /manager), the result is attached as a single object instead of a one-element array. If multiple items are returned, a warning is emitted and the array is returned as-is.</maml:para>
           </maml:description>
           <dev:type>
             <maml:name>SwitchParameter</maml:name>
@@ -460,11 +460,11 @@ Enable-MgxResilience   # Re-inject for the new connection</dev:code>
       <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
         <maml:name>InputObject</maml:name>
         <maml:description>
-          <maml:para>The object to enrich with related data. Accepts any PSObject from the pipeline. Must have a property matching -IdProperty (default: id) whose value is substituted into the -Uri template.</maml:para>
+          <maml:para>The object to enrich with related data. Accepts a hashtable (what the Mgx cmdlets emit) or a PSCustomObject from the pipeline. Must have a member matching -IdProperty (default: id) whose value is substituted into the -Uri template. The relation is attached in the same shape the object arrived in.</maml:para>
         </maml:description>
-        <command:parameterValue required="true" variableLength="false">PSObject</command:parameterValue>
+        <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
         <dev:type>
-          <maml:name>PSObject</maml:name>
+          <maml:name>Object</maml:name>
           <maml:uri />
         </dev:type>
         <dev:defaultValue>None</dev:defaultValue>
@@ -496,7 +496,7 @@ Enable-MgxResilience   # Re-inject for the new connection</dev:code>
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Flatten</maml:name>
         <maml:description>
-          <maml:para>Unwrap single-value relations. When the endpoint returns exactly one item (or a singleton object like /manager), the result is attached as a single PSObject instead of a one-element array. If multiple items are returned, a warning is emitted and the array is returned as-is.</maml:para>
+          <maml:para>Unwrap single-value relations. When the endpoint returns exactly one item (or a singleton object like /manager), the result is attached as a single object instead of a one-element array. If multiple items are returned, a warning is emitted and the array is returned as-is.</maml:para>
         </maml:description>
         <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
         <dev:type>
@@ -605,20 +605,20 @@ Enable-MgxResilience   # Re-inject for the new connection</dev:code>
     <command:inputTypes>
       <command:inputType>
         <dev:type>
-          <maml:name>System.Management.Automation.PSObject</maml:name>
+          <maml:name>System.Object</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>Any PSObject with a property matching -IdProperty (default: id).</maml:para>
+          <maml:para>A hashtable or PSCustomObject with a member matching -IdProperty (default: id).</maml:para>
         </maml:description>
       </command:inputType>
     </command:inputTypes>
     <command:returnValues>
       <command:returnValue>
         <dev:type>
-          <maml:name>System.Management.Automation.PSObject</maml:name>
+          <maml:name>System.Collections.Hashtable</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>The input object with an additional property (named by -As) containing the relation data. Collection endpoints produce an array of PSObjects. Singleton endpoints produce a single PSObject when -Flatten is used, or a one-element array otherwise.</maml:para>
+          <maml:para>The input object with an additional member (named by -As) containing the relation data, in the same shape the input arrived in. Collection endpoints produce an array of hashtables. Singleton endpoints produce a single hashtable when -Flatten is used, or a one-element array otherwise.</maml:para>
         </maml:description>
       </command:returnValue>
     </command:returnValues>
@@ -644,7 +644,7 @@ Enable-MgxResilience   # Re-inject for the new connection</dev:code>
     Expand-MgxRelation -Uri '/users/{id}/manager' -As Manager -Flatten -SkipNotFound |
     Select-Object displayName, @{N='ManagerName'; E={$_.Manager.displayName}}</dev:code>
         <dev:remarks>
-          <maml:para>The /manager endpoint returns a single object, not a collection. -Flatten unwraps it from the array so Manager is a PSObject (not a one-element array). Users without a manager get $null.</maml:para>
+          <maml:para>The /manager endpoint returns a single object, not a collection. -Flatten unwraps it from the array so Manager is a single object (not a one-element array). Users without a manager get $null.</maml:para>
         </dev:remarks>
       </command:example>
       <command:example>
@@ -709,8 +709,9 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       </maml:description>
     </command:details>
     <maml:description>
-      <maml:para>Export-MgxCollection streams paginated Microsoft Graph API results directly to a JSONL (JSON Lines) file. One JSON object per line, no PSObject conversion, minimal memory pressure regardless of collection size.</maml:para>
-      <maml:para>Supports checkpoint/resume: specify -CheckpointPath to save progress at page boundaries. On interruption and re-run, export resumes from the last checkpoint. The checkpoint file is deleted on successful completion.</maml:para>
+      <maml:para>Export-MgxCollection streams paginated Microsoft Graph API results directly to a JSONL (JSON Lines) file. One JSON object per line, no object conversion, minimal memory pressure regardless of collection size.</maml:para>
+      <maml:para>Supports checkpoint/resume: specify -CheckpointPath to save progress at page boundaries and mid-page (every 500 items). On interruption - Ctrl+C, a crash, or a killed process - re-running the same command resumes from the last checkpoint; an interrupted first run's partial temp file is recovered and trimmed to exactly the checkpointed item count, so the output never contains duplicates or torn lines. The checkpoint file is deleted on successful completion.</maml:para>
+      <maml:para>Downstream note: Graph pagination can transiently serve an overlapping page (observed in the wild as one extra page of items versus @odata.count). Mgx warns when the returned count overshoots the reported count; if the JSONL feeds another system, deduplicate on the id field as a matter of hygiene.</maml:para>
       <maml:para>Returns a summary PSObject with ItemCount and OutputFile properties.</maml:para>
     </maml:description>
     <command:syntax>
@@ -1241,6 +1242,430 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
   </command:command>
   <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
     <command:details>
+      <command:name>Get-MgxContent</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>MgxContent</command:noun>
+      <maml:description>
+        <maml:para>Fetch content bytes from Graph $value / /content endpoints, whole or as a byte range.</maml:para>
+      </maml:description>
+    </command:details>
+    <maml:description>
+      <maml:para>Get-MgxContent downloads file content from Microsoft Graph content endpoints - drive items (`/drives/{id}/items/{id}/content`), mail attachments (`.../attachments/{id}/$value`), profile photos (`/me/photo/$value`), and anything else that serves bytes.</maml:para>
+      <maml:para>Ranged reads are the point: `-First 262144` pulls the first 256 KB of a file (enough for format sniffing, EXIF, or partial hashing) instead of the whole thing. Across 20k files that is gigabytes moved instead of tens of gigabytes.</maml:para>
+      <maml:para>Under the hood, drive content is a two-hop flow: the authenticated Graph request (full resilience pipeline, adaptive pacing, rate limiting) answers with a redirect to a short-lived pre-authenticated download URL, which mgx fetches with a separate token-free HTTP client. The bearer token never reaches the download host, and the host is validated against a Microsoft-hosts allowlist (SharePoint/OneDrive download domains) before any bytes move - including on every mid-download redirect.</maml:para>
+      <maml:para>Output is a single `byte[]` to the pipeline (guarded at 100 MB - use -OutFile beyond that), or a file written via temp-plus-atomic-move so a failed download never truncates an existing file.</maml:para>
+      <maml:para>Piped DriveItems (from Invoke-MgxRequest or Sync-MgxDelta) use their `@microsoft.graph.downloadUrl` directly when present - no extra Graph round trip - falling back to `/drives/{driveId}/items/{id}/content` from the item's `id` and `parentReference.driveId`.</maml:para>
+      <maml:para>Some endpoints ignore the Range header and answer 200 with the full body (profile photos do this). Get-MgxContent detects that, keeps only the requested bytes, and aborts the rest of the transfer.</maml:para>
+    </maml:description>
+    <command:syntax>
+      <command:syntaxItem>
+        <maml:name>Get-MgxContent</maml:name>
+        <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="0" aliases="Resource">
+          <maml:name>Uri</maml:name>
+          <maml:description>
+            <maml:para>Relative Graph path to a content endpoint (e.g., /me/drive/items/{id}/content). Warns when the path does not look like a content endpoint (/content or /$value).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>First</maml:name>
+          <maml:description>
+            <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Offset</maml:name>
+          <maml:description>
+            <maml:para>Range start in bytes; requires -Length.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Length</maml:name>
+          <maml:description>
+            <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>OutFile</maml:name>
+          <maml:description>
+            <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>ApiVersion</maml:name>
+          <maml:description>
+            <maml:para>Graph API version. Default: v1.0.</maml:para>
+          </maml:description>
+          <command:parameterValueGroup>
+            <command:parameterValue required="false" command:variableLength="false">v1.0</command:parameterValue>
+            <command:parameterValue required="false" command:variableLength="false">beta</command:parameterValue>
+          </command:parameterValueGroup>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>v1.0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Headers</maml:name>
+          <maml:description>
+            <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
+          <dev:type>
+            <maml:name>Hashtable</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="proga">
+          <maml:name>ProgressAction</maml:name>
+          <maml:description>
+            <maml:para>Determines how the cmdlet responds to progress updates.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">ActionPreference</command:parameterValue>
+          <dev:type>
+            <maml:name>ActionPreference</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+      </command:syntaxItem>
+      <command:syntaxItem>
+        <maml:name>Get-MgxContent</maml:name>
+        <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
+          <maml:name>InputObject</maml:name>
+          <maml:description>
+            <maml:para>A DriveItem-shaped object from the pipeline. Uses `@microsoft.graph.downloadUrl` when present (validated against the download-host allowlist), else `/drives/{parentReference.driveId}/items/{id}/content`.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
+          <dev:type>
+            <maml:name>Object</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>First</maml:name>
+          <maml:description>
+            <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Offset</maml:name>
+          <maml:description>
+            <maml:para>Range start in bytes; requires -Length.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Length</maml:name>
+          <maml:description>
+            <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+          <dev:type>
+            <maml:name>Int64</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>OutFile</maml:name>
+          <maml:description>
+            <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>ApiVersion</maml:name>
+          <maml:description>
+            <maml:para>Graph API version. Default: v1.0.</maml:para>
+          </maml:description>
+          <command:parameterValueGroup>
+            <command:parameterValue required="false" command:variableLength="false">v1.0</command:parameterValue>
+            <command:parameterValue required="false" command:variableLength="false">beta</command:parameterValue>
+          </command:parameterValueGroup>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>v1.0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>Headers</maml:name>
+          <maml:description>
+            <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
+          <dev:type>
+            <maml:name>Hashtable</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="proga">
+          <maml:name>ProgressAction</maml:name>
+          <maml:description>
+            <maml:para>Determines how the cmdlet responds to progress updates.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">ActionPreference</command:parameterValue>
+          <dev:type>
+            <maml:name>ActionPreference</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
+        </command:parameter>
+      </command:syntaxItem>
+    </command:syntax>
+    <command:parameters>
+      <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="0" aliases="Resource">
+        <maml:name>Uri</maml:name>
+        <maml:description>
+          <maml:para>Relative Graph path to a content endpoint (e.g., /me/drive/items/{id}/content). Warns when the path does not look like a content endpoint (/content or /$value).</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
+        <maml:name>InputObject</maml:name>
+        <maml:description>
+          <maml:para>A DriveItem-shaped object from the pipeline. Uses `@microsoft.graph.downloadUrl` when present (validated against the download-host allowlist), else `/drives/{parentReference.driveId}/items/{id}/content`.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
+        <dev:type>
+          <maml:name>Object</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>First</maml:name>
+        <maml:description>
+          <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+        <dev:type>
+          <maml:name>Int64</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Offset</maml:name>
+        <maml:description>
+          <maml:para>Range start in bytes; requires -Length.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+        <dev:type>
+          <maml:name>Int64</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>0</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Length</maml:name>
+        <maml:description>
+          <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
+        <dev:type>
+          <maml:name>Int64</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>OutFile</maml:name>
+        <maml:description>
+          <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>ApiVersion</maml:name>
+        <maml:description>
+          <maml:para>Graph API version. Default: v1.0.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>v1.0</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>Headers</maml:name>
+        <maml:description>
+          <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
+        <dev:type>
+          <maml:name>Hashtable</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="proga">
+        <maml:name>ProgressAction</maml:name>
+        <maml:description>
+          <maml:para>Determines how the cmdlet responds to progress updates.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">ActionPreference</command:parameterValue>
+        <dev:type>
+          <maml:name>ActionPreference</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
+    </command:parameters>
+    <command:inputTypes>
+      <command:inputType>
+        <dev:type>
+          <maml:name>System.Object</maml:name>
+        </dev:type>
+        <maml:description>
+          <maml:para>DriveItem-shaped Hashtables or PSCustomObjects (from Invoke-MgxRequest or Sync-MgxDelta).</maml:para>
+        </maml:description>
+      </command:inputType>
+    </command:inputTypes>
+    <command:returnValues>
+      <command:returnValue>
+        <dev:type>
+          <maml:name>System.Byte[]</maml:name>
+        </dev:type>
+        <maml:description>
+          <maml:para>The content bytes as a single array (not enumerated). Nothing is emitted when -OutFile is used.</maml:para>
+        </maml:description>
+      </command:returnValue>
+    </command:returnValues>
+    <maml:alertSet>
+      <maml:alert>
+        <maml:para>Content downloads require the mgx-owned HTTP transport. If mgx had to fall back to the Graph SDK's client (rare - it means the clean client could not be built), Get-MgxContent refuses with ContentRequiresOwnedTransport rather than let a transport that auto-follows redirects fetch from an unvalidated host.</maml:para>
+        <maml:para>Graph reports drive-item hashes as quickXorHash in base64; rclone and many tools print hex. Convert before comparing: `[System.Convert]::ToHexString([System.Convert]::FromBase64String($item.file.hashes.quickXorHash))`</maml:para>
+        <maml:para>The pre-authenticated download URL on piped items is short-lived (~1 hour). On expiry mgx re-requests it automatically for the /content path; for stale piped `@microsoft.graph.downloadUrl` values, re-fetch the item.</maml:para>
+        <maml:para>Intune report export jobs are not a /content flow: the completed job's `url` property is a pre-authenticated Azure Blob URL - download it directly with Invoke-WebRequest; it needs nothing from mgx.</maml:para>
+      </maml:alert>
+    </maml:alertSet>
+    <command:examples>
+      <command:example>
+        <maml:title>------------------ Example 1: Download a file ------------------</maml:title>
+        <dev:code>Get-MgxContent "/me/drive/items/01ABC/content" -OutFile ./report.xlsx</dev:code>
+        <dev:remarks>
+          <maml:para>Downloads the drive item to a local file.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>Example 2: First 256 KB of every file in a folder (format sniffing / partial hash)</maml:title>
+        <dev:code>Invoke-MgxRequest "/me/drive/items/01FOLDER/children" -All |
+    Where-Object { $_.file } |
+    ForEach-Object {
+        $bytes = $_ | Get-MgxContent -First 262144
+        [PSCustomObject]@{ name = $_.name; header = [BitConverter]::ToString($bytes[0..7]) }
+    }</dev:code>
+        <dev:remarks>
+          <maml:para>Moves kilobytes per file instead of the full content - the metadata-extraction economy case.</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>--------------- Example 3: A specific byte range ---------------</maml:title>
+        <dev:code>Get-MgxContent "/me/drive/items/01ABC/content" -Offset 1048576 -Length 65536</dev:code>
+        <dev:remarks>
+          <maml:para>Returns bytes 1,048,576 through 1,114,111 (Range: bytes=1048576-1114111).</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>----------------- Example 4: A mail attachment -----------------</maml:title>
+        <dev:code>Get-MgxContent "/me/messages/AAMk.../attachments/AAMk.../`$value" -OutFile ./attachment.pdf</dev:code>
+        <dev:remarks>
+          <maml:para>Attachment bytes are served directly by Graph (no download-host hop).</maml:para>
+        </dev:remarks>
+      </command:example>
+      <command:example>
+        <maml:title>------------------- Example 5: Profile photo -------------------</maml:title>
+        <dev:code>Get-MgxContent "/me/photo/`$value" -OutFile ./me.jpg</dev:code>
+        <dev:remarks>
+          <maml:para>Note the backtick: `$value` would otherwise be expanded by PowerShell.</maml:para>
+        </dev:remarks>
+      </command:example>
+    </command:examples>
+    <command:relatedLinks>
+      <maml:navigationLink>
+        <maml:linkText>Online Version:</maml:linkText>
+        <maml:uri>https://github.com/gromedev/mgx/blob/main/module/help/Get-MgxContent.md</maml:uri>
+      </maml:navigationLink>
+      <maml:navigationLink>
+        <maml:linkText>Invoke-MgxRequest</maml:linkText>
+        <maml:uri></maml:uri>
+      </maml:navigationLink>
+      <maml:navigationLink>
+        <maml:linkText>Sync-MgxDelta</maml:linkText>
+        <maml:uri></maml:uri>
+      </maml:navigationLink>
+      <maml:navigationLink>
+        <maml:linkText>Get-MgxTelemetry</maml:linkText>
+        <maml:uri></maml:uri>
+      </maml:navigationLink>
+    </command:relatedLinks>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
       <command:name>Get-MgxOption</command:name>
       <command:verb>Get</command:verb>
       <command:noun>MgxOption</command:noun>
@@ -1396,6 +1821,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
     </command:details>
     <maml:description>
       <maml:para>Get-MgxTelemetry returns accumulated telemetry from the current session's resilience pipeline. Reports request counts, retry/throttle breakdown, and timing per category so you can determine whether the bottleneck is throttling, retry backoff, rate-limiter queuing, or network latency.</maml:para>
+      <maml:para>Adaptive pacing surfaces here too: AdaptivePacingWaitMs / AdaptivePacingActivations count proactive waits, LastThrottlePercentage is the most recent x-ms-throttle-limit-percentage Graph reported (-1 = never seen), and PacingState is a per-workload line showing active rate caps, slow start, throttle proximity, and current latency against the session baseline. -Reset clears the counters but deliberately not the pacer's learned rate caps - those describe the tenant's current throttle regime, not accumulated statistics.</maml:para>
     </maml:description>
     <command:syntax>
       <command:syntaxItem>
@@ -1470,7 +1896,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       <command:example>
         <maml:title>---------------- Example 3: Check throttle rate ----------------</maml:title>
         <dev:code>$t = Get-MgxTelemetry
-&quot;Throttle rate: $(if ($t.Requests) { [math]::Round($t.ThrottleRetries / $t.Requests * 100, 1) } else { 0 })%&quot;</dev:code>
+"Throttle rate: $(if ($t.Requests) { [math]::Round($t.ThrottleRetries / $t.Requests * 100, 1) } else { 0 })%"</dev:code>
         <dev:remarks>
           <maml:para>Calculates the percentage of requests that were throttled.</maml:para>
         </dev:remarks>
@@ -1510,7 +1936,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
     <maml:description>
       <maml:para>Invoke-MgxBatchRequest bundles multiple Microsoft Graph API requests into /$batch calls, sending up to 20 requests per HTTP round-trip (the Graph API maximum). This is 3-4x faster than individual requests for bulk operations.</maml:para>
       <maml:para>Supports GET, POST, PATCH, PUT, and DELETE methods with optional request bodies. Auto-chunks input into 20-request batches.</maml:para>
-      <maml:para>Source: Combine multiple HTTP requests using JSON batching (https://learn.microsoft.com/en-us/graph/json-batching)Pipeline input can be string URLs (for GET, or combined with -Method/-Body for the same operation on all) or PSObjects with Url, Method, and Body properties for per-item control.</maml:para>
+      <maml:para>Source: Combine multiple HTTP requests using JSON batching (https://learn.microsoft.com/en-us/graph/json-batching)Pipeline input can be string URLs (for GET, or combined with -Method/-Body for the same operation on all) or hashtables or PSCustomObjects with Url, Method, and Body members for per-item control.</maml:para>
       <maml:para>Failed items are surfaced as PowerShell ErrorRecords. Use -ErrorAction Stop to halt on the first failure, or inspect $Error after completion.</maml:para>
     </maml:description>
     <command:syntax>
@@ -1519,7 +1945,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
         <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="0" aliases="Url">
           <maml:name>Uri</maml:name>
           <maml:description>
-            <maml:para>Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id) or relative URLs (/users/id). Also accepts PSObjects with Url, Method, and Body properties for per-item control.</maml:para>
+            <maml:para>Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id) or relative URLs (/users/id). Also accepts hashtables or PSCustomObjects with Url, Method, and Body members for per-item control.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">Object[]</command:parameterValue>
           <dev:type>
@@ -1547,7 +1973,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Body</maml:name>
           <maml:description>
-            <maml:para>Request body for all requests when piping string URLs. Ignored when pipeline input contains PSObjects with their own Body property.</maml:para>
+            <maml:para>Request body for all requests when piping string URLs. Ignored when pipeline input carries its own Body member.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
           <dev:type>
@@ -1612,7 +2038,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Method</maml:name>
           <maml:description>
-            <maml:para>HTTP method for all requests when piping string URLs. Default: GET. Ignored when pipeline input contains PSObjects with their own Method property.</maml:para>
+            <maml:para>HTTP method for all requests when piping string URLs. Default: GET. Ignored when pipeline input carries its own Method member.</maml:para>
           </maml:description>
           <command:parameterValueGroup>
             <command:parameterValue required="false" command:variableLength="false">GET</command:parameterValue>
@@ -1669,7 +2095,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Body</maml:name>
         <maml:description>
-          <maml:para>Request body for all requests when piping string URLs. Ignored when pipeline input contains PSObjects with their own Body property.</maml:para>
+          <maml:para>Request body for all requests when piping string URLs. Ignored when pipeline input carries its own Body member.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
         <dev:type>
@@ -1742,7 +2168,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Method</maml:name>
         <maml:description>
-          <maml:para>HTTP method for all requests when piping string URLs. Default: GET. Ignored when pipeline input contains PSObjects with their own Method property.</maml:para>
+          <maml:para>HTTP method for all requests when piping string URLs. Default: GET. Ignored when pipeline input carries its own Method member.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
         <dev:type>
@@ -1754,7 +2180,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
       <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="0" aliases="Url">
         <maml:name>Uri</maml:name>
         <maml:description>
-          <maml:para>Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id) or relative URLs (/users/id). Also accepts PSObjects with Url, Method, and Body properties for per-item control.</maml:para>
+          <maml:para>Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id) or relative URLs (/users/id). Also accepts hashtables or PSCustomObjects with Url, Method, and Body members for per-item control.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">Object[]</command:parameterValue>
         <dev:type>
@@ -1794,17 +2220,17 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
           <maml:name>System.Object[]</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>String URLs or PSObjects with Url, Method, and Body properties.</maml:para>
+          <maml:para>String URLs, or hashtables or PSCustomObjects with Url, Method, and Body members.</maml:para>
         </maml:description>
       </command:inputType>
     </command:inputTypes>
     <command:returnValues>
       <command:returnValue>
         <dev:type>
-          <maml:name>System.Management.Automation.PSObject</maml:name>
+          <maml:name>System.Collections.Hashtable</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>Per-request results with Url, Status, and Body properties.</maml:para>
+          <maml:para>Per-request results with Url, Method, Status, and Body keys. Results can be piped back into this cmdlet to retry failed items.</maml:para>
         </maml:description>
       </command:returnValue>
     </command:returnValues>
@@ -1938,7 +2364,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
     </command:details>
     <maml:description>
       <maml:para>Invoke-MgxRequest is a general-purpose resilient client for any Microsoft Graph endpoint. It supports streaming pagination, fan-out concurrency, write operations (POST, PATCH, PUT, DELETE), and checkpoint/resume.</maml:para>
-      <maml:para>Results are returned as PSObjects with properties matching the Graph API JSON response. DateTime strings are automatically parsed to DateTimeOffset, and @odata.type is preserved as an ODataType property.</maml:para>
+      <maml:para>Results are returned as case-insensitive hashtables with keys matching the Graph API JSON response, the same shape Invoke-MgGraphRequest returns. DateTime strings are automatically parsed, @odata.type is preserved verbatim under its own key, and all other @odata.* metadata is stripped (including @odata.etag, which changes on every write; use -Raw when you need the If-Match tag). Key order is undefined: use Select-Object or Format-Table to pin column order. Use -Raw | ConvertFrom-Json to get PSCustomObjects instead.</maml:para>
       <maml:para>For bulk writes involving more than 10 items, consider using Invoke-MgxBatchRequest instead, which is 3-4x faster due to fewer HTTP round-trips.</maml:para>
     </maml:description>
     <command:syntax>
@@ -1986,7 +2412,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Body</maml:name>
           <maml:description>
-            <maml:para>Request body for write operations (POST, PATCH, PUT). Accepts a hashtable or PSObject, which is serialized to JSON.</maml:para>
+            <maml:para>Request body for write operations (POST, PATCH, PUT). Accepts a hashtable, PSObject or array, which is serialized to JSON, or a string already holding JSON, which is sent verbatim. Ignored (with a warning) on GET.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
           <dev:type>
@@ -2159,7 +2585,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Raw</maml:name>
           <maml:description>
-            <maml:para>Return raw JSON strings instead of PSObjects. Useful for piping to ConvertFrom-Json or writing to files.</maml:para>
+            <maml:para>Return raw JSON strings instead of hashtables. Useful for piping to ConvertFrom-Json or writing to files.</maml:para>
           </maml:description>
           <dev:type>
             <maml:name>SwitchParameter</maml:name>
@@ -2290,7 +2716,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Body</maml:name>
         <maml:description>
-          <maml:para>Request body for write operations (POST, PATCH, PUT). Accepts a hashtable or PSObject, which is serialized to JSON.</maml:para>
+          <maml:para>Request body for write operations (POST, PATCH, PUT). Accepts a hashtable, PSObject or array, which is serialized to JSON, or a string already holding JSON, which is sent verbatim. Ignored (with a warning) on GET.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
         <dev:type>
@@ -2458,7 +2884,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Raw</maml:name>
         <maml:description>
-          <maml:para>Return raw JSON strings instead of PSObjects. Useful for piping to ConvertFrom-Json or writing to files.</maml:para>
+          <maml:para>Return raw JSON strings instead of hashtables. Useful for piping to ConvertFrom-Json or writing to files.</maml:para>
         </maml:description>
         <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
         <dev:type>
@@ -2582,17 +3008,17 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
           <maml:name>System.String</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>Pipeline input for fan-out operations. Each string value replaces {id} in the URI template.</maml:para>
+          <maml:para>Pipeline input for fan-out operations. Accepts an id string, or an object carrying one: the id member of a hashtable or PSCustomObject is extracted and replaces {id} in the URI template.</maml:para>
         </maml:description>
       </command:inputType>
     </command:inputTypes>
     <command:returnValues>
       <command:returnValue>
         <dev:type>
-          <maml:name>System.Management.Automation.PSObject</maml:name>
+          <maml:name>System.Collections.Hashtable</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>Graph API response objects with properties matching the JSON fields.</maml:para>
+          <maml:para>Graph API response objects as case-insensitive hashtables with keys matching the JSON fields.</maml:para>
         </maml:description>
       </command:returnValue>
       <command:returnValue>
@@ -2758,7 +3184,7 @@ Import-Csv ./users.csv |
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>BatchChunkConcurrency</maml:name>
           <maml:description>
-            <maml:para>Number of $batch chunks executed concurrently. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.</maml:para>
+            <maml:para>Number of $batch chunks executed concurrently. The default of 1 runs chunks sequentially, which is what keeps inter-chunk pacing meaningful; raising it trades that pacing for throughput and makes server-side write throttling more likely. Range: 1-10. Default: 1.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">Int32</command:parameterValue>
           <dev:type>
@@ -2877,7 +3303,7 @@ Import-Csv ./users.csv |
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>NoAdaptivePacing</maml:name>
           <maml:description>
-            <maml:para>Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit. See about_Mgx_Tuning "ADAPTIVE PACING".</maml:para>
+            <maml:para>Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit: the token bucket is the hard backstop, the pacer is the proactive layer in front of it. See about_Mgx_Tuning "ADAPTIVE PACING".</maml:para>
           </maml:description>
           <dev:type>
             <maml:name>SwitchParameter</maml:name>
@@ -2950,7 +3376,7 @@ Import-Csv ./users.csv |
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>BatchChunkConcurrency</maml:name>
         <maml:description>
-          <maml:para>Number of $batch chunks executed concurrently. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.</maml:para>
+          <maml:para>Number of $batch chunks executed concurrently. The default of 1 runs chunks sequentially, which is what keeps inter-chunk pacing meaningful; raising it trades that pacing for throughput and makes server-side write throttling more likely. Range: 1-10. Default: 1.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">Int32</command:parameterValue>
         <dev:type>
@@ -3070,7 +3496,7 @@ Import-Csv ./users.csv |
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>NoAdaptivePacing</maml:name>
         <maml:description>
-          <maml:para>Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit. See about_Mgx_Tuning "ADAPTIVE PACING".</maml:para>
+          <maml:para>Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit: the token bucket is the hard backstop, the pacer is the proactive layer in front of it. See about_Mgx_Tuning "ADAPTIVE PACING".</maml:para>
         </maml:description>
         <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
         <dev:type>
@@ -3228,9 +3654,11 @@ Import-Csv ./users.csv |
     </command:details>
     <maml:description>
       <maml:para>Sync-MgxDelta retrieves incremental changes from Microsoft Graph delta endpoints. On the first run, it performs a full sync and saves a delta token. Subsequent runs retrieve only items that changed since the last sync.</maml:para>
-      <maml:para>Delta tokens are saved to the file specified by -DeltaPath and persist across successful completions. This is different from -CheckpointPath (used by Export-MgxCollection) which is ephemeral and deleted on success.</maml:para>
-      <maml:para>Items that no longer match the query appear with an `@removed` property containing `{"reason": "changed"}` (item moved out of scope or soft-deleted) or `{"reason": "deleted"}` (permanently deleted). Filter these with `Where-Object { -not $_.'@removed' }`.</maml:para>
-      <maml:para>Delta tokens expire after approximately 7 days for directory objects (users, groups, applications). When a token expires, Graph returns HTTP 410 Gone. Sync-MgxDelta handles this automatically by deleting the stale token and performing a full re-sync with a warning.</maml:para>
+      <maml:para>Delta tokens are saved to the file specified by -DeltaPath and persist across successful completions. -CheckpointPath is different: it is an ephemeral mid-run resume position, saved at page boundaries while an enumeration is in flight and deleted the moment it completes. Use both on long enumerations - a killed 3-hour drive sync resumes where it stopped instead of starting over.</maml:para>
+      <maml:para>Drive delta is fully supported: `/me/drive/root/delta`, `/drives/{id}/root/delta`, `/users/{id}/drive/root/delta`, and `/groups/{id}/drive/root/delta` all work, including drive-specific `-Prefer` behaviors and the drive form of `-Latest`.</maml:para>
+      <maml:para>Items that no longer match the query appear with an `@removed` property containing `{"reason": "changed"}` (item moved out of scope or soft-deleted) or `{"reason": "deleted"}` (permanently deleted). Filter these with `Where-Object { -not $_.'@removed' }`. The completion message counts them separately.</maml:para>
+      <maml:para>Delta tokens expire after approximately 7 days for directory objects (users, groups, applications). When a token expires, Graph returns HTTP 410 Gone. Sync-MgxDelta handles this automatically by deleting the stale token (and any resume checkpoint) and performing a full re-sync with a warning.</maml:para>
+      <maml:para>Resume semantics are at-least-once: in pipeline mode the page in flight at a crash is re-emitted in full on resume; in JSONL mode mid-page checkpoints keep the window to at most 500 items. Deduplicate on `id` downstream if exact-once matters.</maml:para>
       <maml:para>Source: Use delta query to track changes in Microsoft Graph data (https://learn.microsoft.com/en-us/graph/delta-query-overview)</maml:para>
     </maml:description>
     <command:syntax>
@@ -3263,6 +3691,18 @@ Import-Csv ./users.csv |
             <maml:uri />
           </dev:type>
           <dev:defaultValue>v1.0</dev:defaultValue>
+        </command:parameter>
+        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+          <maml:name>CheckpointPath</maml:name>
+          <maml:description>
+            <maml:para>Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode) while an enumeration is in flight; deleted on successful completion. Any event that invalidates the enumeration - HTTP 410 Gone, -FullSync, or a -Property/-Filter/-Prefer change - deletes it too. Must differ from -DeltaPath and -OutputFile.</maml:para>
+          </maml:description>
+          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+          <dev:type>
+            <maml:name>String</maml:name>
+            <maml:uri />
+          </dev:type>
+          <dev:defaultValue>None</dev:defaultValue>
         </command:parameter>
         <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>DeltaPath</maml:name>
@@ -3302,7 +3742,7 @@ Import-Csv ./users.csv |
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Latest</maml:name>
           <maml:description>
-            <maml:para>Baseline without enumerating: request only the latest delta token ("sync from now"). Drive resources take ?token=latest, directory and other resources $deltatoken=latest - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists.</maml:para>
+            <maml:para>Baseline without enumerating: request only the latest delta token ("sync from now"). Returns no data; the next run returns everything that changed since. Drive resources take `?token=latest`, directory and other resources `$deltatoken=latest` - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists (delete it or use -FullSync to re-baseline).</maml:para>
           </maml:description>
           <dev:type>
             <maml:name>SwitchParameter</maml:name>
@@ -3313,23 +3753,11 @@ Import-Csv ./users.csv |
         <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
           <maml:name>Prefer</maml:name>
           <maml:description>
-            <maml:para>Prefer-header tokens joined into a single Prefer header on every page request (e.g. deltashowremovedasdeleted). A change against the stored state forces a full re-sync, like -Property and -Filter. deltaExcludeParent is a standalone request header, not a Prefer token - pass it via -Headers.</maml:para>
+            <maml:para>Prefer-header tokens joined into a single Prefer header on every page request. Tab completion offers the documented drive delta tokens: `deltashowremovedasdeleted`, `deltatraversepermissiongaps`, `deltashowsharingchanges` (requires the other two and Sites.FullControl.All), and `hierarchicalsharing`. A change against the stored state forces a full re-sync, like -Property and -Filter. `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it via -Headers.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">String[]</command:parameterValue>
           <dev:type>
             <maml:name>String[]</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>CheckpointPath</maml:name>
-          <maml:description>
-            <maml:para>Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode); deleted on successful completion, on 410 Gone, on -FullSync, and on any -Property/-Filter/-Prefer change. Must differ from -DeltaPath and -OutputFile. Resume is at-least-once.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-          <dev:type>
-            <maml:name>String</maml:name>
             <maml:uri />
           </dev:type>
           <dev:defaultValue>None</dev:defaultValue>
@@ -3409,6 +3837,18 @@ Import-Csv ./users.csv |
         </dev:type>
         <dev:defaultValue>v1.0</dev:defaultValue>
       </command:parameter>
+      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
+        <maml:name>CheckpointPath</maml:name>
+        <maml:description>
+          <maml:para>Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode) while an enumeration is in flight; deleted on successful completion. Any event that invalidates the enumeration - HTTP 410 Gone, -FullSync, or a -Property/-Filter/-Prefer change - deletes it too. Must differ from -DeltaPath and -OutputFile.</maml:para>
+        </maml:description>
+        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
+        <dev:type>
+          <maml:name>String</maml:name>
+          <maml:uri />
+        </dev:type>
+        <dev:defaultValue>None</dev:defaultValue>
+      </command:parameter>
       <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>DeltaPath</maml:name>
         <maml:description>
@@ -3448,7 +3888,7 @@ Import-Csv ./users.csv |
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Latest</maml:name>
         <maml:description>
-          <maml:para>Baseline without enumerating: request only the latest delta token ("sync from now"). Drive resources take ?token=latest, directory and other resources $deltatoken=latest - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists.</maml:para>
+          <maml:para>Baseline without enumerating: request only the latest delta token ("sync from now"). Returns no data; the next run returns everything that changed since. Drive resources take `?token=latest`, directory and other resources `$deltatoken=latest` - the form is chosen automatically from the URI shape. Ignored with a warning when usable delta state already exists (delete it or use -FullSync to re-baseline).</maml:para>
         </maml:description>
         <command:parameterValue required="false" variableLength="false">SwitchParameter</command:parameterValue>
         <dev:type>
@@ -3460,23 +3900,11 @@ Import-Csv ./users.csv |
       <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
         <maml:name>Prefer</maml:name>
         <maml:description>
-          <maml:para>Prefer-header tokens joined into a single Prefer header on every page request (e.g. deltashowremovedasdeleted). A change against the stored state forces a full re-sync, like -Property and -Filter. deltaExcludeParent is a standalone request header, not a Prefer token - pass it via -Headers.</maml:para>
+          <maml:para>Prefer-header tokens joined into a single Prefer header on every page request. Tab completion offers the documented drive delta tokens: `deltashowremovedasdeleted`, `deltatraversepermissiongaps`, `deltashowsharingchanges` (requires the other two and Sites.FullControl.All), and `hierarchicalsharing`. A change against the stored state forces a full re-sync, like -Property and -Filter. `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it via -Headers.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">String[]</command:parameterValue>
         <dev:type>
           <maml:name>String[]</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>CheckpointPath</maml:name>
-        <maml:description>
-          <maml:para>Path for the ephemeral mid-run resume checkpoint. Saved at page boundaries (and every 500 items in JSONL mode); deleted on successful completion, on 410 Gone, on -FullSync, and on any -Property/-Filter/-Prefer change. Must differ from -DeltaPath and -OutputFile. Resume is at-least-once.</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-        <dev:type>
-          <maml:name>String</maml:name>
           <maml:uri />
         </dev:type>
         <dev:defaultValue>None</dev:defaultValue>
@@ -3567,10 +3995,10 @@ Import-Csv ./users.csv |
     <command:returnValues>
       <command:returnValue>
         <dev:type>
-          <maml:name>System.Management.Automation.PSObject</maml:name>
+          <maml:name>System.Collections.Hashtable</maml:name>
         </dev:type>
         <maml:description>
-          <maml:para>Graph API objects with properties matching the JSON fields. Deleted items include an `@removed` property.</maml:para>
+          <maml:para>Graph API objects as case-insensitive hashtables with keys matching the JSON fields. Deleted items include an `@removed` key.</maml:para>
         </maml:description>
       </command:returnValue>
     </command:returnValues>
@@ -3578,10 +4006,15 @@ Import-Csv ./users.csv |
       <maml:alert>
         <maml:para>Delta queries follow all @odata.nextLink pages automatically (equivalent to -All on other cmdlets). The delta token is saved only after all pages are successfully retrieved.</maml:para>
         <maml:para>Query parameters ($select, $filter) are encoded into the delta token on the first request. Do not re-specify them on subsequent runs; they are automatically applied from the saved token. If you change -Property between runs, Sync-MgxDelta detects the mismatch and performs a full re-sync.</maml:para>
-        <maml:para>Supported delta endpoints include: /users/delta, /groups/delta, /applications/delta, /servicePrincipals/delta, /devices/delta, /directoryRoles/delta, and many others. Source: Use delta query to track changes in Microsoft Graph data (https://learn.microsoft.com/en-us/graph/delta-query-overview)</maml:para>
-        <maml:para>DUPLICATE OBJECTS ACROSS PAGES: Graph does not guarantee that an object appears only once in a delta response - it "can't ensure that entities are unified in a single response". Deduplicate by id before treating emitted objects as change events.</maml:para>
-        <maml:para>This is most visible on an initial full enumeration. Measured against a tenant with 15,779 groups, /groups/delta emitted 156,413 objects across all pages - a replay factor of roughly 10x - with every extra object accounted for by a repeat rather than a distinct group. Incremental rounds off an established token are typically clean, but nothing in the contract promises that, so the dedup belongs in the consumer either way.</maml:para>
-        <maml:para>For a change feed, baseline with -Latest so the initial enumeration never happens: it records a sync-from-now token, returns nothing, and every later run reports only real changes. When counting, count distinct ids - an object that changed twice inside one window is one object, and keeping the last occurrence gives its current state. Note that -CheckpointPath records item counts as emitted, not deduplicated, so a resumed run's progress figures reflect the same replay.</maml:para>
+        <maml:para>Supported delta endpoints include: /users/delta, /groups/delta, /applications/delta, /servicePrincipals/delta, /devices/delta, /directoryRoles/delta, and many others. Source: Use delta query to track changes in Microsoft Graph data (https://learn.microsoft.com/en-us/graph/delta-query-overview)DUPLICATE OBJECTS ACROSS PAGES</maml:para>
+        <maml:para>Graph does not guarantee that an object appears only once in a delta response: it "can't ensure that entities are unified in a single response." Deduplicate by `id` before treating emitted objects as change events.</maml:para>
+        <maml:para>This is most visible on an initial full enumeration. Measured against a tenant with 15,779 groups, `/groups/delta` emitted 156,413 objects across all pages - a replay factor of roughly 10x - with every object accounted for by a repeat rather than a distinct group. Incremental rounds off an established token are typically clean, but nothing in the contract promises that, so the dedup belongs in the consumer either way.</maml:para>
+        <maml:para>Two consequences worth designing around:</maml:para>
+        <maml:para>- For a change feed, baseline with `-Latest` so the initial enumeration never happens. It records a sync-from-now token and returns nothing, and every later run reports only real changes.</maml:para>
+        <maml:para>- When counting, count distinct ids. An object that changed twice inside one window is one object; keeping the last occurrence gives its current state.</maml:para>
+        <maml:para></maml:para>
+        <maml:para>`-CheckpointPath` writes item counts as emitted, not deduplicated, so a resumed run's progress figures reflect the same replay.</maml:para>
+        <maml:para>Source: Use delta query to track changes (https://learn.microsoft.com/en-us/graph/delta-query-overview#other-considerations)</maml:para>
       </maml:alert>
     </maml:alertSet>
     <command:examples>
@@ -3617,15 +4050,15 @@ Import-Csv ./users.csv |
         <maml:title>------ Example 5: Sync group changes including membership ------</maml:title>
         <dev:code>Sync-MgxDelta /groups/delta -DeltaPath groups.delta</dev:code>
         <dev:remarks>
-          <maml:para>Group delta responses include `members@delta` arrays showing member additions and removals. Access via `$group.&#x27;members@delta&#x27;`.</maml:para>
+          <maml:para>Group delta responses include `members@delta` arrays showing member additions and removals. Access via `$group.'members@delta'`.</maml:para>
         </dev:remarks>
       </command:example>
       <command:example>
         <maml:title>-------- Example 6: Scheduled sync in unattended script --------</maml:title>
         <dev:code>$results = Sync-MgxDelta /users/delta -DeltaPath C:\sync\users.delta -Property id,displayName,accountEnabled
-$removed = $results | Where-Object { $_.&#x27;@removed&#x27; }
-$changed = $results | Where-Object { -not $_.&#x27;@removed&#x27; }
-Write-Host &quot;$($changed.Count) changed, $($removed.Count) removed&quot;</dev:code>
+$removed = $results | Where-Object { $_.'@removed' }
+$changed = $results | Where-Object { -not $_.'@removed' }
+Write-Host "$($changed.Count) changed, $($removed.Count) removed"</dev:code>
         <dev:remarks>
           <maml:para>Suitable for scheduled tasks. If the delta token expires (&gt;7 days since last run), Sync-MgxDelta automatically performs a full re-sync and warns.</maml:para>
         </dev:remarks>
@@ -3643,14 +4076,14 @@ Write-Host &quot;$($changed.Count) changed, $($removed.Count) removed&quot;</dev
 # ...later...
 Sync-MgxDelta /groups/delta -DeltaPath groups.delta           # only what changed since</dev:code>
         <dev:remarks>
-          <maml:para>-Latest skips the initial full enumeration and stores a &quot;from now&quot; token. The form is chosen automatically: drive resources use `?token=latest`, directory and everything else `$deltatoken=latest`.</maml:para>
+          <maml:para>-Latest skips the initial full enumeration and stores a "from now" token. The form is chosen automatically: drive resources use `?token=latest`, directory and everything else `$deltatoken=latest`.</maml:para>
         </dev:remarks>
       </command:example>
       <command:example>
         <maml:title>--------- Example 9: Drive delta with Prefer behaviors ---------</maml:title>
         <dev:code>Sync-MgxDelta /me/drive/root/delta -DeltaPath drive.delta -Prefer deltashowremovedasdeleted</dev:code>
         <dev:remarks>
-          <maml:para>Removed drive items carry the `deleted` facet instead of appearing as bare deletions. Note: `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it as `-Headers @{ deltaExcludeParent = &quot;true&quot; }`.</maml:para>
+          <maml:para>Removed drive items carry the `deleted` facet instead of appearing as bare deletions. Note: `deltaExcludeParent` is a standalone request header, not a Prefer token - pass it as `-Headers @{ deltaExcludeParent = "true" }`.</maml:para>
         </dev:remarks>
       </command:example>
     </command:examples>
@@ -3669,376 +4102,6 @@ Sync-MgxDelta /groups/delta -DeltaPath groups.delta           # only what change
       </maml:navigationLink>
       <maml:navigationLink>
         <maml:linkText>Set-MgxOption</maml:linkText>
-        <maml:uri></maml:uri>
-      </maml:navigationLink>
-    </command:relatedLinks>
-  </command:command>
-  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
-    <command:details>
-      <command:name>Get-MgxContent</command:name>
-      <command:verb>Get</command:verb>
-      <command:noun>MgxContent</command:noun>
-      <maml:description>
-        <maml:para>Fetch content bytes from Graph $value / /content endpoints, whole or as a byte range.</maml:para>
-      </maml:description>
-    </command:details>
-    <maml:description>
-      <maml:para>Get-MgxContent downloads file content from Microsoft Graph content endpoints - drive items, mail attachments, profile photos. Ranged reads are the point: -First 262144 pulls the first 256 KB of a file (format sniffing, EXIF, partial hashing) instead of the whole thing.</maml:para>
-      <maml:para>Drive content is a two-hop flow: the authenticated Graph request (full resilience pipeline, adaptive pacing, rate limiting) answers with a redirect to a short-lived pre-authenticated download URL, which mgx fetches with a separate token-free HTTP client. The bearer token never reaches the download host, and the host is validated against a Microsoft-hosts allowlist before any bytes move - including on every mid-download redirect.</maml:para>
-      <maml:para>Output is a single byte[] to the pipeline (guarded at 100 MB - use -OutFile beyond that), or a file written via temp-plus-atomic-move. Piped DriveItems use their @microsoft.graph.downloadUrl directly when present, falling back to /drives/{driveId}/items/{id}/content. Endpoints that ignore Range and answer 200 with the full body are truncated to the requested bytes.</maml:para>
-    </maml:description>
-    <command:syntax>
-      <command:syntaxItem>
-        <maml:name>Get-MgxContent</maml:name>
-        <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="0" aliases="Resource">
-          <maml:name>Uri</maml:name>
-          <maml:description>
-            <maml:para>Relative Graph path to a content endpoint (e.g., /me/drive/items/{id}/content).</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-          <dev:type>
-            <maml:name>String</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>First</maml:name>
-          <maml:description>
-            <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-          <dev:type>
-            <maml:name>Int64</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>Offset</maml:name>
-          <maml:description>
-            <maml:para>Range start in bytes; requires -Length.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-          <dev:type>
-            <maml:name>Int64</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>0</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>Length</maml:name>
-          <maml:description>
-            <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-          <dev:type>
-            <maml:name>Int64</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>OutFile</maml:name>
-          <maml:description>
-            <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-          <dev:type>
-            <maml:name>String</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>ApiVersion</maml:name>
-          <maml:description>
-            <maml:para>Graph API version. Default: v1.0.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-          <dev:type>
-            <maml:name>String</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>v1.0</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>Headers</maml:name>
-          <maml:description>
-            <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
-          <dev:type>
-            <maml:name>Hashtable</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-      </command:syntaxItem>
-      <command:syntaxItem>
-        <maml:name>Get-MgxContent</maml:name>
-        <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
-          <maml:name>InputObject</maml:name>
-          <maml:description>
-            <maml:para>A DriveItem-shaped object from the pipeline.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
-          <dev:type>
-            <maml:name>Object</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>First</maml:name>
-          <maml:description>
-            <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-          <dev:type>
-            <maml:name>Int64</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>Offset</maml:name>
-          <maml:description>
-            <maml:para>Range start in bytes; requires -Length.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-          <dev:type>
-            <maml:name>Int64</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>0</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>Length</maml:name>
-          <maml:description>
-            <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-          <dev:type>
-            <maml:name>Int64</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>OutFile</maml:name>
-          <maml:description>
-            <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-          <dev:type>
-            <maml:name>String</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>ApiVersion</maml:name>
-          <maml:description>
-            <maml:para>Graph API version. Default: v1.0.</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-          <dev:type>
-            <maml:name>String</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>v1.0</dev:defaultValue>
-        </command:parameter>
-        <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-          <maml:name>Headers</maml:name>
-          <maml:description>
-            <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
-          </maml:description>
-          <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
-          <dev:type>
-            <maml:name>Hashtable</maml:name>
-            <maml:uri />
-          </dev:type>
-          <dev:defaultValue>None</dev:defaultValue>
-        </command:parameter>
-      </command:syntaxItem>
-    </command:syntax>
-    <command:parameters>
-      <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="False" position="0" aliases="Resource">
-        <maml:name>Uri</maml:name>
-        <maml:description>
-          <maml:para>Relative Graph path to a content endpoint (e.g., /me/drive/items/{id}/content). Warns when the path does not look like a content endpoint (/content or /$value).</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-        <dev:type>
-          <maml:name>String</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="true" variableLength="true" globbing="false" pipelineInput="True (ByValue)" position="named" aliases="none">
-        <maml:name>InputObject</maml:name>
-        <maml:description>
-          <maml:para>A DriveItem-shaped object from the pipeline. Uses @microsoft.graph.downloadUrl when present (validated against the download-host allowlist), else /drives/{parentReference.driveId}/items/{id}/content.</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
-        <dev:type>
-          <maml:name>Object</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>First</maml:name>
-        <maml:description>
-          <maml:para>First N bytes (Range: bytes=0..N-1). Mutually exclusive with -Offset/-Length.</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-        <dev:type>
-          <maml:name>Int64</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>Offset</maml:name>
-        <maml:description>
-          <maml:para>Range start in bytes; requires -Length.</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-        <dev:type>
-          <maml:name>Int64</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>0</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>Length</maml:name>
-        <maml:description>
-          <maml:para>Range length in bytes, starting at -Offset (default 0).</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">Int64</command:parameterValue>
-        <dev:type>
-          <maml:name>Int64</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>OutFile</maml:name>
-        <maml:description>
-          <maml:para>Write the content to this file (temp + atomic move) instead of emitting byte[] to the pipeline. Required for content larger than 100 MB.</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-        <dev:type>
-          <maml:name>String</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>ApiVersion</maml:name>
-        <maml:description>
-          <maml:para>Graph API version. Default: v1.0.</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">String</command:parameterValue>
-        <dev:type>
-          <maml:name>String</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>v1.0</dev:defaultValue>
-      </command:parameter>
-      <command:parameter required="false" variableLength="true" globbing="false" pipelineInput="False" position="named" aliases="none">
-        <maml:name>Headers</maml:name>
-        <maml:description>
-          <maml:para>Custom request headers for the Graph request (hop 1 only; never sent to the download host).</maml:para>
-        </maml:description>
-        <command:parameterValue required="true" variableLength="false">Hashtable</command:parameterValue>
-        <dev:type>
-          <maml:name>Hashtable</maml:name>
-          <maml:uri />
-        </dev:type>
-        <dev:defaultValue>None</dev:defaultValue>
-      </command:parameter>
-    </command:parameters>
-    <command:inputTypes>
-      <command:inputType>
-        <dev:type>
-          <maml:name>System.Object</maml:name>
-        </dev:type>
-        <maml:description>
-          <maml:para>DriveItem-shaped Hashtables or PSCustomObjects (from Invoke-MgxRequest or Sync-MgxDelta).</maml:para>
-        </maml:description>
-      </command:inputType>
-    </command:inputTypes>
-    <command:returnValues>
-      <command:returnValue>
-        <dev:type>
-          <maml:name>System.Byte[]</maml:name>
-        </dev:type>
-        <maml:description>
-          <maml:para>The content bytes as a single array (not enumerated). Nothing is emitted when -OutFile is used.</maml:para>
-        </maml:description>
-      </command:returnValue>
-    </command:returnValues>
-    <maml:alertSet>
-      <maml:alert>
-        <maml:para>Content downloads require the mgx-owned HTTP transport; on the SDK fallback client the cmdlet refuses with ContentRequiresOwnedTransport. Graph reports quickXorHash in base64 while rclone prints hex - convert before comparing. Intune report exports are not a /content flow: download the completed job's url property directly with Invoke-WebRequest.</maml:para>
-      </maml:alert>
-    </maml:alertSet>
-    <command:examples>
-      <command:example>
-        <maml:title>------------------ Example 1: Download a file ------------------</maml:title>
-        <dev:code>Get-MgxContent &quot;/me/drive/items/01ABC/content&quot; -OutFile ./report.xlsx</dev:code>
-        <dev:remarks>
-          <maml:para>Downloads the drive item to a local file.</maml:para>
-        </dev:remarks>
-      </command:example>
-      <command:example>
-        <maml:title>---- Example 2: First 256 KB of every file in a folder (format sniffing / partial hash) ----</maml:title>
-        <dev:code>Invoke-MgxRequest &quot;/me/drive/items/01FOLDER/children&quot; -All |
-    Where-Object { $_.file } |
-    ForEach-Object {
-        $bytes = $_ | Get-MgxContent -First 262144
-        [PSCustomObject]@{ name = $_.name; header = [BitConverter]::ToString($bytes[0..7]) }
-    }</dev:code>
-        <dev:remarks>
-          <maml:para>Moves kilobytes per file instead of the full content - the metadata-extraction economy case.</maml:para>
-        </dev:remarks>
-      </command:example>
-      <command:example>
-        <maml:title>--------------- Example 3: A specific byte range ---------------</maml:title>
-        <dev:code>Get-MgxContent &quot;/me/drive/items/01ABC/content&quot; -Offset 1048576 -Length 65536</dev:code>
-        <dev:remarks>
-          <maml:para>Returns bytes 1,048,576 through 1,114,111 (Range: bytes=1048576-1114111).</maml:para>
-        </dev:remarks>
-      </command:example>
-      <command:example>
-        <maml:title>----------------- Example 4: A mail attachment -----------------</maml:title>
-        <dev:code>Get-MgxContent &quot;/me/messages/AAMk.../attachments/AAMk.../`$value&quot; -OutFile ./attachment.pdf</dev:code>
-        <dev:remarks>
-          <maml:para>Attachment bytes are served directly by Graph (no download-host hop).</maml:para>
-        </dev:remarks>
-      </command:example>
-      <command:example>
-        <maml:title>------------------- Example 5: Profile photo -------------------</maml:title>
-        <dev:code>Get-MgxContent &quot;/me/photo/`$value&quot; -OutFile ./me.jpg</dev:code>
-        <dev:remarks>
-          <maml:para>Note the backtick: `$value` would otherwise be expanded by PowerShell.</maml:para>
-        </dev:remarks>
-      </command:example>
-    </command:examples>
-    <command:relatedLinks>
-      <maml:navigationLink>
-        <maml:linkText>Online Version:</maml:linkText>
-        <maml:uri>https://github.com/gromedev/mgx/blob/main/module/help/Get-MgxContent.md</maml:uri>
-      </maml:navigationLink>
-      <maml:navigationLink>
-        <maml:linkText>Invoke-MgxRequest</maml:linkText>
-        <maml:uri></maml:uri>
-      </maml:navigationLink>
-      <maml:navigationLink>
-        <maml:linkText>Sync-MgxDelta</maml:linkText>
         <maml:uri></maml:uri>
       </maml:navigationLink>
     </command:relatedLinks>
