@@ -1,89 +1,144 @@
 # Changelog
 
+## 2.1.0
+
+Adds proactive throttle avoidance, ranged content downloads, and resumable enumeration.
+
+### Added
+
+- Adaptive request pacing, on by default. Requests are spaced before they are sent, per workload; opt out with Set-MgxOption -NoAdaptivePacing.
+- Get-MgxContent, to download file and media content whole or by byte range (-First).
+- Sync-MgxDelta -CheckpointPath, to resume interrupted enumerations.
+- Sync-MgxDelta -Latest, to baseline state without enumerating.
+- Sync-MgxDelta -Prefer, to send drive delta Prefer tokens.
+- Resource units consumed, in telemetry output, benchmarks and examples.
+
+### Fixed
+
+- -Latest was honored after a state invalidation, dropping every change since the last sync.
+- Delta resume dropped the interrupted run's items when an earlier run had already completed, and advanced the delta token past them.
+- Export resume dropped the interrupted run's items when an earlier export had already written the output file.
+- Export resume wrote a page's items twice when a run was interrupted twice inside the same page.
+- Delta resume kept the previous sync's rows in front of the interrupted sync's output.
+- Export resume started the export over when the interrupted run had died on a transient error.
+- A resume checkpoint naming a file that was never a temp consumed it as data.
+- A refused delta token was reported as an endpoint not supporting delta queries.
+- Sync-MgxDelta as a session's first cmdlet sent its request to the public cloud endpoint.
+- A denied or read-only output file ended a delta sync with an unhandled error on Windows.
+- A missing drive item suggested retrying in beta instead of reporting the item absent.
+- -Top was ignored when combined with -All, returning the whole collection.
+- Get-Help described output shapes and parameters from before 2.0.0.
+- Enumeration returned part of a collection without error when a nextLink was refused.
+- A delta sync stopped with an error when a page contained a non-object item.
+- Get-MgxContent left an unwritable -OutFile as an unhandled error naming a temp path.
+- A non-Graph JSON error body threw from inside the exception it was being used to build, surfacing a CDN failure as a security refusal.
+- A $batch 429 set a pacing cap that nothing enforced and nothing cleared, so telemetry reported it forever.
+- Get-MgxContent ignored Retry-After when a download host sent it as an HTTP date.
+- Get-Help was missing the examples for -CheckpointPath, -Latest, -Prefer, adaptive pacing, and two Get-MgxContent endpoints, and did not document Set-MgxOption -BatchChunkConcurrency.
+- Seven examples rendered blank tables, and one reported password secrets as certificates.
+- Repeat 429s could raise the adaptive cap above -RateLimitPerSecond.
+- Delta state did not record its API version, so runs omitting -ApiVersion silently synced the other one.
+- -Debug wrote pre-authenticated download URLs verbatim, from redirect headers and from response bodies.
+- Get-MgxContent -OutFile with piped input downloaded every item but kept only the last.
+- -Offset was ignored when a server returned a whole-body 200.
+- An offset past end of file overwrote an existing -OutFile with an empty one.
+- Two-hop content downloads were reported as failed requests.
+- Adaptive pacing fired synchronized bursts when sleep times were clamped.
+- Enable-MgxResilience recorded no telemetry: request counts, HTTP time and rate-limiter wait all stayed 0.
+- Invoke-MgGraphRequest with a relative URI failed while resilience was enabled.
+- $batch envelopes were bucketed as Other rather than their target workload.
+- Slow start opened above ceilings set below 4 rps.
+- ResiliencePipelineFactory.Reset() reverted configuration and kept batch pacer state across credential changes.
+- Ctrl-C during file cleanup raised disposed-object errors.
+
+### Documentation
+
+- Graph delta responses repeat objects across pages; deduplicate on id, or baseline with -Latest.
+- Adaptive pacing applies to every request except batch outer POSTs.
+- Measured throttling behavior: resource unit budgets are scoped per application and tenant, and x-ms-throttle-limit-percentage is not emitted.
+
 ## 2.0.1
 
 Patch release. Three fixes; no feature or API changes.
 
 ### Fixed
 
-- The rate limiter was disposed on a timer while live clients still held it, so any Set-MgxOption call left Enable-MgxResilience sessions throwing ObjectDisposedException minutes later. It is now retired by dropping the reference rather than disposed.
-- Enable-MgxResilience and Disable-MgxResilience disposed the injected HTTP client synchronously, cancelling SDK requests still in flight. Restoring the SDK's own client already stops new traffic.
-- Sync-MgxDelta -Uri with a query string or trailing slash failed on the second run with a DeltaLinkPathMismatch error. The resource-path check now compares paths to paths.
+- The rate limiter was disposed on a timer while live clients held it, so any Set-MgxOption call broke Enable-MgxResilience sessions minutes later.
+- Enable-MgxResilience and Disable-MgxResilience cancelled SDK requests still in flight.
+- Sync-MgxDelta -Uri with a query string or trailing slash failed on the second run.
 
 ## 2.0.0
 
 ### Breaking
 
-- Output shape changed for Invoke-MgxRequest, Invoke-MgxBatchRequest, Expand-MgxRelation, and Sync-MgxDelta to emit case-insensitive Hashtables instead of PSObjects, matching Invoke-MgGraphRequest output. Raw JSON output is still accessible via -Raw | ConvertFrom-Json.
-- Preserved @odata.type verbatim under its own key for read-modify-write round-trips while stripping all other @odata.- transport metadata (including @odata.etag to prevent phantom drift in state comparisons).
-- Removed custom Graph entity format views (Mgx.User, Mgx.Group, Mgx.Application, Mgx.ServicePrincipal, Mgx.DirectoryRole, Mgx.BatchResult) since dictionaries render using PowerShell's built-in Name/Value view.
-- Lowered the platform floor to target .NET 8, adding support for PowerShell 7.4 (LTS) and later (down from 7.5). Replaced the .NET 9 API in the -Debug tracer with a WaitAsync equivalent.
-- Removed Microsoft.Graph.Authentication from RequiredModules to decouple the module from the full Graph SDK. Cmdlets needing authentication now report a GraphAuthModuleNotLoaded error with installation instructions if the module is missing.
+- Invoke-MgxRequest, Invoke-MgxBatchRequest, Expand-MgxRelation and Sync-MgxDelta now emit case-insensitive Hashtables instead of PSObjects, matching Invoke-MgGraphRequest. Use -Raw | ConvertFrom-Json for the old shape.
+- @odata.type is preserved under its own key; all other @odata.* transport metadata is stripped, including @odata.etag.
+- Removed the custom format views (Mgx.User, Mgx.Group, and the rest); dictionaries render with PowerShell's built-in Name/Value view.
+- Lowered the floor to PowerShell 7.4 (LTS) and .NET 8, down from 7.5.
+- Removed Microsoft.Graph.Authentication from RequiredModules. Cmdlets needing auth now report GraphAuthModuleNotLoaded with install instructions.
 
 ### Fixed
 
-- Action endpoints returning collection envelopes (e.g., /directoryObjects/getByIds) now correctly unwrap and emit individual items across all response paths, including fan-out bulk writes, with truncation warnings if @odata.nextLink is present.
-- Fan-out requests piped to endpoints like '/users/{id}' now extract id members from both Hashtables and PSCustomObjects, throwing a MissingPipelineId error if neither is found instead of embedding literal type names in the URL.
-- Invoke-MgxBatchRequest now parses input items from both Hashtables and PSCustomObjects, enabling failed items to be piped directly back in for retries.
+- Action endpoints returning collection envelopes (e.g. /directoryObjects/getByIds) now unwrap and emit individual items on every response path.
+- Fan-out to endpoints like /users/{id} now extracts id from both Hashtables and PSCustomObjects, raising MissingPipelineId if absent.
+- Invoke-MgxBatchRequest accepts both Hashtables and PSCustomObjects, so failed items can be piped straight back in.
 
 ### Changed
 
-- Updated dependencies to Polly.Core 8.7.0 and System.Threading.RateLimiting 10.0.10.
+- Updated to Polly.Core 8.7.0 and System.Threading.RateLimiting 10.0.10.
 
 ## 1.0.5
 
 ### Fixed
 
-- Export-MgxCollection no longer loses progress on interrupted first runs. Cancelled runs promote temp files to the output path with matching checkpoints, and killed or crashed runs recover on the next invocation by trimming orphaned temp files to the last checkpointed item count. The "Resume with:" hint now accurately reflects first-run states.
-- Get-MgxTelemetry now includes per-item Retry-After wait times from $batch processing into RetryDelayMs instead of incorrectly reporting zero retry delay for throttled batch sessions.
-- Count-discrepancy warnings now also trigger when an enumeration returns more items than @odata.count reported (using a 0.5% threshold with a 50-item floor) and recommend deduplicating on id downstream.
+- Export-MgxCollection no longer loses progress on an interrupted first run.
+- Get-MgxTelemetry now counts per-item Retry-After waits from $batch in RetryDelayMs.
+- Count-discrepancy warnings now also fire when an enumeration returns more items than @odata.count reported.
 
 ### Documentation
 
-- Added write-cost pacing documentation to about_Mgx_Tuning, explaining that Graph throttles write operations rather than batch items (e.g., a group create with 20 member bindings costs ~21 writes) and how to budget BatchItemsPerSecond accordingly.
-- Updated Export-MgxCollection help with details on mid-page checkpointing, first-run recovery, and downstream id deduplication hygiene.
-- Adjusted performance claims for Invoke-MgxRequest, updating the batch-vs-fan-out speedup from 3–4x down to the measured ~1.5x for PATCH operations at 1k scale.
-- Rebuilt the README based on measured results from the new benchmark suite.
-
+- about_Mgx_Tuning now covers write-cost pacing: Graph throttles writes, not batch items.
+- Export-MgxCollection help covers mid-page checkpointing, first-run recovery and id deduplication.
+- Corrected the batch-vs-fan-out speedup for PATCH at 1k scale, from 3-4x to the measured ~1.5x.
+- Rebuilt the README from the new benchmark suite.
 
 ## 1.0.4
 
 ### Fixed
 
-- Fixed Mgx cmdlets caching credentials from only the first Connect-MgGraph call. HTTP clients are now keyed on a fingerprint of the full authentication context so reconnecting with a different application, certificate, account, scope set, or secret properly updates the identity.
-- Fixed JSON string input to -Body being silently converted to an empty object ({}) when passed as a PSObject. IDictionary, PSCustomObject, array, and nested bodies now serialize correctly.
-- Fixed Enable-MgxResilience remaining bound to pre-reconnect SDK clients by automatically re-injecting resilience settings when the Graph identity changes.
-- Fixed Set-MgxOption -TotalTimeoutSeconds failing to update the HTTP client timeout for existing sessions by rebuilding the client on value changes.
-- Fixed temporary 429 throttling permanently slowing Invoke-MgxBatchRequest rates for the remainder of the session; write pacing now recovers after clean chunks and fully resets after five unthrottled minutes.
-- Fixed the internal type cache failing to invalidate when Microsoft.Graph.Authentication was re-imported at a different version or in a new load context.
-- Fixed JSON integers larger than 2^53 losing precision due to double-precision floating-point conversion.
+- Cmdlets cached credentials from only the first Connect-MgGraph call. Clients are now keyed on the full authentication context.
+- JSON string input to -Body was silently converted to an empty object when passed as a PSObject.
+- Enable-MgxResilience stayed bound to pre-reconnect SDK clients.
+- Set-MgxOption -TotalTimeoutSeconds did not update the HTTP client timeout for existing sessions.
+- Temporary 429s permanently slowed Invoke-MgxBatchRequest for the rest of the session.
+- The internal type cache did not invalidate when Microsoft.Graph.Authentication was re-imported.
+- JSON integers larger than 2^53 lost precision.
 
 ### Changed
 
-- Batch items with invalid JSON bodies now fail individually instead of aborting the entire batch.
-- Passing -Body on a GET request now emits a warning instead of being silently ignored.
-- SdkVersion header strings are now derived automatically from the assembly version set in Directory.Build.props.
+- Batch items with invalid JSON bodies now fail individually instead of aborting the batch.
+- Passing -Body on a GET now warns instead of being silently ignored.
+- SdkVersion header strings are derived from the assembly version.
 
 ### Added
 
-- Added -Debug request and response tracing across all cmdlets (single requests, pagination, fan-out, $batch) with credential redaction and a 4 KB body truncation limit.
-- Added xUnit and Pester test suites alongside a build-and-test CI workflow to the repository.
-
+- -Debug request and response tracing across all cmdlets, with credential redaction and a 4 KB body limit.
+- xUnit and Pester suites, and a build-and-test CI workflow.
 
 ## 1.0.3
 
-- Fixed `Remove-Module Mgx` failing and leaving the module loaded. Static-state cleanup moved into `AlcInitializer.OnRemove`, ahead of the ALC resolver detaching; it previously ran from the module `OnRemove` scriptblock, by which point `Polly.Core` was unresolvable. Only triggered when no Graph request had run in the session
-- Fixed the `SdkVersion` request header reporting `mgx/0.3.0` regardless of the installed version. It now matches the module version, and `build.ps1` fails the build if the constant and the manifest ever disagree
-- Extracted cmdlet lifecycle and JSON conversion to `MgxCmdletCore`. Internal refactor; no change to the cmdlet surface
-- Treat `CA1416` as an error in both projects, so a Windows-only API reaching the cross-platform code paths fails the build instead of throwing `PlatformNotSupportedException` on Linux or macOS
+- Remove-Module Mgx failed and left the module loaded, when no Graph request had run in the session.
+- The SdkVersion header reported mgx/0.3.0 regardless of the installed version.
+- Extracted cmdlet lifecycle and JSON conversion to MgxCmdletCore. Internal refactor; no surface change.
+- CA1416 is now an error, so a Windows-only API in cross-platform code fails the build rather than throwing at runtime.
 
 ## 1.0.2
 
-- Fixed Linux install: renamed `Mgx.psd1`, `Mgx.psm1`, and `Mgx.Format.ps1xml` to lowercase so `Install-Module Mgx` works on case-sensitive filesystems (PSGallery lowercases the module folder name)
-- Updated `about_Mgx_Tuning` version reference to v1.0.1
+- Fixed Linux install: lowercased the manifest, module and format filenames for case-sensitive filesystems.
+- Updated the about_Mgx_Tuning version reference to v1.0.1.
 
 ## 1.0.1
 
-- Added tab completion for the Uri parameter on all cmdlets that accept Graph API paths (Invoke-MgxRequest, Invoke-MgxBatchRequest, Export-MgxCollection, Expand-MgxRelation, Sync-MgxDelta)
-- Extracted `CircuitBreakerMessage` protected property on `MgxCmdletBase` to eliminate repeated inline circuit breaker message strings across six cmdlet files
-- Removed redundant XML doc comments on self-documenting members in `MgxCmdletBase` and `ResilientGraphClient`
+- Added tab completion for the Uri parameter on every cmdlet that accepts a Graph path.
+- Extracted CircuitBreakerMessage on MgxCmdletBase, replacing six inline copies.
+- Removed redundant XML doc comments on self-documenting members.

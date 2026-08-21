@@ -28,6 +28,23 @@ public sealed class PaginationCheckpoint
     [JsonPropertyName("pageItemsAlreadyWritten")]
     public int PageItemsAlreadyWritten { get; set; }
 
+    /// <summary>
+    /// File name (not path) of the temp the writing run was appending to, relative to the
+    /// output's directory - or null when that run wrote straight to the output. This is what
+    /// makes a checkpoint answerable: without it, "no temp on disk" cannot be told apart from
+    /// "a temp from some other run is on disk", and neither from "the run was appending".
+    /// </summary>
+    [JsonPropertyName("tempFile")]
+    public string? TempFile { get; set; }
+
+    /// <summary>
+    /// Byte length of that file at the moment this checkpoint was saved, captured after the
+    /// writer was flushed. Null on checkpoints written before this was recorded, which are
+    /// treated as unverifiable rather than as zero-length.
+    /// </summary>
+    [JsonPropertyName("dataLength")]
+    public long? DataLength { get; set; }
+
     [JsonPropertyName("timestamp")]
     public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
 
@@ -56,9 +73,12 @@ public sealed class PaginationCheckpoint
             // Treat as no checkpoint; caller will start fresh.
             return null;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // File locked or inaccessible; treat as no checkpoint.
+            // Locked, or the account cannot read it; treat as no checkpoint either way. Windows
+            // reports a denying ACL as UnauthorizedAccessException, which is not an IOException,
+            // so catching only the latter made an unreadable checkpoint throw on Windows and
+            // resume cleanly everywhere else.
             return null;
         }
     }
@@ -77,8 +97,18 @@ public sealed class PaginationCheckpoint
         lock (lockObj)
         {
             var tmpPath = normalizedPath + ".tmp";
-            File.WriteAllText(tmpPath, json);
-            File.Move(tmpPath, normalizedPath, overwrite: true);
+            try
+            {
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, normalizedPath, overwrite: true);
+            }
+            catch
+            {
+                // Same reasoning as the delta state: a staging file that never became the
+                // checkpoint is litter, and adoption already has to reason about stray files.
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+                throw;
+            }
         }
     }
 
@@ -99,7 +129,7 @@ public sealed class PaginationCheckpoint
             }
             return true;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return false;
         }

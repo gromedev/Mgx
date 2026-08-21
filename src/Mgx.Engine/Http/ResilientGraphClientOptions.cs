@@ -65,6 +65,13 @@ public sealed class ResilientGraphClientOptions
     /// <summary>Set to true to disable the rate limiter entirely. Default: false.</summary>
     public bool NoRateLimit { get; init; }
 
+    /// <summary>
+    /// Set to true to disable adaptive request pacing (AIMD back-off, slow start, and
+    /// throttle-proximity damping). Independent of NoRateLimit: the token bucket is the hard
+    /// backstop, the pacer is the proactive layer in front of it. Default: false (pacing ON).
+    /// </summary>
+    public bool NoAdaptivePacing { get; init; }
+
     /// <summary>Maximum queue depth before rejecting requests. Range: 0-100,000. Default: 500.</summary>
     public int RateLimitQueueLimit
     {

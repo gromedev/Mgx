@@ -133,29 +133,33 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                 return;
             }
 
-            // ShouldProcess gate: only for batches containing write operations
+            // -WhatIf is documented as "the cmdlet is not run", without qualification, so the
+            // gate covers reads as well. A read-only batch changes nothing on the server, but it
+            // spends resource units, can be throttled, and emits objects into the pipeline -
+            // none of which is "not run", and none of which the caller asked for.
             var writeOps = _collected.Where(c =>
                 !string.Equals(c.Method, "GET", StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (writeOps.Count > 0)
+            string target;
+            if (writeOps.Count == 0)
             {
-                string target;
-                if (writeOps.All(o => string.Equals(o.Method, writeOps[0].Method, StringComparison.OrdinalIgnoreCase)))
-                {
-                    target = $"{writeOps[0].Method} {_collected.Count} requests via $batch";
-                }
-                else
-                {
-                    var breakdown = writeOps
-                        .GroupBy(o => o.Method.ToUpperInvariant())
-                        .OrderByDescending(g => g.Count())
-                        .Select(g => $"{g.Count()} {g.Key}");
-                    target = $"{_collected.Count} requests ({string.Join(", ", breakdown)}) via $batch";
-                }
-
-                if (!ShouldProcess(target, "Send batch"))
-                    return;
+                target = $"GET {_collected.Count} requests via $batch";
             }
+            else if (writeOps.All(o => string.Equals(o.Method, writeOps[0].Method, StringComparison.OrdinalIgnoreCase)))
+            {
+                target = $"{writeOps[0].Method} {_collected.Count} requests via $batch";
+            }
+            else
+            {
+                var breakdown = writeOps
+                    .GroupBy(o => o.Method.ToUpperInvariant())
+                    .OrderByDescending(g => g.Count())
+                    .Select(g => $"{g.Count()} {g.Key}");
+                target = $"{_collected.Count} requests ({string.Join(", ", breakdown)}) via $batch";
+            }
+
+            if (!ShouldProcess(target, "Send batch"))
+                return;
 
             var client = GetClient();
             var mergedHeaders = Headers != null ? new System.Collections.Hashtable(Headers) : null;
@@ -227,25 +231,24 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                         : null
                 };
 
+                // Status 0 means the operation was never sent, because a chunk before it failed.
+                // It is not a success and must not read as one - the caller has to be able to
+                // tell a write that may have landed from one that certainly did not.
+                if (item.Status == GraphBatchClient.NotSentStatus)
+                    result["NotSent"] = true;
+
                 // Single-argument WriteObject does not enumerate, so the Hashtable is emitted whole
                 WriteObject(result);
             }
 
-            // Emit errors for failed items (enables -ErrorAction Stop, populates $Error)
-            for (int i = 0; i < results.Count; i++)
+            // A chunk's POST failed after earlier chunks were applied. Their results are above;
+            // this says why the rest never went, and NotSent names them.
+            if (batchResult.ChunkFailure != null)
             {
-                var (_, item) = results[i];
-                if (item.Status >= 400)
-                {
-                    var input = submitted[i];
-                    var graphMessage = TryExtractBatchErrorMessage(item);
-                    var errorMessage = graphMessage != null
-                        ? $"{input.Method} {input.Url}: {graphMessage}"
-                        : $"HTTP {item.Status} for {input.Method} {input.Url}";
-                    var ex = new InvalidOperationException(errorMessage);
-                    WriteError(new ErrorRecord(ex, "BatchItemError",
-                        MapStatusToCategory((HttpStatusCode)item.Status), input.Url));
-                }
+                var notSent = batchResult.NotSent.Count;
+                WriteError(new ErrorRecord(batchResult.ChunkFailure, "BatchChunkFailed",
+                    ErrorCategory.NotSpecified,
+                    $"{notSent} of {results.Count} operations were not sent"));
             }
 
             // Write failed items to dead-letter file (append mode)
@@ -258,7 +261,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                     for (int i = 0; i < results.Count; i++)
                     {
                         var (_, item) = results[i];
-                        if (item.Status < 400) continue;
+                        if (item.Status < 400 && item.Status != GraphBatchClient.NotSentStatus) continue;
 
                         var input = submitted[i];
                         var deadLetter = new JsonObject
@@ -288,6 +291,32 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     WriteWarning($"Failed to write dead-letter file '{resolvedDeadLetterPath}': {ex.Message}");
+
+            // Emit errors for failed items (enables -ErrorAction Stop, populates $Error)
+            for (int i = 0; i < results.Count; i++)
+            {
+                var (_, item) = results[i];
+                if (item.Status == GraphBatchClient.NotSentStatus)
+                {
+                    var skipped = submitted[i];
+                    WriteError(new ErrorRecord(
+                        new InvalidOperationException(
+                            $"{skipped.Method} {skipped.Url} was not sent: an earlier chunk failed."),
+                        "BatchItemNotSent", ErrorCategory.NotSpecified, skipped.Url));
+                }
+                else if (item.Status >= 400)
+                {
+                    var input = submitted[i];
+                    var graphMessage = TryExtractBatchErrorMessage(item);
+                    var errorMessage = graphMessage != null
+                        ? $"{input.Method} {input.Url}: {graphMessage}"
+                        : $"HTTP {item.Status} for {input.Method} {input.Url}";
+                    var itemError = new InvalidOperationException(errorMessage);
+                    WriteError(new ErrorRecord(itemError, "BatchItemError",
+                        MapStatusToCategory((HttpStatusCode)item.Status), input.Url));
+                }
+            }
+
                 }
 
                 if (failedCount > 0)

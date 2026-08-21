@@ -23,6 +23,11 @@ public sealed class DeltaState
     [JsonPropertyName("filter")]
     public string? Filter { get; set; }
 
+    // Normalized Prefer tokens the enumeration was taken with (2.1 additive: state files
+    // written before this property deserialize to null - no migration needed).
+    [JsonPropertyName("prefer")]
+    public string? Prefer { get; set; }
+
     [JsonPropertyName("resource")]
     public string Resource { get; set; } = string.Empty;
 
@@ -34,6 +39,15 @@ public sealed class DeltaState
 
     [JsonPropertyName("graphEndpoint")]
     public string GraphEndpoint { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Graph API version the deltaLink was issued by, read from the link rather than from the
+    /// request, so it names the version the token actually came from. Empty on state files
+    /// written before 2.1.0 - including every 2.0.1 one - which is treated as "unknown" rather
+    /// than a mismatch so upgrades keep working.
+    /// </summary>
+    [JsonPropertyName("apiVersion")]
+    public string ApiVersion { get; set; } = string.Empty;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -61,8 +75,11 @@ public sealed class DeltaState
         {
             return (null, DeltaLoadResult.Corrupt);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            // Windows reports a denying ACL as UnauthorizedAccessException, which is not an
+            // IOException - catching only the latter made unreadable state throw there and read
+            // as absent everywhere else.
             return (null, DeltaLoadResult.NotFound);
         }
     }
@@ -85,8 +102,18 @@ public sealed class DeltaState
         lock (lockObj)
         {
             var tmpPath = normalizedPath + ".tmp";
-            File.WriteAllText(tmpPath, json);
-            File.Move(tmpPath, normalizedPath, overwrite: true);
+            try
+            {
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, normalizedPath, overwrite: true);
+            }
+            catch
+            {
+                // The staging file is not the state; leaving it behind only invites a later run
+                // to wonder what it is.
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+                throw;
+            }
         }
     }
 
@@ -110,7 +137,7 @@ public sealed class DeltaState
                 if (File.Exists(tmpPath)) File.Delete(tmpPath);
                 return true;
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 return false;
             }
@@ -123,6 +150,13 @@ public sealed class DeltaState
     /// </summary>
     public static void ValidateWriteAccess(string path)
     {
+        // NOTE: a directory passes the probe below, because the probe writes "<path>.probe"
+        // NEXT to the target rather than to it, so the fail-fast check succeeds and the real
+        // write fails later. Rejecting a directory here would be better, but this method also
+        // validates -OutputFile, where the late failure is what
+        // DeltaQueryTests.Cmdlet_Checkpoint_MidPage_BoundsProgressLostWhenARunDiesInsideAPage
+        // uses to reach a mid-page abort - and that test guards more than this costs. Left as
+        // it is deliberately rather than by omission.
         var dir = Path.GetDirectoryName(Path.GetFullPath(path));
         if (dir != null && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);

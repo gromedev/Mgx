@@ -294,7 +294,11 @@ public class InvokeMgxRequest : MgxCmdletBase
                     includeCount: !string.IsNullOrEmpty(CountVariable) || includeAutoCount,
                     noPageSize: suppressTop);
                 var iterator = new PageIterator(GetClient());
-                var maxItems = (All.IsPresent || Top <= 0) ? 0 : Top;
+                // -All says how far to page, -Top says how much to return, and they are not the
+                // same question: -All used to zero the cap, so asking for a bounded slice of a
+                // large collection walked all of it. Worse, -Top also sets the page size, so the
+                // walk ran at the slice's page size - 150 rows at a time across the whole tenant.
+                var maxItems = Top > 0 ? Top : 0;
                 var headers = BuildHeaders();
                 long itemCount = 0;
 
@@ -598,8 +602,8 @@ public class InvokeMgxRequest : MgxCmdletBase
         for (int i = 0; i < uniqueIds.Count; i++)
             urlToSourceId[urls[i]] = uniqueIds[i];
 
-        // Respect -Top limit per URL
-        var maxItems = (All.IsPresent || Top <= 0) ? 0 : Top;
+        // Respect -Top limit per URL, -All or not.
+        var maxItems = Top > 0 ? Top : 0;
 
         // Pass headers to FetchAllAsync
         var fanOutResult = fanOut.FetchAllAsync(urls, maxItems, headers, CancellationToken)
@@ -765,6 +769,9 @@ public class InvokeMgxRequest : MgxCmdletBase
         {
             var statusCode = (HttpStatusCode)error.StatusCode;
 
+            // A batch result carries no error code, only a status and a message, so a missing
+            // object cannot be told from a missing endpoint here the way it can on the fan-out
+            // path below. This is the write path, where a 404 is the likelier of the two.
             if (statusCode == HttpStatusCode.NotFound)
                 has404 = true;
 
@@ -802,7 +809,10 @@ public class InvokeMgxRequest : MgxCmdletBase
         {
             var statusCode = GetStatusCodeFromException(ex);
 
-            if (statusCode == HttpStatusCode.NotFound)
+            // Only a 404 that might mean "no such endpoint" is worth a beta hint. A 404 naming
+            // a missing object says the path was fine, and hinting over it sends the caller to
+            // re-run against beta for a request that fails there too.
+            if (statusCode == HttpStatusCode.NotFound && !IsObjectMissing(ex))
                 has404 = true;
 
             if (SkipNotFound.IsPresent && statusCode == HttpStatusCode.NotFound)

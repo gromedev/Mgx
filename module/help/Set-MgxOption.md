@@ -13,7 +13,7 @@ Configure resilience options for all Mgx cmdlets.
 ## SYNTAX
 
 ```
-Set-MgxOption [-RateLimitBurst <Int32>] [-RateLimitPerSecond <Int32>] [-NoRateLimit]
+Set-MgxOption [-RateLimitBurst <Int32>] [-RateLimitPerSecond <Int32>] [-NoRateLimit] [-NoAdaptivePacing]
  [-RateLimitQueueLimit <Int32>] [-MaxRetryAfterSeconds <Int32>] [-MaxRetryAttempts <Int32>]
  [-TotalTimeoutSeconds <Int32>] [-AttemptTimeoutSeconds <Int32>] [-CircuitBreakerDurationSeconds <Int32>]
  [-CircuitBreakerFailureRatio <Double>] [-CircuitBreakerMinThroughput <Int32>]
@@ -56,6 +56,21 @@ Set-MgxOption -Reset
 Restores all options to their default values.
 
 ## PARAMETERS
+
+### -BatchChunkConcurrency
+Number of $batch chunks executed concurrently. The default of 1 runs chunks sequentially, which is what keeps inter-chunk pacing meaningful; raising it trades that pacing for throughput and makes server-side write throttling more likely. Range: 1-10. Default: 1.
+
+```yaml
+Type: Int32
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: 1
+Accept pipeline input: False
+Accept wildcard characters: False
+```
 
 ### -BatchItemsPerSecond
 Target throughput for batch item pacing in items/sec. Controls inter-chunk delay in sequential batch execution to avoid burst-and-stall against Graph's server-side write throttle. Set to 0 to disable pacing. Range: 0-1000. Default: 20.
@@ -178,7 +193,22 @@ Accept wildcard characters: False
 ```
 
 ### -NoRateLimit
-Disable the client-side rate limiter entirely.
+Disable the client-side rate limiter entirely. This also disables batch item pacing, so any -BatchItemsPerSecond you set alongside it has no effect; Set-MgxOption warns when both are given.
+
+```yaml
+Type: SwitchParameter
+Parameter Sets: (All)
+Aliases:
+
+Required: False
+Position: Named
+Default value: None
+Accept pipeline input: False
+Accept wildcard characters: False
+```
+
+### -NoAdaptivePacing
+Disable adaptive request pacing (AIMD back-off after 429s, slow start on cold workloads, and throttle-proximity damping). Pacing is ON by default and independent of -NoRateLimit: the token bucket is the hard backstop, the pacer is the proactive layer in front of it. See about_Mgx_Tuning "ADAPTIVE PACING".
 
 ```yaml
 Type: SwitchParameter

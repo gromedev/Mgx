@@ -54,6 +54,13 @@ LONG DESCRIPTION
         Expand-MgxRelation enriches Graph objects with related data via
         concurrent fan-out, handling both collection and singleton endpoints.
 
+    Content downloads
+        Get-MgxContent downloads file and media content whole or by byte
+        range. Graph answers a content request with a redirect to a
+        pre-authenticated download host; that second hop carries no bearer
+        token, its host is validated against an allowlist before anything is
+        sent, and the capability URL is kept out of debug output.
+
 CMDLETS
     Invoke-MgxRequest
         General-purpose resilient client for any Microsoft Graph endpoint.
@@ -69,6 +76,10 @@ CMDLETS
 
     Sync-MgxDelta
         Incremental sync via Microsoft Graph delta queries.
+
+    Get-MgxContent
+        Download file and media content, whole or by byte range, over the
+        two-hop pre-authenticated download path.
 
     Enable-MgxResilience
         Inject Polly resilience into the Microsoft.Graph SDK HTTP transport.
@@ -90,7 +101,23 @@ CMDLETS
 
 RESILIENCE
     All Mgx cmdlets share a single Polly resilience pipeline composed of
-    four layers:
+    four layers, preceded by an adaptive pacing gate:
+
+    Adaptive pacing gate (on by default)
+        Spaces requests BEFORE they are sent, rather than reacting after a
+        429. It learns a rate per workload from throttling signals -
+        additive increase while clean, multiplicative decrease on a
+        throttle - and keeps Drive, Directory and other workloads in
+        separate buckets, so one throttled workload does not slow the
+        rest. A cold session starts conservatively and ramps up.
+
+        It applies to every request, including the Enable-MgxResilience
+        SDK-bridge path. Batch outer POSTs are the one exemption: batching
+        runs its own item-level AIMD, and two controllers on one workload
+        would compound their backoff.
+
+        Disable with Set-MgxOption -NoAdaptivePacing. Inspect the learned
+        state with Get-MgxTelemetry.
 
     Rate limiter (token bucket)
         Prevents outbound request bursts from triggering Graph API
@@ -196,6 +223,7 @@ SEE ALSO
     Export-MgxCollection
     Expand-MgxRelation
     Sync-MgxDelta
+    Get-MgxContent
     Enable-MgxResilience
     Disable-MgxResilience
     Get-MgxResilience

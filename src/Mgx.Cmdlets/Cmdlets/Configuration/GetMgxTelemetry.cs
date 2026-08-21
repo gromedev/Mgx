@@ -38,6 +38,11 @@ public class GetMgxTelemetry : PSCmdlet
             TotalElapsedMs = summary.ElapsedMs,
             ResourceUnitsConsumed = summary.ResourceUnitsConsumed,
             BatchItemThrottles = summary.BatchItemThrottles,
+            AdaptivePacingWaitMs = summary.AdaptivePacingWaitMs,
+            AdaptivePacingActivations = summary.AdaptivePacingActivations,
+            LastThrottlePercentage = summary.LastThrottlePercentage,
+            PacingState = summary.PacingState,
+            ContentBytesDownloaded = summary.ContentBytesDownloaded,
         });
     }
 }

@@ -19,6 +19,7 @@ namespace Mgx.Cmdlets.Base;
 public abstract class MgxCmdletCore : PSCmdlet, IDisposable
 {
     private CancellationTokenSource _cts = new();
+    private readonly CancellationToken _token;
     private int _disposed; // 0 = not disposed, 1 = disposed (Interlocked for thread safety)
 
     // Regex gate for DateTime parsing: requires YYYY-MM-DDT prefix.
@@ -26,9 +27,31 @@ public abstract class MgxCmdletCore : PSCmdlet, IDisposable
     private static readonly Regex Iso8601Pattern = new(
         @"^\d{4}-\d{2}-\d{2}[T ]", RegexOptions.Compiled);
 
-    protected CancellationToken CancellationToken => _cts.Token;
+    /// <summary>
+    /// The cancellation token for this invocation.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a cached COPY rather than <c>_cts.Token</c>. StopProcessing cancels and then
+    /// disposes the source, and reading <c>Token</c> on a disposed source is documented to throw
+    /// ObjectDisposedException on every framework moniker including net8.0. Several catch blocks
+    /// read this property while unwinding a Ctrl-C - SyncMgxDelta and ExportMgxCollection consult
+    /// it before deciding whether to promote or delete a temp file - so a throw there would
+    /// replace the OperationCanceledException and skip the cleanup, orphaning a partial file.
+    ///
+    /// .NET 10 happens not to throw in practice, but the documented contract specifies
+    /// ObjectDisposedException for every moniker including net8.0, which is what the module
+    /// targets. A token struct copied before disposal stays fully usable, so caching costs
+    /// nothing and removes the dependency on undocumented leniency.
+    /// </remarks>
+    protected CancellationToken CancellationToken => _token;
 
     #region Lifecycle
+
+    protected MgxCmdletCore()
+    {
+        // Copy the token once, while the source is guaranteed alive.
+        _token = _cts.Token;
+    }
 
     protected override void StopProcessing()
     {

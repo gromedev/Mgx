@@ -21,6 +21,7 @@ public class GetMgxOption : PSCmdlet
             RateLimitPerSecond = opts.RateLimitPerSecond,
             NoRateLimit = opts.NoRateLimit,
             RateLimitQueueLimit = opts.RateLimitQueueLimit,
+            NoAdaptivePacing = opts.NoAdaptivePacing,
             MaxRetryAttempts = opts.MaxRetryAttempts,
             MaxRetryAfterSeconds = opts.MaxRetryAfterSeconds,
             TotalTimeoutSeconds = opts.TotalTimeoutSeconds,

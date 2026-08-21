@@ -2,6 +2,18 @@
 
 Reproduces every number in the main README's Benchmarks section. Each script is self-contained; `run.ps1` runs the full suite and regenerates the README tables.
 
+## Resource units
+
+Every result now carries a `Telemetry` block alongside the timing: resource units consumed,
+request counts, throttle retries, and pacing waits. Wall time alone describes half the cost -
+Graph throttles directory workloads on a resource-unit budget, so two runs with identical
+durations can sit very differently against that budget.
+
+`RuPerRequest` is the figure to watch when comparing query shapes: adding `$select` measurably
+lowers it. Arms that do not load Mgx (the bare-SDK comparisons) record `Telemetry: null`, since
+there is no session telemetry to read - expected, not a failure.
+
+
 ## Prerequisites
 
 - PowerShell 7.5+, `Microsoft.Graph.Authentication`, `Microsoft.Graph.Users`
@@ -26,6 +38,13 @@ Never point these scripts at a production tenant. Benchmarks 04 and 07 create an
 | 07 | `07-adaptive-pacing.ps1` | AIMD write pacing vs naive full-speed writes under real throttling | yes |
 | 08 | `08-delta-sync.ps1` | Delta sync: initial pull, then incremental cost | yes |
 | 09 | `09-kill-resume.ps1` | Checkpoint/resume correctness: exact count, zero duplicates | yes |
+| 10 | `10-pacing-under-real-throttling.ps1` | Adaptive pacing pays for itself against genuine 429s | yes |
+| 11 | `11-throttle-accuracy.ps1` | Under throttling, retrieval hinges on honoring `Retry-After` | yes |
+| 12 | `12-delta-replay.ps1` | Delta enumerations repeat objects; replay factor vs ground truth | yes |
+| 13 | `13-resource-unit-rate.ps1` | Sustained RU ceiling vs burst allowance, at held send rates | yes |
+
+11-13 are not in `run.ps1`: each deliberately drives the tenant to 429s, so they run standalone
+(10 also throttles on purpose, which is why `run.ps1` puts it last).
 
 ## Methodology
 

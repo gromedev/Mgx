@@ -107,7 +107,7 @@ public sealed class ConcurrentFanOut
 
                     // Validate nextLink host matches initial URL (prevents SSRF via
                     // crafted Graph responses redirecting authenticated requests)
-                    nextLink = NextLinkValidator.Validate(page.NextLink, expectedHost);
+                    nextLink = NextLinkValidator.ValidateOrThrow(page.NextLink, expectedHost);
                 }
 
                 results[url] = allItems.ToArray();

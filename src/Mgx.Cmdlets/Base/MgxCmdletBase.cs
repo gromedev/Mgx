@@ -691,6 +691,14 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     }
 
     /// <summary>
+    /// Whether the active transport is the mgx-owned clean client (AllowAutoRedirect off)
+    /// rather than the borrowed SDK client. The content path requires ownership: the SDK
+    /// client ships a RedirectHandler that auto-follows a content 302 to a host mgx never
+    /// validated, so Get-MgxContent fails closed when this is false.
+    /// </summary>
+    protected static bool TransportIsOwned => s_ownsHttpClient;
+
+    /// <summary>
     /// Drain buffered verbose messages from the resilience pipeline.
     /// Must be called on the pipeline thread (after .GetAwaiter().GetResult() returns).
     /// OnRetry fires on thread pool threads after Task.Delay, so WriteVerbose cannot
@@ -723,6 +731,246 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     internal static void SetClientOptions(ResilientGraphClientOptions options)
     {
         s_clientOptions = options ?? ResilientGraphClientOptions.Default;
+    }
+
+    /// <summary>
+    /// True when nothing else holds the file. FileShare.None is honoured between .NET processes
+    /// on both Windows and Unix, so a writer that has it open makes this fail rather than let a
+    /// sweep take a file out from under it.
+    /// </summary>
+    private static bool CanTakeExclusively(string path)
+    {
+        try
+        {
+            using var _ = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
+    /// where every such file is an orphan by definition - except one a live run still holds,
+    /// which CanTakeExclusively keeps out of reach.
+    /// </summary>
+    protected void DeleteStaleTemps(string outputPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            foreach (var stale in Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp").ToList())
+            {
+                // "Orphan" is an assumption about a file this run did not create, and a second
+                // export running against the same output right now owns a file matching the same
+                // glob. Windows refuses to delete a file someone holds open, so it declined by
+                // accident; Unix does not, and the other run went on writing into an unlinked
+                // inode and lost everything it had fetched. Ask for the file exclusively first -
+                // if that fails, someone is using it and it is not an orphan.
+                if (!CanTakeExclusively(stale))
+                {
+                    WriteVerbose($"Left '{Path.GetFileName(stale)}' alone: another run is writing to it.");
+                    continue;
+                }
+                try
+                {
+                    File.Delete(stale);
+                    WriteVerbose($"Deleted an orphaned temp file from an earlier interrupted run: {Path.GetFileName(stale)}");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    WriteWarning($"Could not delete orphaned temp file '{stale}': {ex.Message}. Delete it manually.");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort; a sweep failure must never stop the run.
+        }
+    }
+
+    /// <summary>
+    /// The temp a checkpoint names, or null when it cannot be used. A checkpoint is untrusted
+    /// input once it is on disk, so the recorded name must be one a run could actually have
+    /// written - "{output}.{32-hex}.tmp" - and must not be the output itself. Anything else
+    /// (the checkpoint file, the delta state, a crafted path) would be copied into the output
+    /// as data and then deleted as the spent temp. The file must also be at least as long as
+    /// the checkpoint promised, since a shorter one means the items it counted are not all
+    /// there.
+    /// </summary>
+    private static string? ResolveNamedTemp(string outputPath, string tempFileName, long dataLength)
+    {
+        if (dataLength <= 0) return null;
+        var dir = Path.GetDirectoryName(outputPath);
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return null;
+        if (!string.Equals(tempFileName, Path.GetFileName(tempFileName), StringComparison.Ordinal))
+            return null;
+        if (!IsRunTempName(Path.GetFileName(outputPath), tempFileName)) return null;
+        var tempPath = Path.Combine(dir, tempFileName);
+        if (string.Equals(Path.GetFullPath(tempPath), Path.GetFullPath(outputPath),
+                StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (!File.Exists(tempPath)) return null;
+        if (new FileInfo(tempPath).Length < dataLength) return null;
+        return tempPath;
+    }
+
+    /// <summary>
+    /// True when <paramref name="candidate"/> is a name a fresh run gives its temp:
+    /// the output's own name, a dot, 32 lowercase hex digits (Guid "N"), and ".tmp".
+    /// </summary>
+    private static bool IsRunTempName(string outputFileName, string candidate)
+    {
+        var prefix = outputFileName + ".";
+        const string suffix = ".tmp";
+        if (candidate.Length != prefix.Length + 32 + suffix.Length) return false;
+        if (!candidate.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        if (!candidate.EndsWith(suffix, StringComparison.Ordinal)) return false;
+        for (var i = prefix.Length; i < prefix.Length + 32; i++)
+        {
+            if (candidate[i] is (>= '0' and <= '9') or (>= 'a' and <= 'f')) continue;
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Replace the output with the first <paramref name="dataLength"/> bytes of a named temp,
+    /// then remove the temp. A fresh run that finishes moves its temp over whatever the output
+    /// held, so recovering an unfinished one has to reach that same file; appending instead
+    /// would leave the previous run's rows - already consumed - in front of this one's. Unlike
+    /// the glob-and-newest form, this takes exactly the file the checkpoint recorded, so a
+    /// leftover from an unrelated run cannot be merged in. Bytes rather than lines: the length
+    /// was taken from the writer's own position, so it cannot disagree with itself about line
+    /// endings or a torn final line. Returns false when the temp is absent or shorter than the
+    /// checkpoint promised, which means the caller must not resume past the items it counted.
+    /// </summary>
+    protected static bool TryPromoteNamedTemp(string outputPath, string tempFileName, long dataLength)
+    {
+        try
+        {
+            var tempPath = ResolveNamedTemp(outputPath, tempFileName, dataLength);
+            if (tempPath == null) return false;
+
+            // Staged like the other forms, so the destination is replaced in one Move rather
+            // than truncated and refilled in place.
+            var adoptPath = outputPath + ".adopt";
+            using (var writer = new FileStream(adoptPath, FileMode.Create, FileAccess.Write))
+            {
+                using var temp = new FileStream(tempPath, FileMode.Open, FileAccess.Read);
+                var buffer = new byte[81920];
+                long remaining = dataLength;
+                while (remaining > 0)
+                {
+                    var read = temp.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                    if (read <= 0) break;
+                    writer.Write(buffer, 0, read);
+                    remaining -= read;
+                }
+                if (remaining > 0)
+                {
+                    writer.Dispose();
+                    File.Delete(adoptPath);
+                    return false;
+                }
+            }
+            File.Move(adoptPath, outputPath, overwrite: true);
+            try { File.Delete(tempPath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Cut the output back to the length a checkpoint recorded for it, dropping anything the
+    /// interrupted run wrote after its last save. Those items are re-fetched, so dropping them
+    /// is what keeps a resume from duplicating them. Returns false when the output is shorter
+    /// than recorded, which means it is no longer the file the checkpoint describes.
+    /// </summary>
+    protected static bool TryTrimOutputToCheckpoint(string outputPath, long dataLength)
+    {
+        try
+        {
+            // A checkpoint is untrusted input once it is on disk, and SetLength rejects a
+            // negative length with an ArgumentOutOfRangeException the catch below does not
+            // cover - so a hand-edited length escaped as a terminating error naming neither the
+            // checkpoint nor the file, and left itself on disk to fail the same way next run.
+            // ResolveNamedTemp already guards its own length; this is the same guard.
+            if (dataLength < 0) return false;
+            if (!File.Exists(outputPath)) return false;
+            var actual = new FileInfo(outputPath).Length;
+            if (actual < dataLength) return false;
+            if (actual == dataLength) return true;
+            using var fs = new FileStream(outputPath, FileMode.Open, FileAccess.Write);
+            fs.SetLength(dataLength);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Recovers a fresh-run JSONL job that was interrupted before its temp file was promoted,
+    /// from a checkpoint that predates the recorded temp name and length. With only a line
+    /// count and the newest matching temp to go on, this is safe solely when no output exists:
+    /// everything the run wrote is then in its temp, and creating the output from it is what a
+    /// finishing run's own promotion would have done. Against an existing output there is no
+    /// way to tell whose items the temp holds, so the caller must re-enumerate instead.
+    /// Copies exactly <paramref name="itemCount"/> lines - content beyond the last flush may
+    /// be absent or torn - then removes the temp. Returns false when nothing usable exists,
+    /// leaving the caller to the stale-checkpoint path.
+    /// </summary>
+    protected static bool TryAdoptOrphanedTemp(string outputPath, long itemCount)
+    {
+        try
+        {
+            if (itemCount <= 0) return false;
+            if (File.Exists(outputPath)) return false;
+            var dir = Path.GetDirectoryName(outputPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+            var temp = Directory.EnumerateFiles(dir, Path.GetFileName(outputPath) + ".*.tmp")
+                .Select(p => new FileInfo(p))
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .FirstOrDefault();
+            if (temp == null) return false;
+
+            // Staged so the output appears in one Move. A merge that dies halfway leaves only
+            // the staging file behind, and the caller keeps its checkpoint - the safe direction.
+            long copied = 0;
+            var adoptPath = outputPath + ".adopt";
+            using (var writer = new StreamWriter(adoptPath, append: false))
+            {
+                using var reader = new StreamReader(temp.FullName);
+                string? line;
+                while (copied < itemCount && (line = reader.ReadLine()) != null)
+                {
+                    writer.WriteLine(line);
+                    copied++;
+                }
+            }
+            if (copied < itemCount)
+            {
+                // Temp holds less than the checkpoint promises - unusable.
+                File.Delete(adoptPath);
+                return false;
+            }
+            File.Move(adoptPath, outputPath, overwrite: true);
+            temp.Delete();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     #region Shared URL and header builders
@@ -823,13 +1071,38 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         $"Wait {s_clientOptions.CircuitBreakerDurationSeconds}s or run Get-MgxTelemetry for details. " +
         $"Tune with Set-MgxOption -CircuitBreakerFailureRatio / -CircuitBreakerMinThroughput.";
 
-    protected void WriteBetaHintIfApplicable(HttpStatusCode statusCode, string apiVersion)
+    /// <summary>
+    /// Codes measured to mean the PATH was fine and the OBJECT was not there, so a beta hint
+    /// over them sends the caller to re-run a request that fails there too. Only codes with
+    /// demonstrated semantics belong here. Request_ResourceNotFound does NOT qualify: Graph
+    /// returns it both for a missing directory object and for a beta-only segment on v1.0
+    /// (measured against /users/{id} and /users/{id}/profile), so it cannot be told apart and
+    /// the hedged hint stays. itemNotFound is the drive service reporting an absent item - an
+    /// unknown drive segment is a 400, not a 404, so the ambiguity does not arise there.
+    /// </summary>
+    private static readonly HashSet<string> ObjectMissingCodes = new(StringComparer.OrdinalIgnoreCase)
     {
-        if (statusCode == HttpStatusCode.NotFound &&
-            string.Equals(apiVersion, "v1.0", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteWarning("This endpoint may only be available in beta. Retry with -ApiVersion beta.");
-        }
+        "itemNotFound",
+    };
+
+    /// <summary>True when the exception is a Graph 404 that names a missing object.</summary>
+    protected static bool IsObjectMissing(Exception ex) =>
+        ex is GraphServiceException { StatusCode: HttpStatusCode.NotFound } g
+        && g.ErrorCode != null
+        && ObjectMissingCodes.Contains(g.ErrorCode);
+
+    protected void WriteBetaHintIfApplicable(HttpStatusCode statusCode, string apiVersion,
+        string? errorCode = null)
+    {
+        if (statusCode != HttpStatusCode.NotFound ||
+            !string.Equals(apiVersion, "v1.0", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        // A missing user, group or drive item is not an absent endpoint.
+        if (errorCode != null && ObjectMissingCodes.Contains(errorCode))
+            return;
+
+        WriteWarning("This endpoint may only be available in beta. Retry with -ApiVersion beta.");
     }
 
     protected static ErrorCategory MapStatusToCategory(HttpStatusCode statusCode) => statusCode switch
@@ -858,7 +1131,7 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         {
             case GraphServiceException gex:
                 if (apiVersion != null)
-                    WriteBetaHintIfApplicable(gex.StatusCode, apiVersion);
+                    WriteBetaHintIfApplicable(gex.StatusCode, apiVersion, gex.ErrorCode);
                 WriteError(new ErrorRecord(gex, gex.ErrorCode ?? "GraphError",
                     MapStatusToCategory(gex.StatusCode), target));
                 return true;

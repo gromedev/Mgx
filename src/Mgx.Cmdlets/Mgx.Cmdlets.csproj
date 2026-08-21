@@ -23,11 +23,21 @@
     <ProjectReference Include="..\Mgx.Engine\Mgx.Engine.csproj" />
   </ItemGroup>
 
-  <!-- Post-build: auto-stage DLLs into module/ so IDE builds are never stale -->
-  <Target Name="StageModuleOutput" AfterTargets="Build">
+  <!-- Post-build: auto-stage DLLs into module/ so IDE builds are never stale.
+
+       Release only, deliberately. This target used to run for every configuration, which
+       meant `dotnet test` - Debug by default - silently replaced a Release-staged module/
+       with Debug binaries. The natural release sequence is build.ps1, then tests, then
+       Publish-Module, so the test step undid the build step and the Gallery would have
+       received an unoptimised build with no warning anywhere. CI never hit it (it builds
+       Release and tests without rebuilding); publishing from a developer machine did.
+
+       A Debug build now leaves module/ alone. To stage Debug on purpose, ask for it:
+       ./build.ps1 -Configuration Debug, which copies explicitly and does not rely on this. -->
+  <Target Name="StageModuleOutput" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
-      <ModuleRoot>$(MSBuildThisFileDirectory)..\..\module</ModuleRoot>
-      <DepsDir>$(ModuleRoot)\Dependencies</DepsDir>
+      <ModuleRoot>$(MSBuildThisFileDirectory)../../module</ModuleRoot>
+      <DepsDir>$(ModuleRoot)/Dependencies</DepsDir>
     </PropertyGroup>
 
     <MakeDir Directories="$(DepsDir)" />

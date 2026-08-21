@@ -29,6 +29,26 @@ internal static partial class GraphRequestTracer
     private static partial Regex SensitiveJsonValue();
 
     /// <summary>
+    /// A pre-authenticated URL is a credential whose property name says nothing about it:
+    /// "@microsoft.graph.downloadUrl" contains none of password/secret/credential/token/key, so
+    /// SensitiveJsonValue leaves it whole and the tempauth JWT reaches -Debug output. Match on
+    /// the VALUE instead - a URL carrying one of the capability parameters Graph, SharePoint and
+    /// the download hosts actually use. Deliberately not "every URL": @odata.nextLink is a URL
+    /// too, and losing it from a trace would remove the thing paging bugs are diagnosed with.
+    /// </summary>
+    [GeneratedRegex("\"(https?://[^\"]*?(?:tempauth|guestaccesstoken|authkey|X-Amz-Signature|(?<![a-z])sig)=)[^\"]*\"",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex CapabilityUrlValue();
+
+    /// <summary>
+    /// Property names that carry a pre-authenticated URL even when the value does not expose a
+    /// recognisable parameter - the short-form download hosts put the capability in the path.
+    /// </summary>
+    [GeneratedRegex("\"([^\"]*downloadurl[^\"]*)\"\\s*:\\s*\"[^\"]*\"",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex DownloadUrlProperty();
+
+    /// <summary>
     /// Trace line for an outgoing request. <paramref name="attempt"/> is 1-based so retries are visible.
     /// </summary>
     internal static string FormatRequest(HttpRequestMessage request, byte[]? body, int attempt)
@@ -76,7 +96,8 @@ internal static partial class GraphRequestTracer
         {
             sb.AppendLine().Append("  Headers:");
             foreach (var header in headers)
-                sb.AppendLine().Append("    ").Append(header.Key).Append(": ").Append(Join(header.Value));
+                sb.AppendLine().Append("    ").Append(header.Key).Append(": ")
+                  .Append(RedactHeaderValue(header.Key, Join(header.Value)));
         }
 
         if (!string.IsNullOrEmpty(body))
@@ -95,10 +116,30 @@ internal static partial class GraphRequestTracer
 
     private static string Join(IEnumerable<string> values) => string.Join(", ", values);
 
-    /// <summary>Redact credential-looking JSON properties, then truncate.</summary>
+    /// <summary>
+    /// A content 302's Location is a pre-authenticated URL: it grants the file bytes without a
+    /// bearer token, so tracing it verbatim writes a live credential into -Debug output. The
+    /// capability is not always in the query - some download hosts carry it in the path - so
+    /// keep only scheme and host, which is the whole diagnostic value of the header anyway.
+    /// The JSON-body redaction cannot reach header values, hence this hook.
+    /// </summary>
+    private static string RedactHeaderValue(string name, string value)
+    {
+        if (!name.Equals("Location", StringComparison.OrdinalIgnoreCase)) return value;
+        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            ? $"{uri.Scheme}://{uri.IdnHost}/<redacted>"
+            : "<redacted>";
+    }
+
+    /// <summary>Redact credential-looking JSON properties and pre-authenticated URLs, then truncate.</summary>
     private static string Sanitize(string body)
     {
         var redacted = SensitiveJsonValue().Replace(body, "\"$1\": \"<redacted>\"");
+        // Property-name match first: covers a downloadUrl whose capability sits in the path.
+        redacted = DownloadUrlProperty().Replace(redacted, "\"$1\": \"<redacted>\"");
+        // Then any remaining URL value carrying a capability parameter, keeping the parameter
+        // name visible so a trace still shows WHICH kind of URL was redacted.
+        redacted = CapabilityUrlValue().Replace(redacted, "\"$1<redacted>\"");
         return redacted.Length <= MaxBodyChars
             ? redacted
             : redacted[..MaxBodyChars] + $"... [truncated, {redacted.Length - MaxBodyChars} more chars]";

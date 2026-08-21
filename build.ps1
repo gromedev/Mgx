@@ -19,7 +19,11 @@ Write-Host "Building Mgx ($Configuration)..." -ForegroundColor Cyan
 # checked before the compile, failing in a second instead of a minute.
 $manifestVersion = (Import-PowerShellDataFile (Join-Path $ModuleRoot 'mgx.psd1')).ModuleVersion
 $propsFile = Join-Path $PSScriptRoot 'Directory.Build.props'
-$propsVersion = ([xml](Get-Content $propsFile -Raw)).Project.PropertyGroup.Version
+# Select-Object -First on a filtered list: .Project.PropertyGroup.Version returns an ARRAY the
+# moment a second top-level <PropertyGroup> exists, and comparing an array to a string does not
+# fail loudly - it just stops gating.
+$propsVersion = @(([xml](Get-Content $propsFile -Raw)).Project.PropertyGroup.Version |
+    Where-Object { $_ }) | Select-Object -First 1
 if (-not $propsVersion) {
     throw "Version gate failed: no <Version> found in $propsFile"
 }
@@ -44,7 +48,7 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 # Copy Cmdlets + Engine DLLs (load in default ALC)
 # Detect TFM from csproj instead of hardcoding (survives TFM upgrades)
 $csproj = [xml](Get-Content "$PSScriptRoot/src/Mgx.Cmdlets/Mgx.Cmdlets.csproj")
-$tfm = $csproj.Project.PropertyGroup.TargetFramework
+$tfm = @($csproj.Project.PropertyGroup.TargetFramework | Where-Object { $_ }) | Select-Object -First 1
 $CmdletsOutput = Join-Path $PSScriptRoot "src/Mgx.Cmdlets/bin/$Configuration/$tfm"
 Copy-Item "$CmdletsOutput/Mgx.Cmdlets.dll" $ModuleRoot -Force
 Copy-Item "$CmdletsOutput/Mgx.Cmdlets.pdb" $ModuleRoot -Force -ErrorAction SilentlyContinue
@@ -100,18 +104,27 @@ if ($orphans) {
     throw "Module integrity check failed: Mgx assemblies found in Dependencies/ (should only be in root): $($orphans.Name -join ', ')"
 }
 
-# Write build hash for staleness detection
-$hashInputFiles = @(
-    (Join-Path $ModuleRoot 'Mgx.Cmdlets.dll'),
-    (Join-Path $ModuleRoot 'Mgx.Engine.dll')
-) | Where-Object { Test-Path $_ }
-$combinedHash = ($hashInputFiles | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash }) -join '|'
-$buildStamp = @{
-    Hash      = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($combinedHash))) -Algorithm SHA256).Hash
-    Timestamp = (Get-Date -Format 'o')
-    Configuration = $Configuration
+# Compiled help is generated from module/help/*.md, and nothing regenerated it: the shipped
+# MAML drifted two releases behind its own source, so Get-Help documented output shapes removed
+# in 2.0.0, denied a parameter added in 2.1.0, and gave a range the cmdlet rejects. Regenerating
+# on every build is what stops the two diverging again.
+$helpSource = Join-Path $PSScriptRoot 'module/help'
+$helpOutput = Join-Path $ModuleRoot 'en-US'
+if (Test-Path $helpSource) {
+    # Already-imported counts: -ListAvailable only searches PSModulePath, so a platyPS loaded
+    # from an explicit path (Save-Module into a folder, then Import-Module by path - which is how
+    # a CI box without a profile gets one) looked absent and failed the build.
+    if ((Get-Module platyPS) -or (Get-Module -ListAvailable platyPS)) {
+        if (-not (Get-Module platyPS)) { Import-Module platyPS -ErrorAction Stop }
+        New-ExternalHelp -Path $helpSource -OutputPath $helpOutput -Force | Out-Null
+        Write-Host "Regenerated compiled help from module/help" -ForegroundColor DarkGray
+    }
+    else {
+        throw ("platyPS is not installed, so module/en-US/Mgx.Cmdlets.dll-Help.xml cannot be " +
+            "regenerated and would ship stale - which is how Get-Help came to describe output " +
+            "shapes removed two releases earlier. Install-Module platyPS -Scope CurrentUser.")
+    }
 }
-$buildStamp | ConvertTo-Json | Set-Content (Join-Path $ModuleRoot '.build-hash') -Force
 
 Write-Host "`nBuild complete!" -ForegroundColor Green
 Write-Host "Module output: $ModuleRoot" -ForegroundColor Yellow

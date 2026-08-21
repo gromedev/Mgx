@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Threading.RateLimiting;
 using Polly;
@@ -50,16 +51,36 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
         context.Properties.Set(ResiliencePipelineFactory.IsIdempotentKey, request.Method != HttpMethod.Post);
         context.Properties.Set(ResiliencePipelineFactory.VerboseWriterKey,
             (Action<string>)(msg => _pendingVerbose.Enqueue(msg)));
+        var bucket = AdaptivePacing.Classify(request.RequestUri?.ToString());
+        // Telemetry parity with ResilientGraphClient.SendAsync. Without it an
+        // Enable-MgxResilience session reported TotalRequests=0 alongside a non-zero retry
+        // count - self-contradictory, and a divide-by-zero for the throttle-rate calculation
+        // the Get-MgxTelemetry help tells users to compute.
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
+        var succeeded = false;
+        var recorded = false;
         try
         {
+            // Same proactive gate as ResilientGraphClient.SendAsync. This is the
+            // Enable-MgxResilience path: SDK cmdlet traffic bypasses ResilientGraphClient
+            // entirely, so pacing hooked only there would skip SDK-wrapped workloads.
+            var pacedMs = await AdaptiveRequestPacer.WaitAsync(bucket, cancellationToken);
+            if (pacedMs > 0)
+            {
+                MgxTelemetryCollector.Current.RecordPacingWait(pacedMs);
+                _pendingVerbose.Enqueue($"Adaptive pacing: waited {pacedMs}ms before sending ({bucket} workload)");
+            }
+
             if (_rateLimiter != null)
             {
+                var limiterSw = Stopwatch.StartNew();
                 lease = await _rateLimiter.AcquireAsync(1, cancellationToken);
+                MgxTelemetryCollector.Current.RecordRateLimiterWait(limiterSw.ElapsedMilliseconds);
                 if (!lease.IsAcquired)
                     throw new InvalidOperationException("Rate limit exceeded. Too many concurrent requests. Reduce -Concurrency on fan-out cmdlets, increase the queue with Set-MgxOption -RateLimitQueueLimit, or disable with Set-MgxOption -NoRateLimit.");
             }
 
-            return await _pipeline.ExecuteAsync(
+            var result = await _pipeline.ExecuteAsync(
                 async ctx =>
                 {
                     // Clone on every attempt, including the first. On the SDK bridge path
@@ -90,12 +111,48 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
                         clone.Content = freshContent;
                     }
 
-                    return await base.SendAsync(clone, ctx.CancellationToken);
+                    // Per-attempt network time, measured INSIDE the pipeline so retry delays are
+                    // excluded - the same placement the owned client uses. Without this,
+                    // Get-MgxTelemetry reported "HTTP Time (ms): 0" for every Enable-MgxResilience
+                    // session, which is indistinguishable from no network time at all.
+                    // NOTE: deliberately not AdaptiveRequestPacer.RecordLatency - see the comment
+                    // after ExecuteAsync for why the pacer baseline stays off this path.
+                    // Caveat: on this path the SDK's own retry handler sleeps INSIDE
+                    // base.SendAsync, so its Retry-After waits land in HttpMs while
+                    // RetryDelayMs stays 0 (that counts Polly's waits, and Polly is outside).
+                    // Separating them would mean reaching into the SDK's handler chain.
+                    // Bounded by AttemptTimeoutSeconds, and the alternative was reporting 0.
+                    var httpSw = Stopwatch.StartNew();
+                    var attempt = await base.SendAsync(clone, ctx.CancellationToken);
+                    MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);
+                    return attempt;
                 },
                 context);
+
+            // Feed the pacer's signal state (proximity percentage, final 429). Latency is
+            // not recorded on this path: timing here would include retry delays inside
+            // ExecuteAsync, which would pollute the network-time baseline.
+            AdaptiveRequestPacer.RecordResponse(bucket, result);
+
+            // A 3xx is an error on this path: the SDK bridge does not follow redirects itself
+            // and every caller surfaces them, so only 2xx counts as success here.
+            succeeded = result.IsSuccessStatusCode;
+            if (result.Headers.TryGetValues("x-ms-resource-unit", out var ruValues)
+                && long.TryParse(System.Linq.Enumerable.FirstOrDefault(ruValues), out var ru)
+                && ru > 0)
+            {
+                MgxTelemetryCollector.Current.RecordResourceUnit(ru);
+            }
+            return result;
         }
         finally
         {
+            if (!recorded)
+            {
+                recorded = true;
+                totalSw.Stop();
+                MgxTelemetryCollector.Current.RecordRequest(succeeded, totalSw.ElapsedMilliseconds);
+            }
             // Drain buffered verbose messages on the calling thread
             if (VerboseWriter != null)
             {

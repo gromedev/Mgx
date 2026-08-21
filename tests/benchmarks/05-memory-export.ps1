@@ -1,8 +1,12 @@
 # Benchmark 05: export every user to JSONL - the memory story.
 # Contenders:
-#   mgx-export - Export-MgxCollection: streams raw JSON to disk, no object conversion
-#   mgx-pipe   - Invoke-MgxRequest -All | Out-File: streams but pays the conversion tax
+#   mgx-export - Export-MgxCollection: streams raw JSON to disk
+#   mgx-pipe   - Invoke-MgxRequest -All -Raw | Out-File: streams raw JSON through the pipeline
 #   rest       - Invoke-RestMethod: buffers all pages in memory, then writes
+# Both mgx contenders emit GetRawText() and neither converts to Hashtables - the pipe is run
+# with -Raw - so the two mgx rows are close to like-for-like. What separates them is the export
+# cmdlet's extra per-page work (temp promotion, checkpoint bookkeeping, count reconciliation),
+# not object conversion.
 # Reports wall time, peak working set, and managed-heap delta for each. Single run per
 # contender by default (export is IO-heavy; variance is dominated by service latency).
 param(

@@ -70,27 +70,9 @@ public sealed class GraphBatchClient
     // lifetime of the session, with no way to recover short of restarting PowerShell.
     private static long s_lastThrottleTicks;
 
-    // Adaptive pacing bounds. Classic AIMD: a 429 halves the rate, and a run of clean chunks
-    // adds a fraction of the configured rate back, so the rate creeps up to the throttling
-    // threshold instead of jumping straight back into it.
-    private const int MinAdaptiveItemsPerSecond = 2;
+    // Chunk-loop AIMD tuning. The shared math (halve on throttle, additive recovery, expiry
+    // window) lives in AdaptivePacing so the request-level pacer applies identical rules.
     private const int AdaptiveRecoveryCleanChunks = 2;
-    internal static readonly TimeSpan AdaptiveRecoveryWindow = TimeSpan.FromMinutes(5);
-
-    /// <summary>Rate to fall back to after a chunk reported throttling.</summary>
-    internal static int ReduceRate(int rate) => Math.Max(rate / 2, MinAdaptiveItemsPerSecond);
-
-    /// <summary>Rate to climb to after a run of clean chunks, capped at the configured rate.</summary>
-    internal static int RecoverRate(int rate, int configuredRate) =>
-        Math.Min(configuredRate, rate + Math.Max(1, configuredRate / 10));
-
-    /// <summary>
-    /// True when the persisted adapted rate is older than the recovery window, so the
-    /// throttling that produced it no longer describes the tenant's current state.
-    /// </summary>
-    internal static bool AdaptedRateHasExpired(long lastThrottleTicks, long nowTicks) =>
-        lastThrottleTicks > 0
-        && nowTicks - lastThrottleTicks > (long)(AdaptiveRecoveryWindow.TotalSeconds * Stopwatch.Frequency);
 
     public GraphBatchClient(ResilientGraphClient client, string graphBaseUrl = "https://graph.microsoft.com/v1.0",
         int maxRetryAfterSeconds = 120, int batchChunkConcurrency = 1, int batchItemsPerSecond = 0)
@@ -105,7 +87,10 @@ public sealed class GraphBatchClient
     private static bool HasWriteOperations(IReadOnlyList<BatchOperation> operations)
         => operations.Any(op => !string.Equals(op.Method, "GET", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Test-only: reset cross-call pacing state between tests.</summary>
+    /// <summary>
+    /// Clear cross-call batch pacing state. Called by ResiliencePipelineFactory.Reset when the
+    /// credential changes - this state is learned per tenant and must not outlive it.
+    /// </summary>
     internal static void ResetPacingState()
     {
         Interlocked.Exchange(ref s_lastBatchCompletedTicks, 0);
@@ -140,6 +125,14 @@ public sealed class GraphBatchClient
     /// After all chunks complete, items that exhausted per-chunk retries but have
     /// retryable status codes are retried once more as a follow-up batch.
     /// </summary>
+    /// <summary>
+    /// Status recorded for an operation that was never sent, because a chunk before it failed.
+    /// Distinct from any HTTP status so a caller can tell "not attempted" from "attempted and
+    /// refused" - the difference between a write that may have landed and one that certainly
+    /// did not.
+    /// </summary>
+    public const int NotSentStatus = 0;
+
     public async Task<BatchExecutionResult> ExecuteBatchIndexedAsync(
         IReadOnlyList<BatchOperation> operations,
         CancellationToken cancellationToken = default)
@@ -150,6 +143,12 @@ public sealed class GraphBatchClient
         var results = new (BatchOperation Operation, GraphBatchResponseItem Response)?[operations.Count];
         var telemetry = new BatchTelemetry { TotalRequests = operations.Count };
         var batchSw = Stopwatch.StartNew();
+
+        // A chunk's own POST can fail after the chunks before it were applied. Their results are
+        // the only record of what landed, so they are returned with the failure rather than lost
+        // to it.
+        Exception? chunkFailure = null;
+        var notSent = new List<BatchOperation>();
 
         // Cross-call pacing: if a previous write batch completed recently, delay to maintain
         // target throughput. Only applies to batches containing writes (POST/PATCH/DELETE) -
@@ -190,12 +189,12 @@ public sealed class GraphBatchClient
             // so that successive Invoke-MgxBatchRequest invocations in a loop don't reset
             // to the full rate and immediately get re-throttled.
             var adapted = Volatile.Read(ref s_adaptedItemsPerSecond);
-            if (adapted > 0 && AdaptedRateHasExpired(
+            if (adapted > 0 && AdaptivePacing.AdaptedRateHasExpired(
                     Interlocked.Read(ref s_lastThrottleTicks), Stopwatch.GetTimestamp()))
             {
                 Volatile.Write(ref s_adaptedItemsPerSecond, 0);
                 adapted = 0;
-                _pendingVerbose.Enqueue($"Adaptive pacing: no throttling for {AdaptiveRecoveryWindow.TotalMinutes:0} min, restored configured rate ({_batchItemsPerSecond} items/sec)");
+                _pendingVerbose.Enqueue($"Adaptive pacing: no throttling for {AdaptivePacing.AdaptiveRecoveryWindow.TotalMinutes:0} min, restored configured rate ({_batchItemsPerSecond} items/sec)");
             }
             int effectiveItemsPerSecond = (adapted > 0 && adapted < _batchItemsPerSecond)
                 ? adapted
@@ -232,8 +231,39 @@ public sealed class GraphBatchClient
                 }
 
                 var chunkSw = Stopwatch.StartNew();
-                var (chunkResults, throttleDelay, chunkRetries, chunkThrottles, chunkRetryDelayMs) =
-                    await SendBatchWithRetryAsync(chunk, cancellationToken);
+                IReadOnlyList<(BatchOperation Operation, GraphBatchResponseItem Response)> chunkResults;
+                int throttleDelay, chunkRetries, chunkThrottles;
+                long chunkRetryDelayMs;
+                try
+                {
+                    (chunkResults, throttleDelay, chunkRetries, chunkThrottles, chunkRetryDelayMs) =
+                        await SendBatchWithRetryAsync(chunk, cancellationToken);
+                }
+                // Only an HTTP-level failure of the chunk itself. A malformed envelope - wrong
+                // response count, unknown ids - is a protocol violation rather than a chunk that
+                // did not land, and it still throws: nothing about the run can be trusted after it.
+                catch (GraphServiceException ex)
+                {
+                    // The chunks before this one were applied on the server. Letting this
+                    // exception out discards their results, which is the only record of what
+                    // landed - and for writes that is the thing the caller most needs. Stop
+                    // here, keep them, and hand the failure back alongside.
+                    //
+                    // The unsent slots are filled rather than dropped: callers line results up
+                    // against their own input list by position, so a short list would misattribute
+                    // every error after the gap.
+                    chunkFailure = ex;
+                    for (int i = globalOffset; i < operations.Count; i++)
+                    {
+                        notSent.Add(operations[i]);
+                        results[i] = (operations[i], new GraphBatchResponseItem
+                        {
+                            Id = i.ToString(),
+                            Status = NotSentStatus
+                        });
+                    }
+                    break;
+                }
                 prevChunkElapsedMs = chunkSw.ElapsedMilliseconds;
                 crossChunkDelaySeconds = throttleDelay;
                 telemetry.AddItemRetries(chunkRetries);
@@ -247,10 +277,10 @@ public sealed class GraphBatchClient
                 {
                     Interlocked.Exchange(ref s_lastThrottleTicks, Stopwatch.GetTimestamp());
                     cleanChunks = 0;
-                    if (effectiveItemsPerSecond > MinAdaptiveItemsPerSecond)
+                    if (effectiveItemsPerSecond > AdaptivePacing.MinAdaptiveRate)
                     {
                         var prev = effectiveItemsPerSecond;
-                        effectiveItemsPerSecond = ReduceRate(effectiveItemsPerSecond);
+                        effectiveItemsPerSecond = AdaptivePacing.ReduceRate(effectiveItemsPerSecond);
                         Volatile.Write(ref s_adaptedItemsPerSecond, effectiveItemsPerSecond);
                         _pendingVerbose.Enqueue($"Adaptive pacing: {chunkThrottles} throttle(s) in chunk {chunkIndex}, reducing rate {prev} -> {effectiveItemsPerSecond} items/sec (persisted)");
                     }
@@ -260,7 +290,7 @@ public sealed class GraphBatchClient
                 {
                     cleanChunks = 0;
                     var prev = effectiveItemsPerSecond;
-                    effectiveItemsPerSecond = RecoverRate(effectiveItemsPerSecond, _batchItemsPerSecond);
+                    effectiveItemsPerSecond = AdaptivePacing.RecoverRate(effectiveItemsPerSecond, _batchItemsPerSecond);
                     // Persist 0 once fully recovered, so the next call starts clean instead of
                     // pinning itself to a rate that merely equals the configured one today.
                     Volatile.Write(ref s_adaptedItemsPerSecond,
@@ -390,7 +420,7 @@ public sealed class GraphBatchClient
 
         // Validate all slots populated
         var nullIndex = Array.FindIndex(results, r => r == null);
-        if (nullIndex >= 0)
+        if (chunkFailure is null && nullIndex >= 0)
         {
             throw new InvalidOperationException(
                 $"Batch result slot {nullIndex} was not populated after processing all chunks. "
@@ -414,7 +444,9 @@ public sealed class GraphBatchClient
         return new BatchExecutionResult
         {
             Results = finalResults,
-            Telemetry = telemetry
+            Telemetry = telemetry,
+            ChunkFailure = chunkFailure,
+            NotSent = notSent
         };
     }
 
@@ -476,7 +508,10 @@ public sealed class GraphBatchClient
             var json = JsonSerializer.Serialize(batchRequest, JsonOptions);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var httpSw = Stopwatch.StartNew();
-            using var response = await _client.PostAsync(_batchUrl, content, cancellationToken);
+            // paceGate: false - this class owns batch throughput (cross-call pacing, item-level
+            // AIMD). Running the request pacer's gate on top would stack two independent AIMD
+            // controllers on one workload. Outer responses still feed pacer signal state.
+            using var response = await _client.PostAsync(_batchUrl, content, cancellationToken, paceGate: false);
             var httpMs = httpSw.ElapsedMilliseconds;
             if (httpMs > 5000)
                 _pendingVerbose.Enqueue($"Batch HTTP slow: {httpMs}ms for {pendingIndices.Count} items (attempt {attempt + 1})");
