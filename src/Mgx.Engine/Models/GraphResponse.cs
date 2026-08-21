@@ -105,6 +105,16 @@ public sealed class BatchExecutionResult
 {
     public required IReadOnlyList<(BatchOperation Operation, GraphBatchResponseItem Response)> Results { get; init; }
     public required BatchTelemetry Telemetry { get; init; }
+
+    /// <summary>
+    /// Set when a chunk's own POST failed rather than its items. The chunks before it were
+    /// applied on the server, so their results are still in <see cref="Results"/> and the
+    /// caller needs both: what landed, and why the rest did not. Throwing loses the first half.
+    /// </summary>
+    public Exception? ChunkFailure { get; init; }
+
+    /// <summary>Operations that were never sent, because a chunk before them failed.</summary>
+    public IReadOnlyList<BatchOperation> NotSent { get; init; } = [];
 }
 
 /// <summary>

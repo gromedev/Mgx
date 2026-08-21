@@ -125,6 +125,14 @@ public sealed class GraphBatchClient
     /// After all chunks complete, items that exhausted per-chunk retries but have
     /// retryable status codes are retried once more as a follow-up batch.
     /// </summary>
+    /// <summary>
+    /// Status recorded for an operation that was never sent, because a chunk before it failed.
+    /// Distinct from any HTTP status so a caller can tell "not attempted" from "attempted and
+    /// refused" - the difference between a write that may have landed and one that certainly
+    /// did not.
+    /// </summary>
+    public const int NotSentStatus = 0;
+
     public async Task<BatchExecutionResult> ExecuteBatchIndexedAsync(
         IReadOnlyList<BatchOperation> operations,
         CancellationToken cancellationToken = default)
@@ -135,6 +143,12 @@ public sealed class GraphBatchClient
         var results = new (BatchOperation Operation, GraphBatchResponseItem Response)?[operations.Count];
         var telemetry = new BatchTelemetry { TotalRequests = operations.Count };
         var batchSw = Stopwatch.StartNew();
+
+        // A chunk's own POST can fail after the chunks before it were applied. Their results are
+        // the only record of what landed, so they are returned with the failure rather than lost
+        // to it.
+        Exception? chunkFailure = null;
+        var notSent = new List<BatchOperation>();
 
         // Cross-call pacing: if a previous write batch completed recently, delay to maintain
         // target throughput. Only applies to batches containing writes (POST/PATCH/DELETE) -
@@ -217,8 +231,39 @@ public sealed class GraphBatchClient
                 }
 
                 var chunkSw = Stopwatch.StartNew();
-                var (chunkResults, throttleDelay, chunkRetries, chunkThrottles, chunkRetryDelayMs) =
-                    await SendBatchWithRetryAsync(chunk, cancellationToken);
+                IReadOnlyList<(BatchOperation Operation, GraphBatchResponseItem Response)> chunkResults;
+                int throttleDelay, chunkRetries, chunkThrottles;
+                long chunkRetryDelayMs;
+                try
+                {
+                    (chunkResults, throttleDelay, chunkRetries, chunkThrottles, chunkRetryDelayMs) =
+                        await SendBatchWithRetryAsync(chunk, cancellationToken);
+                }
+                // Only an HTTP-level failure of the chunk itself. A malformed envelope - wrong
+                // response count, unknown ids - is a protocol violation rather than a chunk that
+                // did not land, and it still throws: nothing about the run can be trusted after it.
+                catch (GraphServiceException ex)
+                {
+                    // The chunks before this one were applied on the server. Letting this
+                    // exception out discards their results, which is the only record of what
+                    // landed - and for writes that is the thing the caller most needs. Stop
+                    // here, keep them, and hand the failure back alongside.
+                    //
+                    // The unsent slots are filled rather than dropped: callers line results up
+                    // against their own input list by position, so a short list would misattribute
+                    // every error after the gap.
+                    chunkFailure = ex;
+                    for (int i = globalOffset; i < operations.Count; i++)
+                    {
+                        notSent.Add(operations[i]);
+                        results[i] = (operations[i], new GraphBatchResponseItem
+                        {
+                            Id = i.ToString(),
+                            Status = NotSentStatus
+                        });
+                    }
+                    break;
+                }
                 prevChunkElapsedMs = chunkSw.ElapsedMilliseconds;
                 crossChunkDelaySeconds = throttleDelay;
                 telemetry.AddItemRetries(chunkRetries);
@@ -375,7 +420,7 @@ public sealed class GraphBatchClient
 
         // Validate all slots populated
         var nullIndex = Array.FindIndex(results, r => r == null);
-        if (nullIndex >= 0)
+        if (chunkFailure is null && nullIndex >= 0)
         {
             throw new InvalidOperationException(
                 $"Batch result slot {nullIndex} was not populated after processing all chunks. "
@@ -399,7 +444,9 @@ public sealed class GraphBatchClient
         return new BatchExecutionResult
         {
             Results = finalResults,
-            Telemetry = telemetry
+            Telemetry = telemetry,
+            ChunkFailure = chunkFailure,
+            NotSent = notSent
         };
     }
 
