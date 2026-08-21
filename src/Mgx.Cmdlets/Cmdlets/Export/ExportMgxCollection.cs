@@ -121,13 +121,16 @@ public class ExportMgxCollection : MgxCmdletBase
             return;
         }
 
-        // Determine max items: -All = unlimited (overrides -Top), -Top N = N, neither = single page
+        // -All says how far to page, -Top says how much to return. They answer different
+        // questions, so -All no longer discards the cap: -Top is documented as the total
+        // maximum, and Invoke-MgxRequest already honours it either way. Neither, and a single
+        // page is the limit.
         int maxItems;
         bool defaultedToPageSize = false;
-        if (All.IsPresent)
-            maxItems = 0; // unlimited; -All always overrides -Top
-        else if (Top > 0)
+        if (Top > 0)
             maxItems = Top;
+        else if (All.IsPresent)
+            maxItems = 0; // unlimited
         else
         {
             maxItems = PageSize; // single page worth
@@ -555,7 +558,21 @@ public class ExportMgxCollection : MgxCmdletBase
                     WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
                     PaginationCheckpoint.Delete(checkpointPath);
                 }
+                return;
             }
+
+            // The output exists and the checkpoint cannot say whether its items are in it. Both
+            // shapes are possible from a release that recorded neither field: a run that was
+            // appending, whose items ARE there, and a fresh run killed mid-flight, whose items
+            // are in a temp while the output still holds a PREVIOUS export. Resuming assumed the
+            // first, so upgrading with the second on disk appended the remainder of the
+            // enumeration onto the earlier export - a 100,000-row file coming back with 163,037.
+            // Undecidable means start over: an export re-runs from the first page and replaces
+            // the output, which costs a pass and cannot leave a wrong file behind.
+            WriteWarning(
+                "The resume checkpoint does not record which file the interrupted export's items are in. "
+                + "Exporting again from the beginning; nothing is lost.");
+            PaginationCheckpoint.Delete(checkpointPath);
             return;
         }
 

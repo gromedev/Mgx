@@ -316,12 +316,14 @@ public class ExportCheckpointIntegrityTests
     }
 
     /// <summary>
-    /// A checkpoint written before any of this was recorded says nothing about where its items
-    /// are. It must still resume the way it always did rather than be treated as describing a
-    /// zero-length file.
+    /// A checkpoint from a release that recorded neither the temp name nor a length cannot say
+    /// where its items are, and both shapes reach this code: a run that was appending, whose
+    /// items are in the output, and a fresh run killed mid-flight, whose items are in a temp
+    /// while the output still holds a PREVIOUS export. Assuming the first appended the rest of
+    /// the enumeration onto the earlier export.
     /// </summary>
     [Fact]
-    public void A_checkpoint_without_a_recorded_length_still_resumes()
+    public void A_checkpoint_that_cannot_say_where_its_items_are_exports_again_rather_than_appending()
     {
         var dir = NewDir();
         var output = Path.Combine(dir, "out.jsonl");
@@ -331,20 +333,28 @@ public class ExportCheckpointIntegrityTests
             var handler = new ScriptedHandler();
             InjectMock(handler);
 
-            File.WriteAllText(output, "{\"id\":\"u1\"}\n{\"id\":\"u2\"}\n");
+            // A previous export completed and left its output behind.
+            File.WriteAllText(output, "{\"id\":\"old1\"}\n{\"id\":\"old2\"}\n{\"id\":\"old3\"}\n");
+            // A later fresh run was killed: its items are in a temp, not in that output.
+            var temp = Path.Combine(dir, $"out.jsonl.{Guid.NewGuid():N}.tmp");
+            File.WriteAllText(temp, "{\"id\":\"u1\"}\n{\"id\":\"u2\"}\n");
+            // The shape a pre-2.1.0 release wrote: no temp name, no length.
             new PaginationCheckpoint
             {
                 Resource = "https://graph.microsoft.com/v1.0/users?$top=999",
                 NextLink = "https://graph.microsoft.com/v1.0/users?$skiptoken=P2",
                 ItemsCollected = 2,
                 PageItemsAlreadyWritten = 0
-                // TempFile and DataLength absent, as an older release wrote them
             }.Save(checkpoint);
 
+            handler.Queue(HttpStatusCode.OK, Page1);
             handler.Queue(HttpStatusCode.OK, Page2);
-            Export(output, checkpoint, all: true);
+            var reported = Export(output, checkpoint, all: true);
 
+            // Replaced, not appended: the previous export's rows are gone and each id appears once.
             Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+            Assert.DoesNotContain(Lines(output), l => l.Contains("old"));
         }
         finally
         {
@@ -457,6 +467,46 @@ public class ExportCheckpointIntegrityTests
             Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
             Assert.Equal(3, reported);
             Assert.False(File.Exists(checkpoint));
+        }
+        finally
+        {
+            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A fresh run sweeps leftover temps, and "leftover" is an assumption: a second export
+    /// running against the same output owns a file matching the same glob right now. Windows
+    /// refuses to delete a file held open and so declined by accident; Unix deletes it, and the
+    /// other run keeps writing into an unlinked inode and loses everything it fetched.
+    /// </summary>
+    [Fact]
+    public void A_fresh_export_does_not_delete_a_temp_another_run_is_writing()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var live = Path.Combine(dir, $"out.jsonl.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var handler = new ScriptedHandler();
+            InjectMock(handler);
+
+            // Another export holds its temp open, exactly as StreamWriter does.
+            using (var held = new FileStream(live, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes("{\"id\":\"inflight\"}\n");
+                held.Write(bytes, 0, bytes.Length);
+                held.Flush();
+
+                handler.Queue(HttpStatusCode.OK, Page1);
+                handler.Queue(HttpStatusCode.OK, Page2);
+                Export(output, checkpointPath: null, all: true);
+
+                Assert.True(File.Exists(live), "the other run's temp was deleted out from under it");
+            }
+
+            Assert.Equal("{\"id\":\"inflight\"}", File.ReadAllLines(live).Single());
         }
         finally
         {
