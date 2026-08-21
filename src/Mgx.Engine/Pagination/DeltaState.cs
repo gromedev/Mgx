@@ -41,8 +41,10 @@ public sealed class DeltaState
     public string GraphEndpoint { get; set; } = string.Empty;
 
     /// <summary>
-    /// Graph API version the deltaLink was issued by. Empty on state files written before
-    /// 2.0.1, which is treated as "unknown" rather than a mismatch so upgrades keep working.
+    /// Graph API version the deltaLink was issued by, read from the link rather than from the
+    /// request, so it names the version the token actually came from. Empty on state files
+    /// written before 2.1.0 - including every 2.0.1 one - which is treated as "unknown" rather
+    /// than a mismatch so upgrades keep working.
     /// </summary>
     [JsonPropertyName("apiVersion")]
     public string ApiVersion { get; set; } = string.Empty;

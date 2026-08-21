@@ -412,6 +412,21 @@ public class SyncMgxDelta : MgxCmdletBase
             resolvedCheckpointPath, normalizedSelect, normalizedPrefer, currentFilter, sw);
     }
 
+    /// <summary>
+    /// The Graph API version a deltaLink was issued by, read from the link itself, or null when
+    /// it cannot be read.
+    /// </summary>
+    private static string? ApiVersionOfLink(string? deltaLink)
+    {
+        if (string.IsNullOrEmpty(deltaLink)) return null;
+        if (!System.Uri.TryCreate(deltaLink, UriKind.Absolute, out var u)) return null;
+        var first = u.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        return string.Equals(first, "v1.0", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(first, "beta", StringComparison.OrdinalIgnoreCase)
+            ? first
+            : null;
+    }
+
     private void DeleteCheckpoint(string? checkpointPath, string reason)
     {
         if (checkpointPath == null || !File.Exists(checkpointPath)) return;
@@ -870,7 +885,13 @@ public class SyncMgxDelta : MgxCmdletBase
                         Resource = Uri,
                         ItemCount = totalProcessed,
                         GraphEndpoint = s_graphEndpoint,
-                        ApiVersion = ApiVersion
+                        // The version the LINK carries, not the one that was asked for. A state
+                        // file written before this field existed has none, so the mismatch check
+                        // is skipped and the run proceeds - against whatever version the stored
+                        // deltaLink names, which may not be the requested one. Stamping the
+                        // request there recorded a version the token was never issued by, and
+                        // every later run then refused with advice pointing the wrong way.
+                        ApiVersion = ApiVersionOfLink(capturedDeltaLink) ?? ApiVersion
                     }.Save(deltaPath);
                     WriteVerbose($"Delta state saved to '{deltaPath}'.");
                 }
