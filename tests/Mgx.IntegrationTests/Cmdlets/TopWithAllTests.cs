@@ -125,4 +125,42 @@ public class TopWithAllTests
 
         Assert.Equal(75, count);
     }
+
+    [Fact]
+    public void Export_stops_at_Top_rather_than_walking_the_whole_collection()
+    {
+        // The sibling of the Invoke-MgxRequest case. Both cmdlets document -Top as a total
+        // maximum, so they must not disagree about what -All -Top means.
+        var handler = new PagedHandler(pageSize: 50, maxPages: 40);
+        InjectMock(handler);
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-topall-{Guid.NewGuid():N}")).FullName;
+        var output = Path.Combine(dir, "out.jsonl");
+        try
+        {
+            using var ps = PowerShell.Create();
+            ps.AddCommand("Import-Module")
+              .AddParameter("Assembly", typeof(Mgx.Cmdlets.Cmdlets.Export.ExportMgxCollection).Assembly);
+            ps.Invoke();
+            ps.Commands.Clear();
+            ps.AddScript("function Get-MgContext { [PSCustomObject]@{ TenantId = 'test-tenant-00000000-0000-0000-0000-000000000000' } }");
+            ps.Invoke();
+            ps.Commands.Clear();
+            ps.AddCommand("Export-MgxCollection")
+              .AddParameter("Uri", "/users")
+              .AddParameter("OutputFile", output)
+              .AddParameter("All")
+              .AddParameter("Top", 150)
+              .AddParameter("PageSize", 50)
+              .AddParameter("WarningAction", ActionPreference.SilentlyContinue);
+            ps.Invoke();
+
+            Assert.Equal(150, File.ReadAllLines(output).Length);
+        }
+        finally
+        {
+            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
 }
