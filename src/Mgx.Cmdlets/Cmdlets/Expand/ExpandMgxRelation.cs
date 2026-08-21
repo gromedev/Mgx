@@ -359,16 +359,31 @@ public class ExpandMgxRelation : MgxCmdletBase
         var resolved = IdPlaceholder.Replace(Uri, System.Uri.EscapeDataString(id));
         var url = $"{VersionedBaseUrl}{NormalizePath(resolved)}";
 
-        // Pass $top to Graph so it returns only the items we need,
-        // avoiding full-page downloads when only a few items are wanted.
-        // Client-side truncation in the lambda remains as a safety net.
-        if (Top > 0)
+        // Pass $top to Graph so it returns only the items we need, avoiding full-page downloads
+        // when only a few items are wanted. Skipped when the caller already wrote one into
+        // -Uri: Graph rejects a URL carrying $top twice, which turned -Top into a 400 for
+        // every input object.
+        // The client-side truncation in the lambda enforces -Top either way.
+        if (Top > 0 && !HasTopQueryOption(url))
         {
             var separator = url.Contains('?') ? "&" : "?";
             url = $"{url}{separator}$top={Top}";
         }
 
         return url;
+    }
+
+    /// <summary>True when the URL already carries a $top query option.</summary>
+    private static bool HasTopQueryOption(string url)
+    {
+        var q = url.IndexOf('?');
+        if (q < 0) return false;
+        foreach (var part in url[(q + 1)..].Split('&'))
+        {
+            var name = part.Split('=', 2)[0];
+            if (string.Equals(name, "$top", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     private void HandleFanOutErrors(

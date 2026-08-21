@@ -734,10 +734,6 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     }
 
     /// <summary>
-    /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
-    /// where every such file is an orphan by definition.
-    /// </summary>
-    /// <summary>
     /// True when nothing else holds the file. FileShare.None is honoured between .NET processes
     /// on both Windows and Unix, so a writer that has it open makes this fail rather than let a
     /// sweep take a file out from under it.
@@ -755,6 +751,11 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         }
     }
 
+    /// <summary>
+    /// Remove leftover "{outputPath}.{guid}.tmp" files. Called only when no resume is pending,
+    /// where every such file is an orphan by definition - except one a live run still holds,
+    /// which CanTakeExclusively keeps out of reach.
+    /// </summary>
     protected void DeleteStaleTemps(string outputPath)
     {
         try
