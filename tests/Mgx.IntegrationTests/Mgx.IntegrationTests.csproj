@@ -23,6 +23,20 @@
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.4" />
+    <!-- Test-only. The resilience bridge disarms the retry handler inside the SDK's own chain,
+         and the only honest way to test that is against the real handler rather than a stand-in
+         that agrees with us. The version is pinned to what Microsoft.Graph.Authentication 2.36.1
+         loads: a different one would measure a handler users do not have. It carries an advisory
+         against Microsoft.Kiota.Abstractions, suppressed below. Nothing shipped references Kiota
+         - it reaches users through their own installed SDK - so neither the reference nor the
+         suppression changes what mgx exposes them to. -->
+    <PackageReference Include="Microsoft.Kiota.Http.HttpClientLibrary" Version="1.21.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Scoped to this one advisory rather than silencing NuGet's audit for the project, so a
+         future advisory against anything else still surfaces. -->
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-7j59-v9qr-6fq9" />
   </ItemGroup>
 
   <ItemGroup>

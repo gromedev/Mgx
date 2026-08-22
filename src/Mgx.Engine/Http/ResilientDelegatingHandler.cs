@@ -24,6 +24,54 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
     /// </summary>
     public Action<string>? VerboseWriter { get; set; }
 
+    /// <summary>
+    /// Options stamped onto every request this handler sends, in addition to the caller's own.
+    /// The SDK bridge uses it to disarm the retry handler sitting inside the wrapped chain: that
+    /// handler answers 429 and 503 before this pipeline ever sees them, so the pacer never learns
+    /// from a throttle and telemetry books a throttled session as zero. Kiota reads its retry
+    /// option per request, so setting it here is what reaches it.
+    ///
+    /// Keyed by string and typed as object so the engine needs no reference to the SDK; the
+    /// caller supplies whatever the inner handler expects.
+    /// </summary>
+    public IReadOnlyDictionary<string, object?>? AdditionalRequestOptions { get; init; }
+
+    /// <summary>
+    /// Resolved on the first request rather than when the handler is built. The type it needs
+    /// belongs to the SDK and is not loaded until the SDK has sent something through its own
+    /// chain, so building the options eagerly found nothing and silently left the inner handler
+    /// armed. Called once; the result, including null, is kept.
+    /// </summary>
+    public Func<IReadOnlyDictionary<string, object?>?>? AdditionalRequestOptionsFactory { get; init; }
+
+    private IReadOnlyDictionary<string, object?>? _resolvedOptions;
+    private bool _optionsResolved;
+
+    private IReadOnlyDictionary<string, object?>? ResolveAdditionalOptions()
+    {
+        if (AdditionalRequestOptions != null) return AdditionalRequestOptions;
+        if (AdditionalRequestOptionsFactory == null) return null;
+        if (_optionsResolved) return _resolvedOptions;
+
+        try
+        {
+            _resolvedOptions = AdditionalRequestOptionsFactory();
+        }
+        catch (Exception ex)
+        {
+            // The factory runs on a request thread, long after the cmdlet that supplied it
+            // finished its pipeline - so anything it touches that expects to be on that
+            // pipeline throws here. Failing the request over an option that only annotates it
+            // would be worse than not setting the option: leaving it null just means the inner
+            // handler keeps the retry behavior it had before the override existed.
+            _pendingVerbose.Enqueue($"Could not configure the SDK's retry option: {ex.Message}");
+            _resolvedOptions = null;
+        }
+
+        _optionsResolved = true;
+        return _resolvedOptions;
+    }
+
     public ResilientDelegatingHandler(
         ResiliencePipeline<HttpResponseMessage> pipeline,
         TokenBucketRateLimiter? rateLimiter)
@@ -101,6 +149,13 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
 #pragma warning disable CS8714 // nullability mismatch in IDictionary generic
                     foreach (var option in request.Options)
                         ((IDictionary<string, object?>)clone.Options)[option.Key] = option.Value;
+
+                    // After the caller's own, so a handler-level stamp wins: the point is to
+                    // override what the inner chain would otherwise do on its own.
+                    var extra = ResolveAdditionalOptions();
+                    if (extra != null)
+                        foreach (var option in extra)
+                            ((IDictionary<string, object?>)clone.Options)[option.Key] = option.Value;
 #pragma warning restore CS8714
 
                     if (contentBytes != null)
