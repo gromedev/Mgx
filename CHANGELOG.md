@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.1
+
+Patch release. One fix; no feature or API changes.
+
+### Fixed
+
+- Enable-MgxResilience ignored throttling: pacing never slowed, telemetry reported no retries, and a throttled request could fail outright.
+
+### Changed
+
+- Under Enable-MgxResilience, a 503 or 504 on a write is no longer retried. Throttling (429) is unaffected.
+
 ## 2.1.0
 
 Adds proactive throttle avoidance, ranged content downloads, and resumable enumeration.

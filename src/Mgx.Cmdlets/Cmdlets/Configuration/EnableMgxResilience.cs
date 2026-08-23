@@ -232,6 +232,55 @@ public class EnableMgxResilience : PSCmdlet
         }
     }
 
+    /// <summary>
+    /// Turns off the SDK's own retry handler for requests that pass through the wrap.
+    ///
+    /// That handler sits inside the wrapped chain and answers 429 and 503 itself, so a throttle
+    /// never reached Mgx's pipeline: the adaptive pacer stayed in slow start through a live
+    /// throttle, Get-MgxTelemetry reported no throttle retries while accumulating two minutes of
+    /// retry delay under another name, and the two retriers compounded - four intended attempts
+    /// could reach the wire eight times, because the SDK sleeps Retry-After inside the call and
+    /// Mgx's own attempt timeout then fires.
+    ///
+    /// Kiota reads this option per request. The type is resolved reflectively so the engine and
+    /// this assembly need no reference to it; if the SDK ever moves or renames it, the wrap keeps
+    /// working exactly as it did before.
+    ///
+    /// Throws rather than warning on the paths it cannot satisfy. It runs from the handler's
+    /// option factory, on a request thread with no pipeline to write a warning to - the handler
+    /// catches this, notes it, and carries on with the inner retry handler left as it was.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, object?>? BuildInnerRetryOverride()
+    {
+        const string OptionType = "Microsoft.Kiota.Http.HttpClientLibrary.Middleware.Options.RetryHandlerOption";
+
+        var type = MgxCmdletBase.FindType(OptionType)
+            ?? throw new InvalidOperationException(
+                "the Graph SDK's retry option type was not found, so its own retry handler stays "
+                + "active inside the wrap and throttling will not reach Mgx's pacer or telemetry "
+                + "on this path");
+
+        var option = Activator.CreateInstance(type);
+        var maxRetry = type.GetProperty("MaxRetry");
+        if (option == null || maxRetry == null || !maxRetry.CanWrite)
+            throw new InvalidOperationException(
+                "the Graph SDK's retry option could not be configured, so its own retry handler "
+                + "stays active inside the wrap");
+
+        // MaxRetry is the only lever that removes a retry. The option also exposes ShouldRetry,
+        // which looks like a way to decline 429 alone and leave the handler's 503 and 504
+        // retries intact - it is not: the handler ORs it with its own status check, so
+        // ShouldRetry can only add retries, never suppress one. Measured against 1.21.1.
+        //
+        // The cost is that the handler's 503/504 retries go too, including on writes, and Mgx's
+        // pipeline will not take those over: it refuses to retry a non-idempotent request on a
+        // 5xx because the write may already have been applied. 429 is unaffected - the pipeline
+        // retries that for every method - so throttled writes still complete.
+        maxRetry.SetValue(option, 0);
+
+        return new Dictionary<string, object?> { [OptionType] = option };
+    }
+
     private static HttpClient? BuildResilientSdkClient(HttpClient sdkClient, Action<string> warn)
     {
         try
@@ -246,15 +295,18 @@ public class EnableMgxResilience : PSCmdlet
             //   The bridge handler delegates SendAsync to the original SDK HttpClient,
             //   which processes through its complete handler pipeline internally.
             //
-            // The SDK's built-in RetryHandler still runs inside, so
-            // a persistent 429 may retry internally (SDK: ~3 times) before our outer
-            // handler retries again. This is bounded by TotalTimeoutSeconds (300s)
-            // and circuit breaker. Both paths share the same pipeline, rate limiter,
+            // The SDK's built-in RetryHandler sits inside this wrap and would otherwise answer
+            // 429 and 503 itself, before the outer pipeline ever saw them - so the pacer never
+            // learned from a throttle and telemetry booked a throttled session as zero retries.
+            // AdditionalRequestOptionsFactory disarms it per request. If that cannot be arranged
+            // it stays armed and the session behaves as it did before, just without the
+            // measurement. Both paths share the same pipeline, rate limiter,
             // and circuit breaker to prevent cache thrashing and ensure consistent
             // failure detection across SDK and direct Mgx cmdlets.
             var resilientHandler = new ResilientDelegatingHandler(pipeline, rateLimiter)
             {
-                InnerHandler = new SdkClientBridgeHandler(sdkClient)
+                InnerHandler = new SdkClientBridgeHandler(sdkClient),
+                AdditionalRequestOptionsFactory = BuildInnerRetryOverride
             };
             ActiveHandler = resilientHandler;
 

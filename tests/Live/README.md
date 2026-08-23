@@ -33,6 +33,34 @@ A tenant with no SharePoint answers every sites/drives call with `BadRequest: Te
 have a SPO license`, and no permission grant changes that — the content roles can be present and
 still inert.
 
+## The throttle test
+
+`Mgx.Throttle.Tests.ps1` covers the one thing mocks cannot: what `Enable-MgxResilience` does
+when Graph is actually refusing requests. The SDK's own retry handler sits inside the wrap and
+answers `429` itself, so a throttled session looks identical to a clean one — the pacer stays in
+slow-start and telemetry reports zero retries while the SDK sleeps out of sight inside the call.
+With that handler left armed, a caller's request eventually fails outright.
+
+It needs a second machine. One client cannot exhaust a tenant's budget through a single NAT'd
+connection — 587 req/s from a laptop against 4,641 from a VM on the same network, same test,
+same minute — and below roughly 700 req/s the tenant never refuses anything, so the run proves
+nothing at all.
+
+```bash
+export MGX_LIVE_THROTTLE_SSH='user@host'          # a host with real egress
+export MGX_LIVE_THROTTLE_KEY="$HOME/.ssh/id_..."  # optional identity file
+pwsh -c 'Invoke-Pester -Path ./tests/Live/Mgx.Throttle.Tests.ps1'
+```
+
+The certificate never leaves this machine: the assertion is signed locally and only the
+resulting bearer token crosses, on stdin, never as an argument and never to a file.
+
+Unlike the rest of this directory it is **not read-only in effect** — it deliberately exhausts
+the tenant's request budget and leaves it refusing requests for several minutes afterwards. Run
+it last, or alone. It skips when `MGX_LIVE_THROTTLE_SSH` is unset, because most people running
+this suite have no second machine to hand; when it is set, failing to reach a throttle is a
+failure rather than a skip, so a green run cannot mean "there was nothing to see".
+
 ## Keeping them honest
 
 `tests/Unit/Mgx.LiveCoverage.Tests.ps1` fails if an exported cmdlet has no `Describe` block
