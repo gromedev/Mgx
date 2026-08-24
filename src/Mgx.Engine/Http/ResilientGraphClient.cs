@@ -218,10 +218,26 @@ public sealed class ResilientGraphClient : IDisposable
                     if (headers != null)
                     {
                         foreach (var (key, value) in headers)
-                            request.Headers.TryAddWithoutValidation(key, value);
+                        {
+                            if (request.Headers.TryAddWithoutValidation(key, value)) continue;
+                            // The request collection refuses content headers (Content-Type,
+                            // Content-Disposition, ...); they belong on the content, replacing
+                            // any default the buffered content carried.
+                            if (request.Content != null)
+                            {
+                                request.Content.Headers.Remove(key);
+                                if (request.Content.Headers.TryAddWithoutValidation(key, value)) continue;
+                            }
+                            if (attempt == 1)
+                                _pendingWarnings.Enqueue($"Header '{key}' is not valid on this request and was not sent.");
+                        }
                     }
-                    request.Headers.TryAddWithoutValidation("SdkVersion", MgxSdkVersion.Value);
-                    request.Headers.TryAddWithoutValidation("client-request-id", clientRequestId);
+                    // A caller-supplied value wins: appending a second one would put two
+                    // values on the wire and defeat the correlation id the caller is logging.
+                    if (headers == null || !headers.ContainsKey("SdkVersion"))
+                        request.Headers.TryAddWithoutValidation("SdkVersion", MgxSdkVersion.Value);
+                    if (headers == null || !headers.ContainsKey("client-request-id"))
+                        request.Headers.TryAddWithoutValidation("client-request-id", clientRequestId);
 
                     if (DebugEnabled)
                         _pendingDebug.Enqueue(GraphRequestTracer.FormatRequest(request, contentBytes, attempt));

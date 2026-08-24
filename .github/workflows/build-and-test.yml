@@ -55,7 +55,7 @@ jobs:
       - name: Assert xUnit actually ran
         shell: pwsh
         run: |
-          $floor = 530
+          $floor = 650
           $trx = Get-ChildItem TestResults -Filter *.trx | Select-Object -First 1
           if (-not $trx) { throw "No .trx produced - the test run did not report results." }
           $c = ([xml](Get-Content $trx.FullName -Raw)).TestRun.ResultSummary.Counters

@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '2.1.1'
+    ModuleVersion     = '2.1.2'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -52,6 +52,16 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
+v2.1.2
+
+Fixed
+- URI handling: a '#' in a path dropped everything after it, pre-encoded query values were encoded twice, piped drive and item ids went unescaped, an absolute -Uri was mangled rather than refused, and a typed parameter could repeat an option already in -Uri.
+- Body serialization: enums went out as numbers, byte arrays as integer lists, TimeSpan and a Kind-less DateTime in forms Graph refuses, and a PSCustomObject body lost every property that was not a NoteProperty.
+- Headers: content headers from -Headers were dropped, arrays were sent as System.String[], names merged case-sensitively, and a caller's client-request-id was doubled.
+- Failed batch items wrote no error records, so -ErrorAction Stop did not stop.
+- An empty, non-JSON or malformed response body ended the cmdlet with an unhandled error.
+- An unexpected failure discarded the retry history explaining it, and a timed-out attempt could retry after Ctrl-C.
+
 v2.1.1
 Patch release. One fix; no feature or API changes.
 

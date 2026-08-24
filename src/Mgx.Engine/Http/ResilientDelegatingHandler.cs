@@ -91,8 +91,13 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
         if (request.Content != null)
         {
             contentBytes = await request.Content.ReadAsByteArrayAsync(cancellationToken);
+            if (contentBytes.Length > ResilientGraphClient.MaxRequestBodyBytes)
+                throw new InvalidOperationException(
+                    $"Request body size ({contentBytes.Length:N0} bytes) exceeds the {ResilientGraphClient.MaxRequestBodyBytes / (1024 * 1024)}MB limit. " +
+                    "Graph API rejects bodies larger than 4MB on most endpoints.");
             contentHeaders = request.Content.Headers.ToList();
         }
+        var clientRequestId = Guid.NewGuid().ToString();
 
         RateLimitLease? lease = null;
         var context = ResilienceContextPool.Shared.Get(cancellationToken);
@@ -144,6 +149,10 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
                     foreach (var header in request.Headers)
                         clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
                     clone.Headers.TryAddWithoutValidation("SdkVersion", MgxSdkVersion.Value);
+                    // Parity with the owned client: one correlation id per logical request,
+                    // shared across attempts - unless the SDK already stamped its own.
+                    if (!clone.Headers.Contains("client-request-id"))
+                        clone.Headers.TryAddWithoutValidation("client-request-id", clientRequestId);
 
                     // Copy request options (used by SDK handlers for per-request metadata)
 #pragma warning disable CS8714 // nullability mismatch in IDictionary generic

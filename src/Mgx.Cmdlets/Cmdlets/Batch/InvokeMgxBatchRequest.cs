@@ -291,8 +291,14 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     WriteWarning($"Failed to write dead-letter file '{resolvedDeadLetterPath}': {ex.Message}");
+                }
 
-            // Emit errors for failed items (enables -ErrorAction Stop, populates $Error)
+                if (failedCount > 0)
+                    WriteVerbose($"Wrote {failedCount} failed items to dead-letter file: {resolvedDeadLetterPath}");
+            }
+
+            // Emit errors for failed items (enables -ErrorAction Stop, populates $Error).
+            // After the dead-letter write, so -ErrorAction Stop cannot cut the file short.
             for (int i = 0; i < results.Count; i++)
             {
                 var (_, item) = results[i];
@@ -315,12 +321,6 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                     WriteError(new ErrorRecord(itemError, "BatchItemError",
                         MapStatusToCategory((HttpStatusCode)item.Status), input.Url));
                 }
-            }
-
-                }
-
-                if (failedCount > 0)
-                    WriteVerbose($"Wrote {failedCount} failed items to dead-letter file: {resolvedDeadLetterPath}");
             }
 
             // Structured telemetry summary

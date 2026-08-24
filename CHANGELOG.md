@@ -1,8 +1,34 @@
 # Changelog
 
-## 2.1.1
+## 2.1.2
 
-Patch release. One fix; no feature or API changes.
+### Fixed
+
+- Invoke-MgxBatchRequest wrote no error records for failed items unless a dead-letter write also failed.
+- A 204 or empty response body on a GET ended the cmdlet with an unhandled error.
+- An HTML or otherwise non-JSON response body surfaced as an unhandled exception instead of an error record.
+- A JSON response body that did not parse crashed the pipeline instead of reporting what was received.
+- A '#' in a request path silently dropped everything after it.
+- Pre-encoded -Filter, -Search, -Property, -Sort and -ExpandProperty values were percent-encoded a second time.
+- Enums in -Body were sent as numbers, which Graph does not accept.
+- A byte array in -Body became a JSON array of integers instead of base64.
+- A TimeSpan in -Body was not sent as an ISO-8601 duration.
+- A DateTime without a kind was sent without an offset and refused.
+- A PSCustomObject -Body dropped every property that was not a NoteProperty, sending {} in the worst case.
+- Non-ASCII text in -Body was \u-escaped, making -Debug traces and dead-letter files unreadable.
+- An array in -Headers went on the wire as the literal text System.String[].
+- Invoke-MgxRequest, Expand-MgxRelation and Export-MgxCollection mangled an absolute -Uri instead of rejecting it.
+- Get-MgxContent did not escape drive and item ids piped into the download path.
+- A Content-Type or other content header in -Headers was silently dropped.
+- A client-request-id in -Headers had Mgx's own value appended after it.
+- If-Match and if-match in -Headers went on the wire as two headers.
+- A typed parameter duplicating a query option already written into -Uri sent it twice.
+- An attempt that timed out during Ctrl-C could schedule another retry.
+- Requests through Enable-MgxResilience carried no client-request-id to quote at Graph support.
+- An unexpected failure discarded the buffered retry history that explained it.
+- A request body over 4MB passed through Enable-MgxResilience unchecked and was buffered whole.
+
+## 2.1.1
 
 ### Fixed
 

@@ -162,7 +162,7 @@ public class GetMgxContent : MgxCmdletBase
         }
 
         FetchContent(downloadUrl: null,
-            relativeUri: $"/drives/{driveId}/items/{id}/content",
+            relativeUri: $"/drives/{System.Uri.EscapeDataString(driveId)}/items/{System.Uri.EscapeDataString(id)}/content",
             errorTarget: InputObject);
     }
 
@@ -281,6 +281,13 @@ public class GetMgxContent : MgxCmdletBase
             // file-writing cmdlet that did not.
             DrainClientMessages();
             WriteError(new ErrorRecord(ex, "IOError", ErrorCategory.WriteError, OutFile));
+        }
+        catch (Exception)
+        {
+            // Unexpected exception types skip the drains above; the buffered verbose and
+            // warning messages are the context that explains the failure.
+            DrainClientMessages();
+            throw;
         }
     }
 

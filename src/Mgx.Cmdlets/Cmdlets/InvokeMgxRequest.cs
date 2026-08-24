@@ -3,6 +3,7 @@ using System.Management.Automation;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Mgx.Cmdlets.Base;
 using Mgx.Engine.Http;
 using Mgx.Engine.Models;
@@ -139,6 +140,18 @@ public class InvokeMgxRequest : MgxCmdletBase
 
     protected override void BeginProcessing()
     {
+        // Reject absolute URLs (relative paths only); concatenation onto the versioned
+        // base URL would otherwise silently produce /v1.0/https:/... on the wire.
+        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            ThrowTerminatingError(new ErrorRecord(
+                new ArgumentException(
+                    $"-Uri must be a relative path (e.g., /users), not an absolute URL. Got: '{Uri}'"),
+                "AbsoluteUriNotAllowed", ErrorCategory.InvalidArgument, null));
+            return;
+        }
+
         _isFanOut = Uri.Contains("{id}", StringComparison.OrdinalIgnoreCase);
 
         // $search requires ConsistencyLevel: eventual. Error if missing (data loss otherwise)
@@ -190,7 +203,17 @@ public class InvokeMgxRequest : MgxCmdletBase
         }
 
         // Direct mode (no fan-out): execute immediately
-        ExecuteRequest(Uri, sourceId: null);
+        try
+        {
+            ExecuteRequest(Uri, sourceId: null);
+        }
+        catch (Exception)
+        {
+            // Unexpected exception types skip the drains inside; the buffered verbose and
+            // warning messages are the context that explains the failure.
+            DrainClientMessages();
+            throw;
+        }
     }
 
     /// <summary>
@@ -229,6 +252,13 @@ public class InvokeMgxRequest : MgxCmdletBase
         catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
         {
             WriteWarning("Request cancelled by user.");
+        }
+        catch (Exception)
+        {
+            // Unexpected exception types skip the drains above; the buffered verbose and
+            // warning messages are the context that explains the failure.
+            DrainClientMessages();
+            throw;
         }
         finally
         {
@@ -408,6 +438,15 @@ public class InvokeMgxRequest : MgxCmdletBase
                 WriteWarning("Request cancelled by user.");
                 return;
             }
+            catch (JsonException ex)
+            {
+                // A page body that does not parse. Items from earlier pages have already been
+                // emitted; report the failure instead of crashing the pipeline.
+                WriteError(new ErrorRecord(
+                    new InvalidOperationException($"A response page declared JSON but does not parse: {ex.Message}", ex),
+                    "MalformedJsonResponse", ErrorCategory.InvalidData, relativeUri));
+                return;
+            }
             catch (GraphServiceException ex) when (includeAutoCount && countAutoAdded && ex.StatusCode == HttpStatusCode.BadRequest)
             {
                 // Auto-added $count=true rejected by this endpoint; retry without it
@@ -456,11 +495,10 @@ public class InvokeMgxRequest : MgxCmdletBase
                 throw new GraphServiceException(response.StatusCode, body);
             }
 
-            using var stream = response.Content.ReadAsStreamAsync(CancellationToken).GetAwaiter().GetResult();
-            var json = JsonSerializer.DeserializeAsync<JsonElement>(stream, cancellationToken: CancellationToken)
-                .AsTask().GetAwaiter().GetResult();
-
-            OutputPayload(json, sourceId);
+            var bodyBytes = response.Content.ReadAsByteArrayAsync(CancellationToken).GetAwaiter().GetResult();
+            var json = ReadJsonPayload(response, bodyBytes, relativeUri);
+            if (json != null)
+                OutputPayload(json.Value, sourceId);
         }
         catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
         {
@@ -511,11 +549,9 @@ public class InvokeMgxRequest : MgxCmdletBase
                 // stream.Length throws NotSupportedException on network/decompression streams.
                 // Read as bytes to safely handle null ContentLength (chunked transfer) and empty bodies.
                 var bodyBytes = response.Content.ReadAsByteArrayAsync(CancellationToken).GetAwaiter().GetResult();
-                if (bodyBytes.Length > 0)
-                {
-                    var jsonEl = JsonSerializer.Deserialize<JsonElement>(bodyBytes);
-                    OutputPayload(jsonEl, sourceId);
-                }
+                var jsonEl = ReadJsonPayload(response, bodyBytes, relativeUri);
+                if (jsonEl != null)
+                    OutputPayload(jsonEl.Value, sourceId);
             }
             finally
             {
@@ -907,10 +943,13 @@ public class InvokeMgxRequest : MgxCmdletBase
         var queryParams = new List<string>();
 
         if (Property is { Length: > 0 })
-            queryParams.Add($"$select={System.Uri.EscapeDataString(string.Join(",", Property))}");
+            queryParams.Add($"$select={EscapeQueryValue(string.Join(",", Property))}");
 
         if (ExpandProperty is { Length: > 0 })
-            queryParams.Add($"$expand={System.Uri.EscapeDataString(string.Join(",", ExpandProperty))}");
+            queryParams.Add($"$expand={EscapeQueryValue(string.Join(",", ExpandProperty))}");
+
+        var existing = ExistingQueryOptions(baseUrl);
+        queryParams.RemoveAll(qp => existing.Contains(qp.Split('=', 2)[0]));
 
         if (queryParams.Count == 0)
             return baseUrl;
@@ -932,6 +971,49 @@ public class InvokeMgxRequest : MgxCmdletBase
     /// action endpoints such as /directoryObjects/getByIds) is unwrapped into one item per element;
     /// anything else is emitted whole.
     /// </summary>
+    /// <summary>
+    /// A response body as JSON for output, or null when nothing further should be emitted:
+    /// an empty body (204, or 200 with no content), a non-JSON body (emitted as text under
+    /// -Raw, otherwise an error), or a body that declares JSON and does not parse.
+    /// </summary>
+    private JsonElement? ReadJsonPayload(HttpResponseMessage response, byte[] bodyBytes, string relativeUri)
+    {
+        if (bodyBytes.Length == 0)
+        {
+            WriteVerbose($"HTTP {(int)response.StatusCode}: response has no content; nothing to emit.");
+            return null;
+        }
+
+        var contentType = response.Content.Headers.ContentType?.MediaType;
+        if (contentType != null && !contentType.EndsWith("json", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Raw.IsPresent)
+            {
+                WriteObject(Encoding.UTF8.GetString(bodyBytes));
+                return null;
+            }
+            WriteError(new ErrorRecord(
+                new InvalidOperationException(
+                    $"The response is {contentType}, not JSON. Use -Raw to receive it as text, or Get-MgxContent for file and media content."),
+                "NonJsonResponse", ErrorCategory.InvalidData, relativeUri));
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<JsonElement>(bodyBytes);
+        }
+        catch (JsonException)
+        {
+            var snippet = Encoding.UTF8.GetString(bodyBytes, 0, Math.Min(bodyBytes.Length, 200));
+            WriteError(new ErrorRecord(
+                new InvalidOperationException(
+                    $"The response declared JSON but does not parse. Body starts: {snippet}"),
+                "MalformedJsonResponse", ErrorCategory.InvalidData, relativeUri));
+            return null;
+        }
+    }
+
     private void OutputPayload(JsonElement json, string? sourceId)
     {
         var items = TryUnwrapCollection(json, out var truncated);
@@ -1005,6 +1087,50 @@ public class InvokeMgxRequest : MgxCmdletBase
     }
 
     /// <summary>
+    /// Options for -Body serialization, chosen for what Graph accepts rather than STJ's
+    /// defaults: enums as camelCase names (Graph never takes them numerically), TimeSpan as
+    /// an Edm.Duration string, a Kind-less DateTime pinned to UTC (Graph rejects a bare
+    /// timestamp), and readable non-ASCII instead of \uXXXX - both forms decode the same,
+    /// but dead-letter files and -Debug traces are read by people.
+    /// </summary>
+    internal static readonly JsonSerializerOptions BodyJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Converters =
+        {
+            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
+            new GraphDurationConverter(),
+            new GraphDateTimeConverter(),
+        },
+    };
+
+    /// <summary>Edm.Duration is ISO-8601 ("PT1H"); STJ's default "01:00:00" is refused.</summary>
+    private sealed class GraphDurationConverter : JsonConverter<TimeSpan>
+    {
+        public override TimeSpan Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            => System.Xml.XmlConvert.ToTimeSpan(reader.GetString()!);
+
+        public override void Write(Utf8JsonWriter writer, TimeSpan value, JsonSerializerOptions options)
+            => writer.WriteStringValue(System.Xml.XmlConvert.ToString(value));
+    }
+
+    /// <summary>
+    /// A DateTime with Kind=Unspecified would serialize with no offset, which Graph rejects.
+    /// Assume UTC - the read side already resolves timestamps to UtcDateTime, so a value that
+    /// round-trips through mgx keeps its meaning.
+    /// </summary>
+    private sealed class GraphDateTimeConverter : JsonConverter<DateTime>
+    {
+        public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            => reader.GetDateTime();
+
+        public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
+            => writer.WriteStringValue(value.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
+                : value);
+    }
+
+    /// <summary>
     /// Serialize a -Body argument to the JSON that goes on the wire. A raw JSON string is passed
     /// through verbatim, everything else is serialized.
     /// </summary>
@@ -1013,20 +1139,26 @@ public class InvokeMgxRequest : MgxCmdletBase
         var value = UnwrapPSObject(body);
         if (value is string s) return s;
         // Still a PSObject after unwrapping: a PSCustomObject, whose members live on the wrapper
-        if (value is PSObject pso) return JsonSerializer.Serialize(PSOToDict(pso));
-        if (value is IDictionary dict) return JsonSerializer.Serialize(DictionaryToDict(dict));
+        if (value is PSObject pso) return JsonSerializer.Serialize(PSOToDict(pso), BodyJsonOptions);
+        if (value is IDictionary dict) return JsonSerializer.Serialize(DictionaryToDict(dict), BodyJsonOptions);
         // Handle array body (object[], ArrayList, List<object>, ... from PowerShell)
-        if (value is IEnumerable seq) return JsonSerializer.Serialize(EnumerableToArray(seq));
-        return JsonSerializer.Serialize(value);
+        if (value is IEnumerable seq and not byte[]) return JsonSerializer.Serialize(EnumerableToArray(seq), BodyJsonOptions);
+        return JsonSerializer.Serialize(value, BodyJsonOptions);
     }
 
     internal static Dictionary<string, object?> PSOToDict(PSObject pso)
     {
+        // Every property kind, matching what ConvertTo-Json reads - so -Body $obj and
+        // -Body ($obj | ConvertTo-Json) produce the same members. ScriptProperties are
+        // evaluated; one whose getter throws serializes as null rather than failing the
+        // whole body.
         var dict = new Dictionary<string, object?>();
         foreach (var prop in pso.Properties)
         {
-            if (prop.MemberType == PSMemberTypes.NoteProperty)
-                dict[prop.Name] = UnwrapValue(prop.Value);
+            object? raw;
+            try { raw = prop.Value; }
+            catch (GetValueException) { raw = null; }
+            dict[prop.Name] = UnwrapValue(raw);
         }
         return dict;
     }
@@ -1057,7 +1189,9 @@ public class InvokeMgxRequest : MgxCmdletBase
         }
         if (value is IDictionary dict)
             return DictionaryToDict(dict);
-        if (value is IEnumerable seq and not string)
+        // byte[] is Edm.Binary and serializes as base64; flattening it into object?[]
+        // would emit a JSON array of integers instead.
+        if (value is IEnumerable seq and not (string or byte[]))
             return EnumerableToArray(seq);
         return value;
     }

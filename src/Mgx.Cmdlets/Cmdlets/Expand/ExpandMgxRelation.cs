@@ -80,6 +80,18 @@ public class ExpandMgxRelation : MgxCmdletBase
     {
         base.BeginProcessing();
 
+        // Reject absolute URLs (relative paths only); concatenation onto the versioned
+        // base URL would otherwise silently produce /v1.0/https:/... on the wire.
+        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            ThrowTerminatingError(new ErrorRecord(
+                new ArgumentException(
+                    $"-Uri must be a relative path (e.g., /groups/{{id}}/members), not an absolute URL. Got: '{Uri}'"),
+                "AbsoluteUriNotAllowed", ErrorCategory.InvalidArgument, null));
+            return;
+        }
+
         if (!Uri.Contains("{id}", StringComparison.OrdinalIgnoreCase))
         {
             ThrowTerminatingError(new ErrorRecord(
@@ -128,6 +140,13 @@ public class ExpandMgxRelation : MgxCmdletBase
         catch (OperationCanceledException) when (CancellationToken.IsCancellationRequested)
         {
             WriteWarning("Expand-MgxRelation cancelled by user.");
+        }
+        catch (Exception)
+        {
+            // Unexpected exception types skip the drains above; the buffered verbose and
+            // warning messages are the context that explains the failure.
+            DrainClientMessages();
+            throw;
         }
 
         base.EndProcessing();

@@ -171,7 +171,10 @@ public static class ResiliencePipelineFactory
                     // AttemptTimeoutSeconds. Without this, requests fail permanently when
                     // Graph returns Retry-After > AttemptTimeoutSeconds.
                     // The outer TotalTimeout still bounds the overall operation.
-                    if (args.Outcome.Exception is TimeoutRejectedException)
+                    // Never after cancellation: an attempt timeout that fires while the caller
+                    // is cancelling must not schedule another attempt.
+                    if (args.Outcome.Exception is TimeoutRejectedException &&
+                        !args.Context.CancellationToken.IsCancellationRequested)
                         return ValueTask.FromResult(isIdempotent);
 
                     return ValueTask.FromResult(false);

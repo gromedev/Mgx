@@ -51,6 +51,12 @@ git push origin main && git push origin vX.Y.Z
 The squash message is the public record of the release; the CHANGELOG carries the per-defect
 detail. Describe what the release *is*, not the churn that produced it.
 
+Do not open it by restating what the version number already says. "Patch release", a count of
+the fixes, "no feature or API changes", "the PowerShell 7.4 floor is unchanged" - a reader can
+see all of that from the version and the entries beneath it. A feature, an API change or a
+floor move is worth a sentence precisely because it is not the default; the absence of one is
+not. Start with what changed.
+
 ## After
 
 `Publish-Module` from the tagged `main`.

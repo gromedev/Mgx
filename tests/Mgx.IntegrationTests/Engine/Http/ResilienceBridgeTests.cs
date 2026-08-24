@@ -246,4 +246,49 @@ public class ResilienceBridgeTests
             });
         }
     }
+
+    [Fact]
+    public async Task Bridge_stamps_one_correlation_id_per_logical_request()
+    {
+        ResiliencePipelineFactory.Reset();
+        var wire = new MockHttpHandler();
+        wire.QueueFailuresThenSuccess(1, HttpStatusCode.ServiceUnavailable, "{}");
+
+        var (pipeline, _) = ResiliencePipelineFactory.GetOrCreate(
+            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 3 });
+        using var handler = new ResilientDelegatingHandler(pipeline, null) { InnerHandler = wire };
+        using var client = new HttpClient(handler);
+
+        var response = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, "https://graph.microsoft.com/v1.0/users"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var captured = wire.CapturedRequests;
+        Assert.Equal(2, captured.Count);
+        var first = Assert.Single(Assert.Contains("client-request-id", captured[0].Headers));
+        var second = Assert.Single(Assert.Contains("client-request-id", captured[1].Headers));
+        Assert.Equal(first, second);
+        ResiliencePipelineFactory.Reset();
+    }
+
+    [Fact]
+    public async Task Bridge_keeps_the_sdk_correlation_id_when_one_is_already_set()
+    {
+        ResiliencePipelineFactory.Reset();
+        var wire = new MockHttpHandler();
+        wire.QueueResponse(HttpStatusCode.OK, "{}");
+
+        var (pipeline, _) = ResiliencePipelineFactory.GetOrCreate(
+            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 3 });
+        using var handler = new ResilientDelegatingHandler(pipeline, null) { InnerHandler = wire };
+        using var client = new HttpClient(handler);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "https://graph.microsoft.com/v1.0/users");
+        request.Headers.TryAddWithoutValidation("client-request-id", "sdk-set-id");
+        await client.SendAsync(request);
+
+        var sent = Assert.Single(wire.CapturedRequests);
+        Assert.Equal("sdk-set-id", Assert.Single(Assert.Contains("client-request-id", sent.Headers)));
+        ResiliencePipelineFactory.Reset();
+    }
 }

@@ -1,63 +1,130 @@
 # Mgx
 
-Microsoft Graph works well for ordinary scripts. It gets harder when a script becomes a long-running job making thousands of requests.
+High-performance, resilient Microsoft Graph access for PowerShell.
 
-At that point, the problems are usually not authentication or the Graph API itself. They are pagination, throttling, concurrency, dead connections, retries, memory usage, and jobs that need to survive for hours without manual intervention.
+`Mgx` is a PowerShell client for Microsoft Graph built for long-running and high-volume workloads. It handles the parts that become difficult when a script makes thousands of requests: pagination, concurrency, throttling, retries, dead connections, memory usage, and recovery from interruption.
 
-Mgx is a PowerShell client for Microsoft Graph that deals with those problems. It adds concurrent requests, streaming pagination, batching, rate limiting, retries, connection recovery, checkpointed exports, delta synchronization, and telemetry. It can use the authentication context established by `Connect-MgGraph`, so it does not require a separate authentication system.
+It adds concurrent fan-out, streaming pagination, batching, adaptive rate limiting, retry and connection recovery, checkpointed exports, delta synchronization, content downloads, and telemetry.
 
-In benchmarks against a 100,000-user tenant, workloads involving many individual lookups were **4–5× faster** than the Microsoft Graph SDK. Plain enumeration, where there is little to parallelize, is roughly the same speed as a tuned SDK.
-
-The bigger difference is what happens when Graph starts throttling or the network stops cooperating. In one test, a 100,000-user enumeration was run while the application's request budget was held at its limit. Mgx returned all 100,000 users. A raw `Invoke-RestMethod` loop without equivalent retry and pacing logic returned only 1,700.¹
-
-<sup>¹ Tested with sustained throttle waves, injected 429/503 responses, dead sockets, and process termination during export. See [`tests/benchmarks/`](tests/benchmarks/).</sup>
-
-## Quick start
+Mgx can use the authentication context established by `Connect-MgGraph`, so it does not require a separate authentication system.
 
 ```powershell
-Install-Module Microsoft.Graph.Authentication   # Connect-MgGraph lives here
+Install-Module Microsoft.Graph.Authentication
 Install-Module Mgx
+
 Connect-MgGraph -Scopes "User.Read.All"
+
 Invoke-MgxRequest /users -All -Property displayName,mail
 ```
 
 ## What Mgx adds
 
-- Concurrent fan-out for workloads with many independent requests
-- Streaming pagination instead of collecting the entire result set in memory
-- Batch requests with up to 20 sub-requests per HTTP call
-- Proactive rate limiting, retries with jitter, circuit breaking, and connection recycling
-- Adaptive per-workload request pacing to avoid running into Graph limits unnecessarily
-- JSONL exports with checkpoints and resume support
-- Delta synchronization with persisted state and mid-run recovery
-- Whole-file and ranged content downloads through a validated redirect path without forwarding the bearer token
-- Telemetry for HTTP timing, throttling, retries, and resource consumption
-- `Enable-MgxResilience` for adding Mgx's resilience handling to existing Microsoft Graph SDK scripts
+- **Concurrent fan-out** for workloads with many independent requests
+- **Streaming pagination** without buffering entire collections in memory
+- **Batch requests** with up to 20 sub-requests per HTTP call
+- **Adaptive rate limiting** that learns the usable rate for each workload
+- **Retries, circuit breaking, timeouts, and connection recovery**
+- **Checkpointed JSONL exports** with crash-safe resume
+- **Delta synchronization** with persisted state and mid-run recovery
+- **Whole-file and ranged content downloads**
+- **Telemetry** for HTTP timing, throttling, retries, pacing, and resource units
+- **SDK resilience integration** through `Enable-MgxResilience`
+
+The difference matters most when Graph stops behaving like a simple request/response API and starts behaving like a distributed system with quotas, transient failures, long-running connections, and partial progress.
+
+## Examples
+
+```powershell
+# Enumerate all users, streamed
+Invoke-MgxRequest /users -All -Property displayName,mail,department
+
+# Filter
+Invoke-MgxRequest /users `
+    -Filter "department eq 'Engineering'" `
+    -Property displayName,mail
+
+# Single request
+Invoke-MgxRequest "/users/$userId"
+
+# Concurrent fan-out
+@("id1", "id2", "id3") |
+    Invoke-MgxRequest '/users/{id}'
+
+# Expand related objects in parallel
+Invoke-MgxRequest /users -Top 50 |
+    Expand-MgxRelation '/users/{id}/manager' -As Manager -Flatten
+
+# Batch up to 20 requests per HTTP call
+@("/users/id1", "/users/id2") |
+    Invoke-MgxBatchRequest -Method PATCH -Body @{ department = "HR" }
+
+# Stream a collection to JSONL with checkpoint/resume
+Export-MgxCollection /auditLogs/signIns `
+    -OutputFile ./signins.jsonl `
+    -CheckpointPath ./signins.cp `
+    -All
+
+# Stateful delta synchronization
+Sync-MgxDelta /users/delta `
+    -DeltaPath ./users.delta.json `
+    -Property displayName,mail
+
+# Resumable delta export
+Sync-MgxDelta /me/drive/root/delta `
+    -DeltaPath ./drive.json `
+    -CheckpointPath ./drive.cp `
+    -OutputFile ./drive.jsonl
+
+# Read only the first 256 KiB of each file
+Invoke-MgxRequest "/me/drive/items/$folderId/children" -All |
+    Where-Object { $_.file } |
+    Get-MgxContent -First 262144
+
+# Add Mgx resilience to existing Microsoft Graph SDK code
+Enable-MgxResilience
+Get-MgUser -All
+Disable-MgxResilience
+```
+
+See [`examples/`](examples/) for additional examples.
+
+## Microsoft.Graph comparison
+
+Mgx is not intended to replace the Microsoft Graph SDK's typed cmdlets for ordinary interactive use. It targets workloads where request orchestration, throughput, and recovery become the dominant problems.
+
+| Common operation | Microsoft.Graph | Mgx |
+| --- | --- | --- |
+| Bulk lookups | `ForEach-Object { Get-MgUser -UserId $_ }` | `Invoke-MgxRequest '/users/{id}'` |
+| Bulk updates | Individual SDK calls | `Invoke-MgxBatchRequest` |
+| Large exports | Buffer with `Get-MgUser -All` | `Export-MgxCollection` |
+| Fault protection | Script-specific | Built in |
+| Adaptive pacing | Not provided | Built in |
+| Dead connection recovery | Default HTTP behavior | Body-read timeouts + connection recycling |
+| Telemetry | Caller-managed | `Get-MgxTelemetry` |
+| Beta endpoints | `Microsoft.Graph.Beta` | `-ApiVersion beta` |
+
+`Enable-MgxResilience` can add Mgx's resilience handling to existing SDK scripts without replacing the SDK's own request pipeline.
 
 ## Benchmarks
 
-> **Environment:** Entra ID test tenant with 100k users and 15.8k groups. PowerShell 7.6.4 (.NET 10) with the Microsoft.Graph SDK, app-only via certificate. The module's supported floor is 7.4 (.NET 8), which is verified by the test suite but is not where these figures were measured. Every row below comes from one run of the suite against one tenant on one build; rows that could not be re-measured have been removed rather than carried forward.
+### Performance
 
-### Performance & throughput
+Benchmarks were run against an Entra ID test tenant containing 100,000 users and 15,779 groups using PowerShell 7.6.4 (.NET 10), app-only authentication, and the Microsoft Graph SDK.
 
-| Operation | Mgx | SDK (`Get-MgUser`) | Raw REST (`Invoke-RestMethod`) | Speedup vs SDK |
+| Operation | Mgx | SDK (`Get-MgUser`) | Raw REST | Speedup vs SDK |
 | --- | ---: | ---: | ---: | ---: |
-| **List 100,000 users** | **47.1s** | 53.2s¹ | 58.5s | 1.1× |
+| **List 100,000 users** | **47.1s** | 53.2s | 58.5s | 1.1× |
 | **Look up 5,000 users by ID** | **98.8s** | 521.0s | 985.3s | **5.3×** |
 | **User report** *(1k users + groups)* | **23.9s** | 107.9s | 205.8s | **4.5×** |
-| **Full delta enumeration** *(130,233 items)* | **145.6s** | - | - | - |
+| **Full delta enumeration** *(130,233 items)* | **145.6s** | — | — | — |
 
-<sup>¹ Both figures are the SDK at `-PageSize 999`, which is what the benchmark runs. At the SDK's default page size the same enumeration takes about 2.5–3× as long. The practical difference is that Mgx needs no tuning to get close to the tuned SDK result.</sup>
+Sequential enumeration has little concurrency to exploit, so Mgx is close to a tuned SDK. Workloads with many independent requests benefit much more from concurrency and batching.
 
-Graph charges resource units per request based on the query shape, not on which client sent it. The three columns above therefore spend roughly the same amount when they issue equivalent requests: about 102 units for the enumeration, 5,002 for the lookups, and 2,003 for the report.
-
-Mgx does not make those requests cheaper. It makes the budget visible: it accumulates `x-ms-resource-unit` across the session and uses that information when pacing requests. See [Resource units: what queries actually cost](#resource-units-what-queries-actually-cost).
-
-<sup>Measured from `x-ms-resource-unit`. `/users/{id}` costs 1 RU; `transitiveMembers` with `$select` and `$top` costs 3, matching the documented cost table. At 5,002 RU the heaviest row above spends about 1.3% of the 8,000 RU / 10s Identity & Access budget for one application + tenant pair. The delta endpoint does not emit the header, so no figure is given.</sup>
+The SDK enumeration result above uses `-PageSize 999`, matching the benchmark. At its default page size, the same enumeration takes roughly 2.5–3× as long.
 
 ### Resilience under throttling
 
-This test enumerated all 100,000 users while a second client held the application's resource-unit budget at its ceiling. Ground truth is `/users/$count`, which the directory serves from its own index rather than by walking pages.
+A second client was used to hold the application's resource-unit budget near its limit while all 100,000 users were enumerated.
 
 | Contender | Retrieved | Missing | Duplicates | Wall time |
 | --- | ---: | ---: | ---: | ---: |
@@ -66,128 +133,76 @@ This test enumerated all 100,000 users while a second client held the applicatio
 | `Invoke-RestMethod` + fixed retry | 8,000 / 100,000 | 92,000 | 0 | 120.0s |
 | `Invoke-RestMethod`, no retry | 1,700 / 100,000 | 98,300 | 0 | 5.5s |
 
-The raw REST clients finish sooner because they stop making useful progress as soon as the budget is exhausted. Mgx and the SDK take longer because they keep going until the enumeration is complete. The SDK's retry handling is already correct here; the useful distinction is whether the client actually honors throttling instead of treating the first wave of 429s as the end of the job.
+The raw REST loops finish sooner because they stop making useful progress once the budget is exhausted. Mgx and the SDK take longer because they continue until the enumeration is complete.
 
-Running the same enumeration without the competing load produced exactly 100,000 users from all four clients. The difference above is caused by throttling, not pagination.
+Without the competing load, all four clients returned exactly 100,000 users. The difference above is caused by throttling, not pagination.
 
-`Enable-MgxResilience` does not replace the SDK's existing retry handler. The SDK already handles throttling. Mgx adds things that are not covered by that handler, including per-request body-read timeouts and periodic connection recycling, so a dead socket can become a retryable failure instead of an indefinite hang.
-
-### Delta enumerations repeat themselves
-
-A delta run does not paginate a snapshot. The same object can appear on several pages of one enumeration. Against a tenant containing 15,779 groups, over 1,135 pages produced these results:
-
-| Contender | Emitted | Distinct |
-| --- | ---: | ---: |
-| `Invoke-RestMethod` over `/groups/delta` | 172,740 | 17,467 |
-| `Sync-MgxDelta` over the same resource | 172,740 | 17,467 |
-
-Mgx is not silently deduplicating these objects. Correct deduplication requires a policy for cases where the same ID appears both live and as `@removed`, and the final occurrence is not knowable while streaming without retaining every ID seen. Until a policy is defined by the caller, dedupe downstream on `id`.
-
-Distinct exceeds the group count because a full delta also returns tombstones for deleted groups; 16,324 of the objects above carry `@removed`.
-
-### What adaptive pacing costs when nothing is throttling
-
-Adaptive pacing is enabled by default. It starts conservatively, increases the allowed rate as requests succeed, and backs off when throttling or latency changes indicate that the workload is approaching a limit.
-
-That has almost no cost on a long-running workload because the initial ramp is paid once. It can be noticeable on a small workload that finishes before the ramp is complete.
-
-| Workload | Pacing on *(default)* | `-NoAdaptivePacing` | Measured by |
-| --- | ---: | ---: | --- |
-| 8,000 concurrent reads | 39.4s | 40.3s | [benchmark 07](tests/benchmarks/07-adaptive-pacing.ps1) |
-| 50 lookups, concurrency 8, cold session | 4.4s | 1.0s | [benchmark 14](tests/benchmarks/14-pacing-cold-cost.ps1) |
-
-The large run had zero pacing activations and zero throttle retries; the paced run was slightly faster. The small run paid roughly 4–6× because the workload completed during the cold-start ramp. Telemetry exposes this as `AdaptivePacingWaitMs`.
-
-For short interactive workloads against a tenant you are not pushing hard, disable it with:
-
-```powershell
-Set-MgxOption -NoAdaptivePacing
-```
-
-No 429s appeared at any concurrency the module permits. It caps at 128, and this tenant sustained roughly 700 RU/s for 90 seconds without refusing requests. A raw client only crossed the tenant's ceiling at around 200 requests in flight, which is beyond what Mgx will issue. Graph instead responded by increasing latency from about 113 ms to roughly 1 second. The pacing logic therefore reacts to `Retry-After` and latency drift rather than waiting for a throttle header that may never arrive.
-
-### Memory efficiency & recovery
+### Memory efficiency
 
 Exporting 100,000 users to JSONL:
 
-| | Mgx `Export-MgxCollection` | Mgx `Invoke-MgxRequest \| file` | `Invoke-RestMethod` buffer+write |
+| | Mgx `Export-MgxCollection` | Mgx request → file | REST buffer → write |
 | --- | ---: | ---: | ---: |
 | Wall time | 53.0s | 47.0s | 64.0s |
 | Peak working set | 305MB | **265MB** | **555MB** |
 | Managed heap delta | +19.8MB | **+5.0MB** | **+415.7MB** |
 
-Streaming directly to a file added 5MB to the managed heap over the whole export, compared with 416MB for the buffer-then-write approach. Peak working set was 265MB versus 555MB.
+Streaming directly to a file keeps managed heap growth close to zero relative to a buffer-then-write implementation, and `Export-MgxCollection` persists progress so an interrupted export can resume without duplicating objects.
 
-`Export-MgxCollection` also checkpoints progress continuously. After an interruption, rerunning the export resumes from the checkpoint without duplicating objects.
+### Adaptive pacing
 
-## Examples
+Adaptive pacing is enabled by default. It starts conservatively, increases the allowed rate as requests succeed, and backs off when throttling or latency indicates that a workload is approaching a limit.
 
-```powershell
-# All users, streamed
-Invoke-MgxRequest /users -All -Property displayName,mail,department
+| Workload | Pacing on | `-NoAdaptivePacing` |
+| --- | ---: | ---: |
+| 8,000 concurrent reads | 39.4s | 40.3s |
+| 50 lookups, concurrency 8, cold session | 4.4s | 1.0s |
 
-# Filter
-Invoke-MgxRequest /users -Filter "department eq 'Engineering'" -Property displayName,mail
-
-# Single user
-Invoke-MgxRequest "/users/$userId"
-
-# Pipe to CSV
-Invoke-MgxRequest /users -All -Property displayName,mail,department |
-    Select-Object displayName,mail,department |
-    Export-Csv users.csv
-
-# JSONL export with checkpoint/resume
-Export-MgxCollection /auditLogs/signIns -OutputFile ./signins.jsonl -CheckpointPath ./cp.json -All
-
-# Beta endpoints
-Invoke-MgxRequest /users -ApiVersion beta -Top 10
-
-# Add resilience to existing SDK scripts
-Enable-MgxResilience
-Get-MgUser -All
-Disable-MgxResilience
-```
-
-### Concurrent fan-out & batching
+The cold-start cost is most visible on very small workloads. For interactive workloads where the tenant is not being pushed hard, disable it with:
 
 ```powershell
-# Concurrent fan-out lookups
-@("id1", "id2", "id3") | Invoke-MgxRequest '/users/{id}'
-
-# Resolve nested relationships in parallel
-Invoke-MgxRequest /users -Top 50 |
-    Expand-MgxRelation '/users/{id}/manager' -As Manager -Flatten
-
-# Batch up to 20 requests per HTTP call
-@("/users/id1", "/users/id2") |
-    Invoke-MgxBatchRequest -Method PATCH -Body @{ department = "HR" }
-
-# Delta sync with automatic token handling
-Sync-MgxDelta /users/delta -DeltaPath ./delta.json -Property displayName,mail
-
-# Enumerate a whole drive, resumable mid-run; later runs return only changes
-Sync-MgxDelta /me/drive/root/delta -DeltaPath ./drive.json -CheckpointPath ./drive.cp -OutputFile drive.jsonl
-
-# Ranged reads: first 256 KB of each file instead of the whole thing
-Invoke-MgxRequest "/me/drive/items/$folderId/children" -All |
-    Where-Object { $_.file } |
-    Get-MgxContent -First 262144
+Set-MgxOption -NoAdaptivePacing
 ```
 
-See [`examples/`](examples/) for additional examples.
+## Resilience model
 
-## Microsoft.Graph comparison
+Mgx combines request-level resilience with workload-level pacing.
 
-| Common operation | Standard `Microsoft.Graph` | `Mgx` |
-| --- | --- | --- |
-| **Bulk lookups** | `$ids \| ForEach-Object { Get-MgUser -UserId $_ }` | `$ids \| Invoke-MgxRequest '/users/{id}'` |
-| **Bulk updates** | `$ids \| ForEach-Object { Update-MgUser ... }` | `$urls \| Invoke-MgxBatchRequest -Method PATCH -Body @{...}` |
-| **Exporting data** | `$all = Get-MgUser -All; $all \| Export-Csv ...` | `Export-MgxCollection /users -OutputFile users.jsonl` |
-| **Fault protection** | Written per script | Built in, or added to existing scripts with `Enable-MgxResilience` |
-| **Observability** | Timed by the caller | `Get-MgxTelemetry` |
-| **Dead connection handling** | Left to the default HTTP timeouts | Body-read timeouts + connection recycling |
-| **Beta endpoints** | Requires `Microsoft.Graph.Beta` | `-ApiVersion beta` |
+The request pipeline provides:
+
+1. **Rate limiting** — token bucket with burst capacity and a configurable refill rate
+2. **Retries** — exponential backoff with jitter for transient failures, including `429`, `500`, `502`, `503`, and `504`, while honoring `Retry-After`
+3. **Circuit breaking** — stops repeatedly failing workloads and allows controlled half-open recovery
+4. **Timeouts** — per-request and cumulative limits across retries
+5. **Connection recycling** — periodically replaces long-lived HTTP connections so dead sockets do not remain stuck indefinitely
+
+Adaptive pacing sits above those request-level strategies and learns a separate usable rate for each workload. A throttled Directory workload therefore does not unnecessarily slow an unrelated workload such as Drive.
+
+`Enable-MgxResilience` does not replace the SDK's own retry handler. It adds handling for failure modes outside that handler's scope, including body-read timeouts and periodic connection recycling.
+
+## Resource units and throttling
+
+Microsoft Graph directory workloads use resource-unit budgets. The cost depends on query shape rather than on which client issued the request.
+
+Mgx reads `x-ms-resource-unit` and exposes the accumulated values through `Get-MgxTelemetry`. It uses throttling signals and observed latency to pace requests before the workload repeatedly hits the limit.
+
+Examples measured against the test tenant:
+
+| Query shape | Resource units |
+| --- | ---: |
+| `transitiveMembers?$top=5` | 4 |
+| `transitiveMembers?$top=5&$select=id` | **3** |
+| `groups/{id}` | 1 |
+
+Resource units are not reduced by changing clients. Mgx makes them visible and uses them when deciding how aggressively to issue requests.
+
+See [`examples/resilience-and-telemetry/resource-unit-budgeting.ps1`](examples/resilience-and-telemetry/resource-unit-budgeting.ps1) and [`tests/benchmarks/13-resource-unit-rate.ps1`](tests/benchmarks/13-resource-unit-rate.ps1) for the measurement code.
+
+## Delta synchronization
+
+Graph delta enumeration can return the same object more than once during a single run, including combinations of live objects and `@removed` tombstones. Mgx does not silently deduplicate the stream because doing so requires a caller policy for conflicting occurrences and retaining every ID seen during the enumeration.
+
+`Sync-MgxDelta` handles delta-link persistence and checkpointed recovery while preserving the stream returned by Graph. Apply deduplication downstream when the application needs a specific conflict policy.
 
 ## Output shape
 
@@ -200,9 +215,9 @@ $user.displayName
 $user['@odata.type']
 ```
 
-`@odata.type` is the only annotation preserved. Other `@odata.*` transport metadata is stripped, including `@odata.etag`. Use `-Raw` when the original payload or `If-Match` tag is required.
+`@odata.type` is preserved. Other `@odata.*` transport metadata is stripped, including `@odata.etag`. Use `-Raw` when the original payload or `If-Match` tag is required.
 
-Hashtable keys have no defined order. Pin columns explicitly when output order matters:
+Keys have no defined order. Pin output columns explicitly when order matters:
 
 ```powershell
 Invoke-MgxRequest /users -All |
@@ -210,79 +225,41 @@ Invoke-MgxRequest /users -All |
     Export-Csv users.csv
 ```
 
-To work with `PSCustomObject`s instead, request the raw payload:
+Use `-Raw` when you need the original JSON object:
 
 ```powershell
-Invoke-MgxRequest /users -All -Raw | ConvertFrom-Json
+Invoke-MgxRequest /users -All -Raw |
+    ConvertFrom-Json
 ```
 
 ## Cmdlets
 
-| Cmdlet | Description |
+| Cmdlet | Purpose |
 | --- | --- |
-| `Invoke-MgxRequest` | Executes Graph requests with automatic concurrency, retries, and rate limiting |
-| `Invoke-MgxBatchRequest` | Batches up to 20 requests into a single HTTP POST call |
-| `Export-MgxCollection` | Streams paginated API results directly to JSONL with checkpointing |
-| `Expand-MgxRelation` | Performs concurrent fan-out lookups to expand related object attributes |
-| `Sync-MgxDelta` | Manages stateful delta queries and state token storage, with mid-run crash resume |
-| `Get-MgxContent` | Downloads content bytes, whole or ranged, through a token-free validated download path |
-| `Set-MgxOption` / `Get-MgxOption` | Configures global limits, retry counts, timeouts, and circuit-breaker thresholds |
-| `Enable-MgxResilience` / `Disable-MgxResilience` | Injects or removes Mgx resilience policies from native Microsoft.Graph SDK cmdlets |
-| `Get-MgxTelemetry` | Outputs execution statistics including HTTP duration, rate-limit delays, retry counts, and resource units |
+| `Invoke-MgxRequest` | Execute Graph requests with streaming, concurrency, retries, and rate limiting |
+| `Invoke-MgxBatchRequest` | Send up to 20 sub-requests in one Graph batch |
+| `Export-MgxCollection` | Stream paginated results to JSONL with checkpointing |
+| `Expand-MgxRelation` | Perform concurrent fan-out lookups for related objects |
+| `Sync-MgxDelta` | Manage delta state and checkpointed synchronization |
+| `Get-MgxContent` | Download whole files or ranged content |
+| `Set-MgxOption` / `Get-MgxOption` | Configure limits, retry counts, timeouts, and resilience thresholds |
+| `Enable-MgxResilience` / `Disable-MgxResilience` | Add or remove Mgx resilience from Microsoft.Graph SDK calls |
+| `Get-MgxTelemetry` | Report HTTP timing, retries, throttling, pacing, and resource-unit usage |
 
-## Resilience architecture
-
-All HTTP operations pass through four layered [Polly 8.x](https://github.com/App-vNext/Polly) resilience strategies:
-
-1. **Rate limiter:** Token bucket with 200 burst capacity and 50 requests/sec refill.
-2. **Retry policy:** Up to 7 retries with exponential backoff and jitter for transient errors (`429`, `500`, `502`, `503`, `504`), honoring `Retry-After`.
-3. **Circuit breaker:** Opens when error rates exceed 10%, with a half-open probe after 15 seconds.
-4. **Timeout:** 30-second per-request limit and 300-second cumulative ceiling across retries.
-
-### Resource units: what queries actually cost
-
-Graph throttles directory workloads on a **resource-unit budget**, not simply on request count or bandwidth. Mgx reads `x-ms-resource-unit` from responses and accumulates it, so `Get-MgxTelemetry` can show what a session actually spent. See [examples/resilience-and-telemetry/resource-unit-budgeting.ps1](examples/resilience-and-telemetry/resource-unit-budgeting.ps1).
-
-Measured against a 15,779-group test tenant:
-
-| Query shape | RU |
-| --- | ---: |
-| `transitiveMembers?$top=5` | 4 |
-| `transitiveMembers?$top=5&$select=id` | **3** |
-| `groups/{id}` (single read) | 1 |
-
-Both figures match the documented cost table: `transitiveMembers` is published at 5 RU, `$select` takes one off, and `$top` under 20 takes another. Cost is a property of the query shape, not the number of objects returned. On a per-group fan-out across that tenant, `$select` alone is the difference between 47,337 and 63,116 resource units.
-
-Three findings from pushing a single client until the tenant pushed back:
-
-- **The budget behaves like a token bucket, and burst hides its rate.** The published limit for a tenant of this size is 8,000 RU per 10 s per *application + tenant pair* (800 RU/s). Held at a fixed rate for 90 s from a single client, 300 and 700 RU/s were never refused. 1,200 RU/s began refusing after 19 s, and once saturated the tenant served about 730 RU/s however hard it was pushed. The exact ceiling moves: the same probe was refused at 631 RU/s on the previous day and saturated near 440. Re-measure with [`tests/benchmarks/13-resource-unit-rate.ps1`](tests/benchmarks/13-resource-unit-rate.ps1) rather than treating these measurements as constants.
-- **`x-ms-throttle-limit-percentage` was never emitted.** Mgx therefore treats it as opportunistic and paces on 429 + `Retry-After` and latency drift instead.
-- **Batching does not buy cheaper units.** Unbatched requests sustained a higher RU/s before throttling than the same requests inside `$batch`. Batching saves round-trips, not budget.
-
-Limits are scoped per **application + tenant pair**, and separately per service. That is why pacing state is partitioned by workload rather than pooled: a throttled directory fan-out says nothing about the budget remaining for Teams.
-
-A failed request costs 0 RU, so a fan-out that fails uniformly consumes no budget, triggers no throttling, and finishes fast while measuring nothing. Check status codes, not duration.
-
-Adaptive pacing runs ahead of the four resilience strategies above. It spaces requests before they are sent, learns a per-workload rate from throttling signals using additive increase / multiplicative decrease, and keeps Drive, Directory, and other workloads in separate buckets. It starts conservatively on a cold session.
-
-Batch outer POSTs are the one exemption. `GraphBatchClient` runs its own item-level AIMD controller; stacking two controllers on one workload would compound their backoff.
-
-Disable adaptive pacing with `Set-MgxOption -NoAdaptivePacing` and inspect the learned state in `Get-MgxTelemetry`.
-
-## Requirements & building
-
-### Requirements
+## Requirements
 
 - **PowerShell:** 7.4+
-- **Authentication:** `Microsoft.Graph.Authentication` 2.10.0+ for token acquisition. It is not a declared module dependency.
+- **Authentication:** `Microsoft.Graph.Authentication` 2.10.0+ for token acquisition
 
-### Build from source
+The authentication module is intentionally not a declared dependency because Mgx can operate with the authentication context already established by `Connect-MgGraph`.
+
+## Build
 
 ```powershell
 ./build.ps1
 ```
 
-Dependencies (`Microsoft.Graph.Core`, `Polly.Core`, and `System.Threading.RateLimiting`) are loaded into an isolated **Assembly Load Context** to avoid version conflicts with other PowerShell modules.
+`Microsoft.Graph.Core`, `Polly.Core`, and `System.Threading.RateLimiting` are loaded into an isolated **Assembly Load Context** to avoid assembly-version conflicts with other PowerShell modules.
 
 ## License
 

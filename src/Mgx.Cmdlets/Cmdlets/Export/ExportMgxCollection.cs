@@ -82,6 +82,18 @@ public class ExportMgxCollection : MgxCmdletBase
 
     protected override void BeginProcessing()
     {
+        // Reject absolute URLs (relative paths only); concatenation onto the versioned
+        // base URL would otherwise silently produce /v1.0/https:/... on the wire.
+        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            ThrowTerminatingError(new ErrorRecord(
+                new ArgumentException(
+                    $"-Uri must be a relative path (e.g., /users), not an absolute URL. Got: '{Uri}'"),
+                "AbsoluteUriNotAllowed", ErrorCategory.InvalidArgument, null));
+            return;
+        }
+
         // $search requires ConsistencyLevel: eventual. Error if missing (data loss otherwise)
         if (!string.IsNullOrEmpty(Search) && string.IsNullOrEmpty(ConsistencyLevel))
         {
@@ -509,6 +521,13 @@ public class ExportMgxCollection : MgxCmdletBase
                 WriteError(new ErrorRecord(ex, "AccessDenied",
                     ErrorCategory.PermissionDenied, OutputFile));
                 return;
+            }
+            catch (Exception)
+            {
+                // Unexpected exception types skip the drains above; the buffered verbose
+                // and warning messages are the context that explains the failure.
+                DrainClientMessages();
+                throw;
             }
         }
     }

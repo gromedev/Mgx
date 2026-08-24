@@ -6,6 +6,7 @@ using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Mgx.Engine.Http;
 using Mgx.Engine.Models;
 using Polly.CircuitBreaker;
@@ -978,7 +979,63 @@ public abstract class MgxCmdletBase : MgxCmdletCore
     protected static string NormalizePath(string path)
     {
         if (string.IsNullOrEmpty(path)) return string.Empty;
+        // A request URI has no use for a fragment - the server never sees one - so a raw '#'
+        // is always data (a filename, a filter value). Left alone, System.Uri would treat
+        // everything after it as a fragment and silently drop it from the wire.
+        path = path.Replace("#", "%23");
         return path.StartsWith('/') ? path : $"/{path}";
+    }
+
+    /// <summary>
+    /// Query-option names already present in a URL's own query string. Graph rejects a URL
+    /// carrying the same option twice, so a typed parameter defers to what the caller
+    /// already wrote into -Uri.
+    /// </summary>
+    protected static HashSet<string> ExistingQueryOptions(string url)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var q = url.IndexOf('?');
+        if (q < 0) return set;
+        foreach (var part in url[(q + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+            set.Add(part.Split('=', 2)[0]);
+        return set;
+    }
+
+    private static readonly Regex s_encodedTriplet = new("%[0-9A-Fa-f]{2}", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Escapes a query-option value, leaving anything already percent-encoded alone - a
+    /// pre-encoded filter must not be encoded twice (%27 becoming %2527), and a raw
+    /// apostrophe or space must still be escaped. Any %XX triplet counts as already
+    /// encoded; a value that means a literal percent-then-hex sequence has to arrive
+    /// pre-encoded (%25XX) to survive as data.
+    /// </summary>
+    protected static string EscapeQueryValue(string value)
+    {
+        var sb = new StringBuilder(value.Length + 16);
+        int i = 0;
+        foreach (Match m in s_encodedTriplet.Matches(value))
+        {
+            sb.Append(Uri.EscapeDataString(value[i..m.Index]));
+            sb.Append(m.Value);
+            i = m.Index + m.Length;
+        }
+        sb.Append(Uri.EscapeDataString(value[i..]));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A header value from a Hashtable. An array (Prefer takes several values) joins with
+    /// ", " - HTTP's list form - instead of .NET's array ToString(), which would put the
+    /// literal text "System.String[]" on the wire.
+    /// </summary>
+    private static string HeaderValueToString(object? value)
+    {
+        if (value == null) return string.Empty;
+        if (value is string s) return s;
+        if (value is IEnumerable seq)
+            return string.Join(", ", seq.Cast<object?>().Select(v => v?.ToString() ?? string.Empty));
+        return value.ToString() ?? string.Empty;
     }
 
     protected static Dictionary<string, string>? BuildRequestHeaders(
@@ -989,15 +1046,17 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         // Apply extraHeaders first so dedicated parameters can override
         if (extraHeaders != null)
         {
-            headers = new Dictionary<string, string>();
+            // Case-insensitive: HTTP header names are, and a case-variant duplicate
+            // (If-Match and if-match) must not become two wire headers.
+            headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var key in extraHeaders.Keys)
-                headers[key.ToString()!] = extraHeaders[key]?.ToString() ?? string.Empty;
+                headers[key.ToString()!] = HeaderValueToString(extraHeaders[key]);
         }
 
         // Dedicated -ConsistencyLevel parameter always wins over -Headers key
         if (!string.IsNullOrEmpty(consistencyLevel))
         {
-            headers ??= new Dictionary<string, string>();
+            headers ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             headers["ConsistencyLevel"] = consistencyLevel;
         }
 
@@ -1028,13 +1087,13 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         }
 
         if (!string.IsNullOrEmpty(p.Filter))
-            queryParams.Add($"$filter={Uri.EscapeDataString(p.Filter)}");
+            queryParams.Add($"$filter={EscapeQueryValue(p.Filter)}");
 
         if (p.Property is { Length: > 0 })
-            queryParams.Add($"$select={Uri.EscapeDataString(string.Join(",", p.Property))}");
+            queryParams.Add($"$select={EscapeQueryValue(string.Join(",", p.Property))}");
 
         if (p.Sort is { Length: > 0 })
-            queryParams.Add($"$orderby={Uri.EscapeDataString(string.Join(",", p.Sort))}");
+            queryParams.Add($"$orderby={EscapeQueryValue(string.Join(",", p.Sort))}");
 
         if (!string.IsNullOrEmpty(p.Search))
         {
@@ -1042,19 +1101,22 @@ public abstract class MgxCmdletBase : MgxCmdletCore
             var searchValue = p.Search;
             if (!searchValue.StartsWith('"') || !searchValue.EndsWith('"'))
                 searchValue = $"\"{searchValue}\"";
-            queryParams.Add($"$search={Uri.EscapeDataString(searchValue)}");
+            queryParams.Add($"$search={EscapeQueryValue(searchValue)}");
         }
 
         if (p.Skip > 0)
             queryParams.Add($"$skip={p.Skip}");
 
         if (p.ExpandProperty is { Length: > 0 })
-            queryParams.Add($"$expand={Uri.EscapeDataString(string.Join(",", p.ExpandProperty))}");
+            queryParams.Add($"$expand={EscapeQueryValue(string.Join(",", p.ExpandProperty))}");
 
         // $count=true: required explicitly via -CountVariable, or implicitly when $search is used
         // (Graph advanced query capabilities require $count=true alongside $search)
         if (p.IncludeCount || !string.IsNullOrEmpty(p.Search))
             queryParams.Add("$count=true");
+
+        var existing = ExistingQueryOptions(baseUrl);
+        queryParams.RemoveAll(qp => existing.Contains(qp.Split('=', 2)[0]));
 
         if (queryParams.Count == 0)
             return baseUrl;
