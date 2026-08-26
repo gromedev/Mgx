@@ -15,8 +15,10 @@
 
 BeforeAll {
     $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    if (-not $env:AZURE_TENANT_ID -or -not $env:AZURE_CLIENT_ID -or -not $env:AZURE_CLIENT_CERTIFICATE_PATH) {
-        throw "Live tests need AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_CERTIFICATE_PATH. " +
+    if (-not $env:AZURE_TENANT_ID -or -not $env:AZURE_CLIENT_ID -or
+        (-not $env:AZURE_CLIENT_CERTIFICATE_PATH -and -not $env:AZURE_CLIENT_SECRET)) {
+        throw "Live tests need AZURE_TENANT_ID, AZURE_CLIENT_ID, and either " +
+              "AZURE_CLIENT_CERTIFICATE_PATH or AZURE_CLIENT_SECRET. " +
               "They are not skipped on purpose: a live suite that skips itself is a live suite nobody runs."
     }
     . "$repo/tests/benchmarks/common.ps1"

@@ -28,8 +28,14 @@ public class HeaderWireTests
 
     private static void ResetTransport()
     {
+        // Restore every static InjectTransport touched - a later test in the collection
+        // that drives a cmdlet without injecting must not inherit this class's transport.
         Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
         Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
+        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
+        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
+        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
+        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
         ResiliencePipelineFactory.Reset();
     }
 

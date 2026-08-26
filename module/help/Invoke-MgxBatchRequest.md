@@ -147,6 +147,8 @@ Accept wildcard characters: False
 ### -Body
 Request body for all requests when piping string URLs. Ignored when pipeline input carries its own Body member.
 
+Bodies follow the same serialization contract as Invoke-MgxRequest -Body. An item whose body serialization refuses a value (a SecureString, NaN) fails on its own, like an item whose body is not valid JSON; the rest of the batch is sent.
+
 ```yaml
 Type: Object
 Parameter Sets: (All)

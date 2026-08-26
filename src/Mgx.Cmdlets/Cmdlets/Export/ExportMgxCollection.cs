@@ -84,8 +84,8 @@ public class ExportMgxCollection : MgxCmdletBase
     {
         // Reject absolute URLs (relative paths only); concatenation onto the versioned
         // base URL would otherwise silently produce /v1.0/https:/... on the wire.
-        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        if (Uri.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.TrimStart().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
         {
             ThrowTerminatingError(new ErrorRecord(
                 new ArgumentException(
@@ -180,7 +180,8 @@ public class ExportMgxCollection : MgxCmdletBase
 
         // Track whether $count=true was auto-added (not user-requested).
         // If the endpoint rejects it with 400, retry without.
-        bool countAutoAdded = !string.IsNullOrEmpty(Filter);
+        bool countAutoAdded = !string.IsNullOrEmpty(Filter)
+            && !ExistingQueryOptions(Uri).Contains("$count");
         bool includeAutoCount = countAutoAdded;
         bool suppressTop = false;
 
@@ -484,22 +485,27 @@ public class ExportMgxCollection : MgxCmdletBase
                 WriteWarning($"Export cancelled. {resumeHint}");
                 return;
             }
-            catch (GraphServiceException ex) when (includeAutoCount && countAutoAdded && ex.StatusCode == HttpStatusCode.BadRequest)
+            catch (System.Text.Json.JsonException ex)
             {
-                // Auto-added $count=true rejected by this endpoint; retry without it
+                // A page body that does not parse. Items already exported stay in the file;
+                // report the failure instead of ending the pipeline with a raw exception.
                 DrainClientMessages();
-                WriteVerbose("Endpoint rejected $count=true (HTTP 400). Retrying without count parameter.");
+                WriteError(new ErrorRecord(
+                    new InvalidOperationException($"A response page declared JSON but does not parse: {ex.Message}", ex),
+                    "MalformedJsonResponse", ErrorCategory.InvalidData, Uri));
+                return;
+            }
+            catch (GraphServiceException ex) when (IsCountRejection(ex, includeAutoCount && countAutoAdded))
+            {
+                DrainClientMessages();
+                WriteVerbose(CountRejectedVerbose);
                 includeAutoCount = false;
                 continue;
             }
-            catch (GraphServiceException ex) when (
-                !suppressTop
-                && !NoPageSize.IsPresent
-                && ex.StatusCode == HttpStatusCode.BadRequest
-                && string.Equals(ex.ErrorCode, "Request_UnsupportedQuery", StringComparison.OrdinalIgnoreCase))
+            catch (GraphServiceException ex) when (IsTopRejection(ex, suppressTop, NoPageSize.IsPresent))
             {
                 DrainClientMessages();
-                WriteVerbose("Endpoint rejected $top (Request_UnsupportedQuery). Retrying without page size.");
+                WriteVerbose(TopRejectedVerbose);
                 suppressTop = true;
                 continue;
             }
@@ -532,11 +538,23 @@ public class ExportMgxCollection : MgxCmdletBase
         }
     }
 
-    private string BuildUrl(bool includeCount, bool suppressTop = false) => BuildListUrl(
-        VersionedBaseUrl, Uri,
-        new ODataListParams(NoPageSize.IsPresent || suppressTop, Top, PageSize, Filter,
-            Property, Sort, Search, Skip, ExpandProperty,
-            IncludeCount: includeCount));
+    private bool _warnedDeferredOptions;
+
+    private string BuildUrl(bool includeCount, bool suppressTop = false)
+    {
+        var url = BuildListUrl(
+            VersionedBaseUrl, Uri,
+            new ODataListParams(NoPageSize.IsPresent || suppressTop, Top, PageSize, Filter,
+                Property, Sort, Search, Skip, ExpandProperty,
+                IncludeCount: includeCount),
+            out var deferred);
+        if (deferred.Count > 0 && !_warnedDeferredOptions)
+        {
+            _warnedDeferredOptions = true;
+            WriteWarning(DescribeDeferredOptions(deferred));
+        }
+        return url;
+    }
 
     private Dictionary<string, string>? BuildHeaders() =>
         BuildRequestHeaders(ConsistencyLevel, Headers);

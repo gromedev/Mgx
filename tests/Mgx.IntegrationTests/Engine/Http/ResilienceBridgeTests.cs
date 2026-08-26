@@ -272,6 +272,97 @@ public class ResilienceBridgeTests
     }
 
     [Fact]
+    public async Task A_known_oversized_body_passes_to_the_inner_chain_untouched()
+    {
+        // The pipeline cannot replay what it will not buffer, so it does not manage it:
+        // no clone, no retry stamp, no per-attempt timeout - the inner chain sees the
+        // ORIGINAL request exactly as the SDK built it.
+        ResiliencePipelineFactory.Reset();
+        var wire = new MockHttpHandler();
+        wire.QueueResponse(HttpStatusCode.OK, "{}");
+
+        var (pipeline, _) = ResiliencePipelineFactory.GetOrCreate(
+            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 3 });
+        using var handler = new ResilientDelegatingHandler(pipeline, null) { InnerHandler = wire };
+        using var client = new HttpClient(handler);
+
+        var big = new byte[5 * 1024 * 1024];
+        var request = new HttpRequestMessage(HttpMethod.Put, "https://graph.microsoft.com/v1.0/drives/d/items/i/content")
+        {
+            Content = new ByteArrayContent(big),
+        };
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var sent = Assert.Single(wire.CapturedRequests);
+        Assert.Equal(big.Length, sent.Body!.Length);
+        // Untouched: none of the wrap's stamps.
+        Assert.DoesNotContain("SdkVersion", sent.Headers);
+        Assert.DoesNotContain("client-request-id", sent.Headers);
+        ResiliencePipelineFactory.Reset();
+    }
+
+    [Fact]
+    public async Task The_wrap_adds_no_retries_to_a_known_oversized_body()
+    {
+        // A 429 comes back as-is from the wrap's side; whether it retries is the inner
+        // SDK chain's decision, exactly as without Enable-MgxResilience. (The mock IS
+        // the inner chain here, so one request means the wrap added none.)
+        ResiliencePipelineFactory.Reset();
+        var wire = new MockHttpHandler();
+        wire.QueueResponse(HttpStatusCode.TooManyRequests);
+        wire.QueueResponse(HttpStatusCode.OK, "{}");
+
+        var (pipeline, _) = ResiliencePipelineFactory.GetOrCreate(
+            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 3 });
+        using var handler = new ResilientDelegatingHandler(pipeline, null) { InnerHandler = wire };
+        using var client = new HttpClient(handler);
+
+        var request = new HttpRequestMessage(HttpMethod.Put, "https://graph.microsoft.com/v1.0/drives/d/items/i/content")
+        {
+            Content = new ByteArrayContent(new byte[5 * 1024 * 1024]),
+        };
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Equal(1, wire.RequestCount);
+        ResiliencePipelineFactory.Reset();
+    }
+
+    [Fact]
+    public async Task An_unknown_length_body_keeps_full_retry_protection_whatever_its_size()
+    {
+        // No declared length means the read is unavoidable; once buffered, it replays.
+        ResiliencePipelineFactory.Reset();
+        var wire = new MockHttpHandler();
+        wire.QueueResponse(HttpStatusCode.ServiceUnavailable);
+        wire.QueueResponse(HttpStatusCode.OK, "{}");
+
+        var (pipeline, _) = ResiliencePipelineFactory.GetOrCreate(
+            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 3 });
+        using var handler = new ResilientDelegatingHandler(pipeline, null) { InnerHandler = wire };
+        using var client = new HttpClient(handler);
+
+        var big = new byte[5 * 1024 * 1024];
+        var chunked = new StreamContent(new NonSeekableStream(big));
+        var request = new HttpRequestMessage(HttpMethod.Put, "https://graph.microsoft.com/v1.0/drives/d/items/i/content")
+        {
+            Content = chunked,
+        };
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(2, wire.RequestCount);
+        Assert.All(wire.CapturedRequests, r => Assert.Equal(big.Length, r.Body!.Length));
+        ResiliencePipelineFactory.Reset();
+    }
+
+    private sealed class NonSeekableStream(byte[] data) : MemoryStream(data)
+    {
+        public override bool CanSeek => false;
+    }
+
+    [Fact]
     public async Task Bridge_keeps_the_sdk_correlation_id_when_one_is_already_set()
     {
         ResiliencePipelineFactory.Reset();

@@ -1,3 +1,4 @@
+using Mgx.Engine.Errors;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Threading.RateLimiting;
@@ -5,6 +6,8 @@ using Polly;
 using Polly.CircuitBreaker;
 using Polly.Retry;
 using Polly.Timeout;
+
+
 
 namespace Mgx.Engine.Http;
 
@@ -138,70 +141,26 @@ public static class ResiliencePipelineFactory
                 MaxDelay = TimeSpan.FromSeconds(maxRetryAfterCap),
                 ShouldHandle = args =>
                 {
-                    // 429 is safe to retry for all methods including POST (matches Kiota SDK behavior)
-                    if (args.Outcome.Result?.StatusCode == (HttpStatusCode)429)
-                        return ValueTask.FromResult(true);
-
-                    // For non-idempotent methods (POST), only retry 429.
-                    // 500/502/503/504 may mean the request was partially processed.
+                    // Classification and the retry decision live in Errors/, shared with the
+                    // batch client and the download pipeline; ErrorPolicyParityTests holds
+                    // them to the decisions this predicate used to make inline. Per-attempt
+                    // timeouts (TimeoutRejectedException) retry so the Enable-MgxResilience
+                    // path survives the SDK honoring a Retry-After longer than
+                    // AttemptTimeoutSeconds; the outer TotalTimeout still bounds the whole.
                     var isIdempotent = args.Context.Properties.GetValue(IsIdempotentKey, true);
-                    if (!isIdempotent)
-                        return ValueTask.FromResult(false);
-
-                    if (args.Outcome.Result?.StatusCode is HttpStatusCode.InternalServerError
-                        or HttpStatusCode.BadGateway
-                        or HttpStatusCode.ServiceUnavailable
-                        or HttpStatusCode.GatewayTimeout
-                        or HttpStatusCode.RequestTimeout)
-                        return ValueTask.FromResult(true);
-
-                    if (args.Outcome.Exception is HttpRequestException)
-                        return ValueTask.FromResult(true);
-
-                    // Retry TaskCanceledException only if NOT caused by user cancellation (Ctrl+C).
-                    // Polly's attempt timeout throws TimeoutRejectedException (not TaskCanceledException),
-                    // so TaskCanceledException here means either user cancelled or HttpClient timeout.
-                    if (args.Outcome.Exception is TaskCanceledException &&
-                        !args.Context.CancellationToken.IsCancellationRequested)
-                        return ValueTask.FromResult(true);
-
-                    // Retry when Polly's per-attempt timeout fires (idempotent methods only).
-                    // This is critical for the Enable-MgxResilience path: the SDK's internal
-                    // RetryHandler may be honoring a Retry-After delay that exceeds
-                    // AttemptTimeoutSeconds. Without this, requests fail permanently when
-                    // Graph returns Retry-After > AttemptTimeoutSeconds.
-                    // The outer TotalTimeout still bounds the overall operation.
-                    // Never after cancellation: an attempt timeout that fires while the caller
-                    // is cancelling must not schedule another attempt.
-                    if (args.Outcome.Exception is TimeoutRejectedException &&
-                        !args.Context.CancellationToken.IsCancellationRequested)
-                        return ValueTask.FromResult(isIdempotent);
-
-                    return ValueTask.FromResult(false);
+                    var info = args.Outcome.Result is { } response
+                        ? MgxErrorClassifier.Classify(response)
+                        : args.Outcome.Exception is { } ex
+                            ? MgxErrorClassifier.Classify(ex, args.Context.CancellationToken.IsCancellationRequested)
+                            : new MgxErrorInfo(MgxErrorClass.Permanent, 0);
+                    return ValueTask.FromResult(MgxErrorPolicy.ShouldRetry(info.Class, isIdempotent));
                 },
                 DelayGenerator = args =>
-                {
-                    // Respect Retry-After header from Graph API (429 responses)
-                    if (args.Outcome.Result?.Headers.RetryAfter is RetryConditionHeaderValue retryAfter)
-                    {
-                        if (retryAfter.Delta.HasValue)
-                        {
-                            var delay = retryAfter.Delta.Value;
-                            var cap = TimeSpan.FromSeconds(maxRetryAfterCap);
-                            return ValueTask.FromResult<TimeSpan?>(delay > cap ? cap : delay);
-                        }
-                        if (retryAfter.Date.HasValue)
-                        {
-                            var delay = retryAfter.Date.Value - DateTimeOffset.UtcNow;
-                            if (delay > TimeSpan.Zero)
-                            {
-                                var cap = TimeSpan.FromSeconds(maxRetryAfterCap);
-                                return ValueTask.FromResult<TimeSpan?>(delay > cap ? cap : delay);
-                            }
-                        }
-                    }
-                    return ValueTask.FromResult<TimeSpan?>(null);
-                },
+                    // Respect Retry-After from the service; null falls back to the
+                    // exponential backoff configured above.
+                    ValueTask.FromResult(RetryAfterPolicy.Resolve(
+                        args.Outcome.Result?.Headers.RetryAfter,
+                        TimeSpan.FromSeconds(maxRetryAfterCap))),
                 OnRetry = args =>
                 {
                     var response = args.Outcome.Result;
@@ -258,28 +217,25 @@ public static class ResiliencePipelineFactory
                     return default;
                 }
             })
-            // Circuit breaker (5xx, not 429 or 408)
-            // 408 excluded: it's a client-perceived timeout, not a server-side failure indicator.
-            // Including it would cause proxy timeouts to trip the circuit breaker incorrectly.
+            // Circuit breaker. What counts as a circuit failure - and why 429 and 408
+            // deliberately do not - lives in MgxErrorPolicy.CountsAsCircuitFailure,
+            // beside the retry policy it diverges from.
             .AddCircuitBreaker(new CircuitBreakerStrategyOptions<HttpResponseMessage>
             {
                 FailureRatio = options.CircuitBreakerFailureRatio,
                 SamplingDuration = TimeSpan.FromSeconds(options.CircuitBreakerSamplingDurationSeconds),
                 MinimumThroughput = options.CircuitBreakerMinThroughput,
                 BreakDuration = TimeSpan.FromSeconds(options.CircuitBreakerDurationSeconds),
-                ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
-                    .HandleResult(r => r.StatusCode == HttpStatusCode.InternalServerError)
-                    .HandleResult(r => r.StatusCode == HttpStatusCode.BadGateway)
-                    .HandleResult(r => r.StatusCode == HttpStatusCode.ServiceUnavailable)
-                    .HandleResult(r => r.StatusCode == HttpStatusCode.GatewayTimeout)
-                    .Handle<HttpRequestException>()
-                    // Exclude user cancellation (Ctrl+C) from circuit breaker failure counting.
-                    // Only count non-user TaskCanceledException (e.g., HttpClient timeout).
-                    .Handle<TaskCanceledException>(e => !e.CancellationToken.IsCancellationRequested)
-                    // Count per-attempt timeouts as failures. Without this, repeated
-                    // timeouts (e.g., downstream hung) never trip the circuit breaker,
-                    // wasting MaxRetryAttempts * AttemptTimeoutSeconds before giving up.
-                    .Handle<TimeoutRejectedException>(),
+                ShouldHandle = args =>
+                {
+                    var info = args.Outcome.Result is { } response
+                        ? MgxErrorClassifier.Classify(response)
+                        : args.Outcome.Exception is { } ex and not BrokenCircuitException
+                            ? MgxErrorClassifier.Classify(ex,
+                                (ex as OperationCanceledException)?.CancellationToken.IsCancellationRequested ?? false)
+                            : new MgxErrorInfo(MgxErrorClass.Permanent, 0);
+                    return ValueTask.FromResult(MgxErrorPolicy.CountsAsCircuitFailure(info));
+                },
                 OnOpened = _ =>
                 {
                     MgxTelemetryCollector.Current.RecordCircuitBreakerTrip();

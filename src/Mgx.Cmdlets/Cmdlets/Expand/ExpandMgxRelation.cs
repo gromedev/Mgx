@@ -82,8 +82,8 @@ public class ExpandMgxRelation : MgxCmdletBase
 
         // Reject absolute URLs (relative paths only); concatenation onto the versioned
         // base URL would otherwise silently produce /v1.0/https:/... on the wire.
-        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        if (Uri.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.TrimStart().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
         {
             ThrowTerminatingError(new ErrorRecord(
                 new ArgumentException(
@@ -381,26 +381,13 @@ public class ExpandMgxRelation : MgxCmdletBase
         // -Uri: Graph rejects a URL carrying $top twice, which turned -Top into a 400 for
         // every input object.
         // The client-side truncation in the lambda enforces -Top either way.
-        if (Top > 0 && !HasTopQueryOption(url))
+        if (Top > 0 && !ExistingQueryOptions(url).Contains("$top"))
         {
             var separator = url.Contains('?') ? "&" : "?";
             url = $"{url}{separator}$top={Top}";
         }
 
         return url;
-    }
-
-    /// <summary>True when the URL already carries a $top query option.</summary>
-    private static bool HasTopQueryOption(string url)
-    {
-        var q = url.IndexOf('?');
-        if (q < 0) return false;
-        foreach (var part in url[(q + 1)..].Split('&'))
-        {
-            var name = part.Split('=', 2)[0];
-            if (string.Equals(name, "$top", StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return false;
     }
 
     private void HandleFanOutErrors(
@@ -413,7 +400,7 @@ public class ExpandMgxRelation : MgxCmdletBase
         foreach (var (url, ex) in errors)
         {
             var id = urlToId.GetValueOrDefault(url, url);
-            var statusCode = GetStatusCodeFromException(ex);
+            var statusCode = MgxErrorPresentation.TryGetStatus(ex);
 
             if (SkipNotFound.IsPresent && statusCode == HttpStatusCode.NotFound)
             {
@@ -426,19 +413,9 @@ public class ExpandMgxRelation : MgxCmdletBase
                 continue;
             }
 
-            var (errorId, category) = ex switch
-            {
-                BrokenCircuitException bce => ("CircuitBroken", bce.InnerException is GraphServiceException inner
-                    ? MapStatusToCategory(inner.StatusCode)
-                    : ErrorCategory.ResourceUnavailable),
-                HttpRequestException => ("HttpError", ErrorCategory.ConnectionError),
-                _ => ("ExpandRelationError", statusCode.HasValue
-                    ? MapStatusToCategory(statusCode.Value)
-                    : ErrorCategory.NotSpecified)
-            };
-            Exception reportEx = ex is BrokenCircuitException
-                ? new InvalidOperationException(CircuitBreakerMessage, ex) : ex;
-            WriteError(new ErrorRecord(reportEx, errorId, category, id));
+            var (errorId, category, report) =
+                MgxErrorPresentation.PresentItemFailure(ex, "ExpandRelationError", CircuitBreakerMessage);
+            WriteError(new ErrorRecord(report, errorId, category, id));
         }
 
         int skippedTotal = skipped404 + skipped403;
@@ -451,10 +428,4 @@ public class ExpandMgxRelation : MgxCmdletBase
         }
     }
 
-    private static HttpStatusCode? GetStatusCodeFromException(Exception ex)
-    {
-        if (ex is GraphServiceException gse) return gse.StatusCode;
-        if (ex is HttpRequestException hre && hre.StatusCode.HasValue) return hre.StatusCode.Value;
-        return null;
-    }
 }

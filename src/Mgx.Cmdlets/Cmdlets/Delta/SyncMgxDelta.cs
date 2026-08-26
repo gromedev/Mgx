@@ -99,8 +99,8 @@ public class SyncMgxDelta : MgxCmdletBase
     protected override void BeginProcessing()
     {
         // Reject absolute URLs (relative paths only)
-        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        if (Uri.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.TrimStart().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
         {
             ThrowTerminatingError(new ErrorRecord(
                 new ArgumentException(
@@ -190,8 +190,14 @@ public class SyncMgxDelta : MgxCmdletBase
             DeleteCheckpoint(resolvedCheckpointPath, "full sync requested");
         }
 
-        // Normalize $select and Prefer for order-independent comparison
-        var normalizedSelect = NormalizeSelect(Property != null ? string.Join(",", Property) : null);
+        // Normalize $select and Prefer for order-independent comparison. The effective
+        // select is what will go on the wire: a $select already in -Uri wins over
+        // -Property (the builder defers to it, with a warning), and the state must
+        // record and compare the wire value or every later run trips the consistency
+        // check against a select that was never sent.
+        var normalizedSelect = NormalizeSelect(
+            GetQueryOptionValue(Uri, "$select")
+            ?? (Property != null ? string.Join(",", Property) : null));
         var normalizedPrefer = NormalizeSelect(Prefer != null ? string.Join(",", Prefer) : null);
         var currentFilter = Filter;
         string requestUrl;
@@ -261,7 +267,15 @@ public class SyncMgxDelta : MgxCmdletBase
 
             // Normalized $select comparison (order-independent, deduplicated)
             var storedSelect = NormalizeSelect(existingState.Select);
-            if (!string.Equals(storedSelect, normalizedSelect, StringComparison.OrdinalIgnoreCase))
+            // State written before the wire-value change recorded the -Property form even
+            // when -Uri carried the $select. If the stored value matches THAT form for
+            // the same invocation, nothing actually changed on the wire - accept it, and
+            // the state is rewritten in the new form on save.
+            var legacySelect = NormalizeSelect(Property != null ? string.Join(",", Property) : null);
+            var selectUnchanged =
+                string.Equals(storedSelect, normalizedSelect, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(storedSelect, legacySelect, StringComparison.OrdinalIgnoreCase);
+            if (!selectUnchanged)
             {
                 WriteWarning(
                     "Property selection changed since last sync "
@@ -377,7 +391,10 @@ public class SyncMgxDelta : MgxCmdletBase
         else
         {
             requestUrl = BuildListUrl(VersionedBaseUrl, Uri,
-                new ODataListParams(false, Top, Top > 0 ? Top : 999, Filter, Property, null, null, 0, null));
+                new ODataListParams(false, Top, Top > 0 ? Top : 999, Filter, Property, null, null, 0, null),
+                out var deferred);
+            if (deferred.Count > 0)
+                WriteWarning(DescribeDeferredOptions(deferred));
 
             if (Latest.IsPresent && !honourLatest)
             {

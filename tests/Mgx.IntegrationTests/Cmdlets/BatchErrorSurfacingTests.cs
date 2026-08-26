@@ -30,8 +30,14 @@ public class BatchErrorSurfacingTests
 
     private static void ResetTransport()
     {
+        // Restore every static InjectTransport touched - a later test in the collection
+        // that drives a cmdlet without injecting must not inherit this class's transport.
         Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
         Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
+        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
+        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
+        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
+        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
         ResiliencePipelineFactory.Reset();
     }
 
@@ -128,6 +134,35 @@ public class BatchErrorSurfacingTests
     }
 
     [Fact]
+    public void Stop_preference_cannot_cut_the_dead_letter_file_short()
+    {
+        InjectTransport(new FirstChunkOnlyHandler());
+        var deadLetter = Path.Combine(Path.GetTempPath(), $"mgx-dl-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            using var ps = CreateShell();
+            ps.AddCommand("Invoke-MgxBatchRequest")
+              .AddParameter("Uri", Enumerable.Range(1, 25).Select(i => $"/users/u{i}").ToArray())
+              .AddParameter("Method", "GET")
+              .AddParameter("DeadLetterPath", deadLetter)
+              .AddParameter("ErrorAction", "Stop");
+            try { ps.Invoke(); } catch { /* Stop terminates - expected */ }
+
+            // First chunk answered 20 items (all 200 in this fixture), second chunk's POST
+            // failed, so 5 items were never sent. Every failure must be on disk even though
+            // Stop terminated at the first error record.
+            Assert.True(File.Exists(deadLetter), "dead-letter file was not written");
+            var lines = File.ReadAllLines(deadLetter);
+            Assert.Equal(5, lines.Length);
+        }
+        finally
+        {
+            File.Delete(deadLetter);
+            ResetTransport();
+        }
+    }
+
+    [Fact]
     public void Items_a_failed_chunk_never_sent_each_write_an_error_record()
     {
         InjectTransport(new FirstChunkOnlyHandler());
@@ -141,7 +176,10 @@ public class BatchErrorSurfacingTests
 
             var errors = ps.Streams.Error.ToList();
             Assert.Equal(5, errors.Count(e => e.FullyQualifiedErrorId.StartsWith("BatchItemNotSent")));
-            Assert.Equal(1, errors.Count(e => e.FullyQualifiedErrorId.StartsWith("BatchChunkFailed")));
+            var chunk = Assert.Single(errors, e => e.FullyQualifiedErrorId.StartsWith("BatchChunkFailed"));
+            // The chunk died on a 400; the record carries the classified category, not NotSpecified.
+            Assert.Equal(System.Management.Automation.ErrorCategory.InvalidArgument,
+                chunk.CategoryInfo.Category);
         }
         finally { ResetTransport(); }
     }

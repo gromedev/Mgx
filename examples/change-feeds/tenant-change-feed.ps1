@@ -1,5 +1,13 @@
 # A tenant change feed: everything that changed since the last run, resumable.
 #
+# group-change-feed.ps1 does this for a single resource and is the shorter read;
+# this is the same idea across several resources, with the details that show up
+# at tenant scale - checkpointing and duplicate collapsing.
+#
+# A feed baselined with -Latest deliberately skips what existed before it
+# started. If you want that too, tenant-inventory.ps1 is the snapshot half:
+# inventory once, then this feed keeps it current.
+#
 # Baseline once with -Latest (instant - no initial enumeration), then each
 # scheduled run appends only the changes to a JSONL log. Delta state makes
 # it incremental; -CheckpointPath makes a killed run continue instead of

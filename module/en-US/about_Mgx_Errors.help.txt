@@ -1,0 +1,99 @@
+TOPIC
+    about_Mgx_Errors
+
+SHORT DESCRIPTION
+    What terminates, what writes an error record, and how -ErrorAction and
+    -ErrorVariable behave across every Mgx cmdlet.
+
+LONG DESCRIPTION
+    Mgx follows one rule: only failures that make the whole invocation
+    meaningless terminate. Everything the service or transport says about an
+    individual request is a non-terminating error record, so a 10,000-item
+    fan-out that loses three items reports three errors and delivers 9,997
+    results.
+
+TERMINATING ERRORS
+
+    ThrowTerminatingError is reserved for pre-flight failures - the request
+    never went out, and no partial work exists:
+
+    - Not connected, or Microsoft.Graph.Authentication missing
+      (NotConnected, GraphAuthModuleNotLoaded, HttpClientInitFailed)
+    - Invalid parameters or combinations: an absolute -Uri
+      (AbsoluteUriNotAllowed), -Search without ConsistencyLevel
+      (ConsistencyLevelRequired), a missing {id} placeholder, an unwritable
+      state or output file validated before the first request, a body value
+      with no JSON meaning (InvalidBodyValue), a second piped item against
+      one -OutFile (OutFileWithMultipleInputs) - refused before its content
+      is fetched
+
+    Everything else is non-terminating.
+
+NON-TERMINATING ERRORS
+
+    Every service and transport failure writes an ErrorRecord and continues:
+
+    ErrorId                     When
+    -------                     ----
+    <Graph error code>          A Graph error with a code (e.g.
+                                Request_ResourceNotFound); "GraphError"
+                                when the body carried none
+    HttpError                   Transport failure with no response
+    CircuitBroken               The circuit breaker is open; the record wraps
+                                the guidance text
+    BatchItemError              A batch item answered >= 400
+    BatchItemNotSent            A batch item skipped because an earlier chunk
+                                failed
+    BatchChunkFailed            The chunk POST itself failed
+    FanOutError                 A per-id GET failed during fan-out
+    BulkWriteError              A per-id write failed during fan-out
+    BulkWriteInfraError         A fan-out write died before an HTTP status
+    ExpandRelationError         A relation fetch failed during expansion
+    NonJsonResponse             The body is not JSON (use -Raw or
+                                Get-MgxContent)
+    MalformedJsonResponse       The body declared JSON and does not parse
+    IOError / AccessDenied      An output, checkpoint, or state file failed
+
+    The ErrorCategory derives from the failure: ObjectNotFound (404),
+    PermissionDenied (403), AuthenticationError (401), LimitsExceeded (429),
+    ResourceUnavailable (5xx, open circuit), ConnectionError (transport,
+    408), InvalidArgument (400 family), ResourceExists (409, 412).
+
+-ERRORACTION
+
+    Stop turns the first error record into a terminating error, ending the
+    pipeline. For batches this stops at the first failed item - after the
+    dead-letter file is written, so -DeadLetterPath always captures every
+    failure even under Stop. SilentlyContinue suppresses and continues;
+    records still land in $Error and -ErrorVariable.
+
+-ERRORVARIABLE
+
+    Collects every non-terminating record: one per failed item, URL, or
+    page. A fan-out over N ids can produce up to N records.
+
+RETRIES AND ERRORS
+
+    A failure that is retried is not an error until retries are exhausted:
+    a request that survives three 503s and succeeds writes nothing to the
+    error stream. The retry history is visible under -Verbose, and the
+    final record reflects the last failure.
+
+CANCELLATION
+
+    Ctrl-C produces a warning, not an error record, because the pipeline is
+    already stopping and error records written during teardown are
+    unreliable. A cancelled run is therefore indistinguishable from an empty
+    result by $Error alone; checkpointed cmdlets write their checkpoint, and
+    -Verbose says the run was cancelled.
+
+SKIP SWITCHES
+
+    -SkipNotFound and -SkipForbidden (Invoke-MgxRequest, Expand-MgxRelation)
+    downgrade 404 and 403 per-item failures to a counted warning summary.
+    Skipped items produce no error records - by design, since the caller
+    declared them expected.
+
+SEE ALSO
+    about_Mgx
+    about_Mgx_Tuning

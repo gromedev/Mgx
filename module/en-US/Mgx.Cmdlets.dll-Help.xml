@@ -1974,6 +1974,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
           <maml:name>Body</maml:name>
           <maml:description>
             <maml:para>Request body for all requests when piping string URLs. Ignored when pipeline input carries its own Body member.</maml:para>
+            <maml:para>Bodies follow the same serialization contract as Invoke-MgxRequest -Body. An item whose body serialization refuses a value (a SecureString, NaN) fails on its own, like an item whose body is not valid JSON; the rest of the batch is sent.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
           <dev:type>
@@ -2096,6 +2097,7 @@ $report | Expand-MgxRelation -Uri '/users/{id}/licenseDetails' -As Licenses -IdP
         <maml:name>Body</maml:name>
         <maml:description>
           <maml:para>Request body for all requests when piping string URLs. Ignored when pipeline input carries its own Body member.</maml:para>
+          <maml:para>Bodies follow the same serialization contract as Invoke-MgxRequest -Body. An item whose body serialization refuses a value (a SecureString, NaN) fails on its own, like an item whose body is not valid JSON; the rest of the batch is sent.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
         <dev:type>
@@ -2413,6 +2415,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
           <maml:name>Body</maml:name>
           <maml:description>
             <maml:para>Request body for write operations (POST, PATCH, PUT). Accepts a hashtable, PSObject or array, which is serialized to JSON, or a string already holding JSON, which is sent verbatim. Ignored (with a warning) on GET.</maml:para>
+            <maml:para>Enums serialize as camelCase names, byte arrays as base64, TimeSpan as an ISO-8601 duration, and a DateTime without a kind is treated as UTC. A SecureString, PSCredential, script block, certificate, NaN or Infinity anywhere in the body is refused before anything is sent, with an error naming the property. A string that is not JSON is sent verbatim; add a Content-Type to -Headers to declare its real type.</maml:para>
           </maml:description>
           <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
           <dev:type>
@@ -2717,6 +2720,7 @@ foreach ($url in $urls) { $url | Invoke-MgxBatchRequest }</dev:code>
         <maml:name>Body</maml:name>
         <maml:description>
           <maml:para>Request body for write operations (POST, PATCH, PUT). Accepts a hashtable, PSObject or array, which is serialized to JSON, or a string already holding JSON, which is sent verbatim. Ignored (with a warning) on GET.</maml:para>
+          <maml:para>Enums serialize as camelCase names, byte arrays as base64, TimeSpan as an ISO-8601 duration, and a DateTime without a kind is treated as UTC. A SecureString, PSCredential, script block, certificate, NaN or Infinity anywhere in the body is refused before anything is sent, with an error naming the property. A string that is not JSON is sent verbatim; add a Content-Type to -Headers to declare its real type.</maml:para>
         </maml:description>
         <command:parameterValue required="true" variableLength="false">Object</command:parameterValue>
         <dev:type>

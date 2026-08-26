@@ -17,6 +17,10 @@ export AZURE_CLIENT_CERTIFICATE_PATH="$HOME/.certs/....pfx"
 pwsh -c 'Invoke-Pester -Path ./tests/Live'
 ```
 
+An app with a secret rather than a certificate works too - set `AZURE_CLIENT_SECRET`
+instead of `AZURE_CLIENT_CERTIFICATE_PATH`. If both are set, the certificate wins.
+Neither leaves anything on disk.
+
 Missing credentials is a **failure**, not a skip. A live suite that skips itself when
 unconfigured is one that silently stops running.
 

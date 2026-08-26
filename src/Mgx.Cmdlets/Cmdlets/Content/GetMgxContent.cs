@@ -78,8 +78,8 @@ public class GetMgxContent : MgxCmdletBase
     {
         if (ParameterSetName == "Uri")
         {
-            if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-                Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            if (Uri.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                Uri.TrimStart().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new ArgumentException(
@@ -123,6 +123,27 @@ public class GetMgxContent : MgxCmdletBase
 
     protected override void ProcessRecord()
     {
+        if (ParameterSetName != "Uri" && InputObject == null)
+        {
+            // A null item was never a download; it must not trip the one-OutFile guard.
+            WriteVerbose("Skipping null pipeline input.");
+            return;
+        }
+
+        if (_wroteOutFile && !string.IsNullOrEmpty(OutFile))
+        {
+            // Refuse rather than overwrite - and refuse BEFORE fetching, so the second
+            // item's content is not downloaded just to be discarded. Checked here, not in
+            // BeginProcessing, so the legitimate single-piped-item case still works.
+            ThrowTerminatingError(new ErrorRecord(
+                new InvalidOperationException(
+                    "-OutFile writes a single file, but more than one item was piped in. "
+                    + "Each item would overwrite the last. Pipe one item, or omit -OutFile "
+                    + "and redirect the byte[] output per item."),
+                "OutFileWithMultipleInputs", ErrorCategory.InvalidOperation, OutFile));
+            return;
+        }
+
         if (ParameterSetName == "Uri")
         {
             FetchContent(downloadUrl: null,
@@ -131,13 +152,7 @@ public class GetMgxContent : MgxCmdletBase
             return;
         }
 
-        if (InputObject == null)
-        {
-            WriteVerbose("Skipping null pipeline input.");
-            return;
-        }
-
-        var value = UnwrapPSObject(InputObject);
+        var value = UnwrapPSObject(InputObject!); // null handled above
 
         // Prefer the item's own pre-authenticated download URL: no hop-1 round trip, no
         // request-budget charge. Validated against the allowlist before any fetch.
@@ -206,7 +221,8 @@ public class GetMgxContent : MgxCmdletBase
         {
             using var result = downloadUrl != null
                 ? GraphContentClient.GetFromDownloadUrlAsync(
-                    downloadUrl, range, client.BodyReadTimeout, CancellationToken)
+                    downloadUrl, range, client.BodyReadTimeout, CancellationToken,
+                    BuildRequestHeaders(null, Headers))
                     .GetAwaiter().GetResult()
                 : client.GetContentAsync(
                     $"{VersionedBaseUrl}{NormalizePath(relativeUri!)}", range,
@@ -234,18 +250,6 @@ public class GetMgxContent : MgxCmdletBase
 
             if (_resolvedOutFile != null)
             {
-                if (_wroteOutFile)
-                {
-                    // Refuse rather than overwrite. Checked here, not in BeginProcessing, so the
-                    // legitimate single-piped-item case still works.
-                    ThrowTerminatingError(new ErrorRecord(
-                        new InvalidOperationException(
-                            "-OutFile writes a single file, but more than one item was piped in. "
-                            + "Each item would overwrite the last. Pipe one item, or omit -OutFile "
-                            + "and redirect the byte[] output per item."),
-                        "OutFileWithMultipleInputs", ErrorCategory.InvalidOperation, OutFile));
-                    return;
-                }
                 WriteToFile(result, maxBytes, skipBytes);
                 _wroteOutFile = true;
             }
@@ -258,6 +262,13 @@ public class GetMgxContent : MgxCmdletBase
         {
             DrainClientMessages();
             WriteWarning("Content download cancelled.");
+        }
+        catch (GraphServiceException ex) when (ex.StatusCode == HttpStatusCode.NotModified)
+        {
+            // The conditional request worked: the caller's If-None-Match/If-Modified-Since
+            // matched, and there is nothing newer to download. Not an error.
+            DrainClientMessages();
+            WriteVerbose("Not modified; the content matches the caller's condition. Nothing downloaded.");
         }
         catch (InvalidOperationException ex)
         {

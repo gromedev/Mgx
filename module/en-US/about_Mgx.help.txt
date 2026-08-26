@@ -217,6 +217,7 @@ REQUIREMENTS
     is absent.
 
 SEE ALSO
+    about_Mgx_Errors
     about_Mgx_Tuning
     Invoke-MgxRequest
     Invoke-MgxBatchRequest

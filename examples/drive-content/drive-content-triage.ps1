@@ -1,16 +1,8 @@
-# Triage a drive by reading 4 KB of each file, then download only what survives triage.
+# Triage a drive by reading 4 KB of each file, then download only what survives.
 #
-#
-# Two properties of Get-MgxContent make this cheap and safe:
-#
-#   * A ranged read is a Range request. -First 4096 transfers 4 KB, not 4 KB of a 2 GB download
-#     you abandon. Some endpoints ignore Range and answer 200 with the whole body (profile
-#     photos do); mgx detects that and truncates client-side, so you never receive more than you
-#     asked for either way.
-#   * Piping a DriveItem uses its own @microsoft.graph.downloadUrl - a pre-authenticated URL -
-#     so there is no Graph round trip at all for the bytes. No resource units, and no bearer
-#     token sent to the download host. That URL is itself a credential for the file, which is
-#     why mgx redacts it from -Debug output.
+# -First 4096 is a Range request: it transfers 4 KB, not 4 KB of a 2 GB download
+# you abandon. Enough to read magic bytes and decide, on a whole drive, for the
+# cost of downloading one mid-sized file.
 #
 # Requirements: Connect-MgGraph -Scopes "Files.Read.All"
 # Read-only against Graph. Writes only to the local -OutputDirectory.

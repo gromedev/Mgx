@@ -86,15 +86,34 @@ public sealed class ResilientDelegatingHandler : DelegatingHandler
         // Buffer content upfront so retries can reconstruct a fresh request body.
         // Also snapshot all content headers (not just ContentType) to preserve
         // Content-Encoding, Content-Disposition, etc. on retry.
+        // What the pipeline cannot replay, it does not manage. A body whose declared
+        // length exceeds the replay-buffer cap (a drive-content upload runs to 250MB)
+        // passes to the SDK chain untouched: no clone, no retry-option stamp, no
+        // per-attempt timeout, no circuit counting - exactly what the SDK does without
+        // the wrap, which is the only promise the wrap can keep for a stream it cannot
+        // rewind. A body with no declared length is buffered whatever its size - the
+        // read is unavoidable to know, and once buffered it replays like any other.
+        if (request.Content?.Headers.ContentLength > ResilientGraphClient.MaxRequestBodyBytes)
+        {
+            var passSw = System.Diagnostics.Stopwatch.StartNew();
+            var passSucceeded = false;
+            try
+            {
+                var passthrough = await base.SendAsync(request, cancellationToken);
+                passSucceeded = passthrough.IsSuccessStatusCode;
+                return passthrough;
+            }
+            finally
+            {
+                MgxTelemetryCollector.Current.RecordRequest(passSucceeded, passSw.ElapsedMilliseconds);
+            }
+        }
+
         byte[]? contentBytes = null;
         List<KeyValuePair<string, IEnumerable<string>>>? contentHeaders = null;
         if (request.Content != null)
         {
             contentBytes = await request.Content.ReadAsByteArrayAsync(cancellationToken);
-            if (contentBytes.Length > ResilientGraphClient.MaxRequestBodyBytes)
-                throw new InvalidOperationException(
-                    $"Request body size ({contentBytes.Length:N0} bytes) exceeds the {ResilientGraphClient.MaxRequestBodyBytes / (1024 * 1024)}MB limit. " +
-                    "Graph API rejects bodies larger than 4MB on most endpoints.");
             contentHeaders = request.Content.Headers.ToList();
         }
         var clientRequestId = Guid.NewGuid().ToString();

@@ -151,7 +151,7 @@ Streaming directly to a file keeps managed heap growth close to zero relative to
 
 ### Adaptive pacing
 
-Adaptive pacing is enabled by default. It starts conservatively, increases the allowed rate as requests succeed, and backs off when throttling or latency indicates that a workload is approaching a limit.
+Adaptive pacing is enabled by default. It starts conservatively, increases the allowed rate as requests succeed, and backs off when throttling indicates that a workload is approaching a limit.
 
 | Workload | Pacing on | `-NoAdaptivePacing` |
 | --- | ---: | ---: |
@@ -184,7 +184,7 @@ Adaptive pacing sits above those request-level strategies and learns a separate 
 
 Microsoft Graph directory workloads use resource-unit budgets. The cost depends on query shape rather than on which client issued the request.
 
-Mgx reads `x-ms-resource-unit` and exposes the accumulated values through `Get-MgxTelemetry`. It uses throttling signals and observed latency to pace requests before the workload repeatedly hits the limit.
+Mgx reads `x-ms-resource-unit` and exposes the accumulated values through `Get-MgxTelemetry`. It uses throttling signals to pace requests before the workload repeatedly hits the limit. Observed latency is reported alongside them but is not a pacing input.
 
 Examples measured against the test tenant:
 

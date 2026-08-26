@@ -31,8 +31,14 @@ public class UriEncodingTests
 
     private static void ResetTransport()
     {
+        // Restore every static InjectTransport touched - a later test in the collection
+        // that drives a cmdlet without injecting must not inherit this class's transport.
         Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
         Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
+        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
+        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
+        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
+        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
         ResiliencePipelineFactory.Reset();
     }
 
@@ -163,6 +169,34 @@ public class UriEncodingTests
     }
 
     [Fact]
+    public void Every_hostile_filter_round_trips_through_encoding()
+    {
+        // The corpus generalizes GraphSDK-2709/2942: the wire value must decode back to
+        // exactly what the caller wrote, whatever it contains.
+        foreach (var filter in HostileInputs.FilterValues)
+        {
+            var wire = new MockHttpHandler();
+            wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
+            InjectTransport(wire);
+            try
+            {
+                var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
+                    .AddParameter("Uri", "/users")
+                    .AddParameter("Filter", filter));
+                // OriginalString keeps a raw '#' that the transport would then drop as a
+                // fragment - so round-tripping alone is not proof. No raw '#', '&' or '+'
+                // may survive in the encoded value; then the decode must give back the input.
+                var query = uri[(uri.IndexOf("$filter=", StringComparison.Ordinal) + "$filter=".Length)..];
+                query = query.Split('&')[0];
+                Assert.DoesNotContain('#', query);
+                Assert.DoesNotContain('+', query);
+                Assert.Equal(filter, System.Uri.UnescapeDataString(query));
+            }
+            finally { ResetTransport(); }
+        }
+    }
+
+    [Fact]
     public void A_top_already_in_the_uri_is_not_sent_twice()
     {
         var wire = new MockHttpHandler();
@@ -174,14 +208,45 @@ public class UriEncodingTests
                 .AddParameter("Uri", "/users?$top=5")
                 .AddParameter("All", true));
 
-            Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(uri, "top=").Count);
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(uri, "top="));
             Assert.Contains("$top=5", uri);
         }
         finally { ResetTransport(); }
     }
 
     [Fact]
-    public void A_filter_already_in_the_uri_wins_over_the_parameter()
+    public void A_filter_already_in_the_uri_wins_over_the_parameter_with_a_warning()
+    {
+        var wire = new MockHttpHandler();
+        wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
+        InjectTransport(wire);
+        try
+        {
+            using var ps = System.Management.Automation.PowerShell.Create();
+            ps.AddCommand("Import-Module")
+              .AddParameter("Assembly", typeof(Mgx.Cmdlets.Cmdlets.InvokeMgxRequest).Assembly);
+            ps.Invoke();
+            ps.Commands.Clear();
+            ps.AddScript("function Get-MgContext { [PSCustomObject]@{ TenantId = 'test-tenant-00000000-0000-0000-0000-000000000000' } }");
+            ps.Invoke();
+            ps.Commands.Clear();
+            ps.AddCommand("Invoke-MgxRequest")
+                .AddParameter("Uri", "/users?$filter=accountEnabled eq true")
+                .AddParameter("Filter", "displayName eq 'x'");
+            ps.Invoke();
+
+            var uri = wire.CapturedRequests[0].Uri;
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(uri, "filter="));
+            Assert.Contains("accountEnabled", uri);
+            Assert.DoesNotContain("displayName", uri);
+            // Deferring must be loud: the caller's -Filter was not sent.
+            Assert.Contains(ps.Streams.Warning, w => w.Message.Contains("-Filter"));
+        }
+        finally { ResetTransport(); }
+    }
+
+    [Fact]
+    public void An_encoded_option_name_in_the_uri_still_defers_the_parameter()
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
@@ -189,14 +254,74 @@ public class UriEncodingTests
         try
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
-                .AddParameter("Uri", "/users?$filter=accountEnabled eq true")
-                .AddParameter("Filter", "displayName eq 'x'"));
+                .AddParameter("Uri", "/users?%24top=10")
+                .AddParameter("All", true));
 
-            Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(uri, "filter=").Count);
-            Assert.Contains("accountEnabled", uri);
-            Assert.DoesNotContain("displayName", uri);
+            // %24top IS $top to the server; a second $top would draw a 400.
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(uri, "top="));
         }
         finally { ResetTransport(); }
+    }
+
+    [Fact]
+    public void A_caller_count_in_the_uri_does_not_arm_the_count_degradation_retry()
+    {
+        // Endpoint 400s; if mgx thinks its auto-$count caused it, the "retry without
+        // count" rebuild is byte-identical and burns a duplicate request.
+        var wire = new MockHttpHandler();
+        wire.SetDefaultResponse(HttpStatusCode.BadRequest,
+            """{ "error": { "code": "BadRequest", "message": "no" } }""");
+        InjectTransport(wire);
+        try
+        {
+            using var ps = System.Management.Automation.PowerShell.Create();
+            ps.AddCommand("Import-Module")
+              .AddParameter("Assembly", typeof(Mgx.Cmdlets.Cmdlets.InvokeMgxRequest).Assembly);
+            ps.Invoke();
+            ps.Commands.Clear();
+            ps.AddScript("function Get-MgContext { [PSCustomObject]@{ TenantId = 'test-tenant-00000000-0000-0000-0000-000000000000' } }");
+            ps.Invoke();
+            ps.Commands.Clear();
+            ps.AddScript("Invoke-MgxRequest '/users?$count=true' -Filter \"displayName eq 'x'\" -ErrorAction SilentlyContinue");
+            ps.Invoke();
+
+            // One request (plus zero byte-identical degradation retries): the URI's own
+            // $count was never mgx's to drop.
+            Assert.Single(wire.CapturedRequests);
+        }
+        finally { ResetTransport(); }
+    }
+
+    [Fact]
+    public void Every_hostile_path_segment_survives_id_templating()
+    {
+        // The PathSegments corpus, driven through the one path-injection mechanism a
+        // caller has: {id} templating. The captured request path must carry the fully
+        // escaped segment - no raw '#', '%', space, or comma damage.
+        foreach (var segment in HostileInputs.PathSegments)
+        {
+            var wire = new MockHttpHandler();
+            wire.SetDefaultResponse(HttpStatusCode.OK, TestData.SingleUser);
+            InjectTransport(wire);
+            try
+            {
+                using var ps = System.Management.Automation.PowerShell.Create();
+                ps.AddCommand("Import-Module")
+                  .AddParameter("Assembly", typeof(Mgx.Cmdlets.Cmdlets.InvokeMgxRequest).Assembly);
+                ps.Invoke();
+                ps.Commands.Clear();
+                ps.AddScript("function Get-MgContext { [PSCustomObject]@{ TenantId = 'test-tenant-00000000-0000-0000-0000-000000000000' } }");
+                ps.Invoke();
+                ps.Commands.Clear();
+                ps.AddCommand("Invoke-MgxRequest").AddParameter("Uri", "/items/{id}");
+                ps.Invoke(new[] { segment });
+
+                var sent = Assert.Single(wire.CapturedRequests);
+                Assert.Contains($"/items/{System.Uri.EscapeDataString(segment)}", sent.Uri);
+                Assert.DoesNotContain('#', sent.Uri);
+            }
+            finally { ResetTransport(); }
+        }
     }
 
     /// <summary>
@@ -205,6 +330,7 @@ public class UriEncodingTests
     /// the other three URI-taking cmdlets refuse it the same way.
     /// </summary>
     [Theory]
+    [InlineData("Invoke-MgxRequest -Uri ' https://graph.microsoft.com/v1.0/users'")]
     [InlineData("Invoke-MgxRequest -Uri 'https://graph.microsoft.com/v1.0/users'")]
     [InlineData("[PSCustomObject]@{ id = 'g1' } | Expand-MgxRelation -Uri 'https://graph.microsoft.com/v1.0/groups/{id}/members' -As members")]
     [InlineData("Export-MgxCollection -Uri 'https://graph.microsoft.com/v1.0/users' -OutputFile ([IO.Path]::GetTempFileName())")]

@@ -118,13 +118,70 @@ public class HeaderFidelityTests
     [Fact]
     public void Case_variant_duplicate_keys_merge_to_one_header()
     {
-        var headers = TestCmdlet.BuildHeaders(null, new System.Collections.Hashtable
-        {
-            ["If-Match"] = "\"etag-a\"",
-        });
+        // A genuinely case-variant duplicate: an ordinal Hashtable holds both spellings;
+        // the merge must produce ONE entry (whichever value enumeration hands it last).
+        var duplicates = new System.Collections.Hashtable();
+        duplicates["If-Match"] = "\"etag-a\"";
+        duplicates["if-match"] = "\"etag-b\"";
+        Assert.Equal(2, duplicates.Count);
+
+        var headers = TestCmdlet.BuildHeaders(null, duplicates);
         Assert.NotNull(headers);
-        Assert.True(headers!.ContainsKey("if-match"));
+        Assert.Single(headers!.Keys, k => string.Equals(k, "If-Match", StringComparison.OrdinalIgnoreCase));
+        Assert.True(headers.ContainsKey("if-match"));
         Assert.True(headers.ContainsKey("IF-MATCH"));
+    }
+
+    [Fact]
+    public async Task A_malformed_header_name_warns_instead_of_crashing_a_write()
+    {
+        var (wire, client) = NewClient();
+        using (client)
+        {
+            wire.QueueResponse(HttpStatusCode.OK, "{}");
+            using var response = await client.SendAsync(HttpMethod.Post,
+                "https://graph.microsoft.com/v1.0/users",
+                new StringContent("{}", Encoding.UTF8, "application/json"),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Bad Header"] = "v",
+                },
+                CancellationToken.None);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var warnings = new List<string>();
+            client.WarningWriter = warnings.Add;
+            client.DrainWarningMessages();
+            Assert.Contains(warnings, w => w.Contains("Bad Header"));
+        }
+        ResiliencePipelineFactory.Reset();
+    }
+
+    [Fact]
+    public async Task A_caller_content_length_is_ignored_with_a_warning()
+    {
+        var (wire, client) = NewClient();
+        using (client)
+        {
+            wire.QueueResponse(HttpStatusCode.OK, "{}");
+            using var response = await client.SendAsync(HttpMethod.Post,
+                "https://graph.microsoft.com/v1.0/users",
+                new StringContent("0123456789", Encoding.UTF8, "application/json"),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Content-Length"] = "3",
+                },
+                CancellationToken.None);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var sent = Assert.Single(wire.CapturedRequests);
+            Assert.Equal(10, sent.Body!.Length); // the real body, not a truncation
+            var warnings = new List<string>();
+            client.WarningWriter = warnings.Add;
+            client.DrainWarningMessages();
+            Assert.Contains(warnings, w => w.Contains("Content-Length"));
+        }
+        ResiliencePipelineFactory.Reset();
     }
 
     /// <summary>BuildRequestHeaders is protected static; surfaced for assertion.</summary>

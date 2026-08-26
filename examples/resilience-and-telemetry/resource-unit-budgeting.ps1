@@ -1,31 +1,28 @@
 # Resource units: what a query actually costs, and how to size a fan-out before running it.
 #
 # Graph throttles directory workloads on a resource-unit budget, not on request count or
-# bandwidth. Two queries that look alike can differ 5x in cost, and the difference is invisible
-# unless you read x-ms-resource-unit. Mgx accumulates it for you: Get-MgxTelemetry reports
-# ResourceUnitsConsumed for the session.
-#
-# This script measures the cost of the query shapes you are choosing between, then uses the
-# measured cost - not a guess - to size a tenant-scale fan-out.
+# bandwidth. Two queries that look alike can differ several times over in cost, and the
+# difference is invisible unless you read x-ms-resource-unit. Mgx accumulates it for you:
+# Get-MgxTelemetry reports ResourceUnitsConsumed for the session.
 #
 # Requirements: Connect-MgGraph -Scopes "Group.Read.All","User.Read.All"
 
 Import-Module Mgx
 
 function Measure-QueryCost {
-    <#
-        Cost of one call, measured rather than assumed. The documented RU table is directionally
-        right but not exact: transitiveMembers is published at 5 RU and bills 4 here, and the
-        documented "-1 RU for $select" discount does apply on top of that.
-    #>
+    # Cost of one call, measured rather than assumed. The documented RU table is directionally
+    # right but not exact - transitiveMembers is published at 5 RU and bills 4 here.
     param([string]$Label, [string]$Uri)
 
     $before = (Get-MgxTelemetry).ResourceUnitsConsumed
     try { $null = Invoke-MgxRequest $Uri -ErrorAction Stop }
     catch { Write-Warning "$Label : $($_.Exception.Message)"; return }
-    $cost = (Get-MgxTelemetry).ResourceUnitsConsumed - $before
 
-    [pscustomobject]@{ Query = $Label; ResourceUnits = $cost; Uri = $Uri }
+    [pscustomobject]@{
+        Query         = $Label
+        ResourceUnits = (Get-MgxTelemetry).ResourceUnitsConsumed - $before
+        Uri           = $Uri
+    }
 }
 
 $sample = (Invoke-MgxRequest '/groups?$top=1&$select=id').id
@@ -40,8 +37,8 @@ $costs = @(
     Measure-QueryCost 'single group read'             "/groups/$sample"
     Measure-QueryCost 'users list ($top=25)'          "/users?`$top=25"
     Measure-QueryCost 'users list ($select)'          "/users?`$top=25&`$select=id,displayName"
-)
-$costs | Where-Object { $_ } | Format-Table Query, ResourceUnits -AutoSize
+) | Where-Object { $_ }
+$costs | Format-Table Query, ResourceUnits -AutoSize
 
 # --- size the fan-out from the measured cost ---
 #
@@ -49,7 +46,8 @@ $costs | Where-Object { $_ } | Format-Table Query, ResourceUnits -AutoSize
 # throttling in one test tenant was appreciably higher (clean at 882 RU/s, 429s from ~1,200
 # RU/s), so treat 800 as a conservative floor rather than a hard ceiling - and never as a target.
 $BudgetRuPerSecond = 800
-$chosen = $costs | Where-Object { $_ -and $_.Query -eq 'transitiveMembers ($select)' } | Select-Object -First 1
+$chosen = $costs | Where-Object { $_.Query -eq 'transitiveMembers ($select)' } | Select-Object -First 1
+$bare   = $costs | Where-Object { $_.Query -eq 'transitiveMembers (bare)' }    | Select-Object -First 1
 if (-not $chosen -or $chosen.ResourceUnits -le 0) {
     Write-Warning 'No RU header observed - this tenant or endpoint may not be RU-metered. Skipping the projection.'
     return
@@ -65,32 +63,15 @@ Write-Host "`n=== Sizing a per-group fan-out over the whole tenant ===" -Foregro
 "  cost per group     : {0} RU  ({1})" -f $chosen.ResourceUnits, $chosen.Query
 "  total cost         : {0:N0} RU" -f $totalRu
 "  floor at {0} RU/s : {1:N0}s ({2:N1} min) of pure budget consumption" -f $BudgetRuPerSecond, $seconds, ($seconds / 60)
-''
-"  Dropping `$select would cost {0:N0} RU more ({1:P0} increase)." -f `
-    ($groupCount * 1), (1 / $chosen.ResourceUnits)
-
-# --- what the session actually spent ---
-Write-Host "`n=== Session telemetry ===" -ForegroundColor Cyan
-$t = Get-MgxTelemetry
-"  requests           : $($t.Requests)  ($($t.Succeeded) ok, $($t.Failed) failed)"
-"  resource units     : $($t.ResourceUnitsConsumed)"
-"  throttle retries   : $($t.ThrottleRetries)"
-"  pacing waits       : $($t.AdaptivePacingWaitMs) ms over $($t.AdaptivePacingActivations) activations"
-if ($t.Requests -gt 0) {
-    "  average cost       : {0:N2} RU per request" -f ($t.ResourceUnitsConsumed / $t.Requests)
+if ($bare -and $bare.ResourceUnits -gt $chosen.ResourceUnits) {
+    $extra = $groupCount * ($bare.ResourceUnits - $chosen.ResourceUnits)
+    "  dropping `$select   : {0:N0} RU more ({1:P0} increase)" -f `
+        $extra, ($extra / $totalRu)
 }
 
-Write-Host @"
-
-Why this matters
-  * Cost is a property of the query SHAPE, not the object count. Adding `$select reduces it;
-    `$expand increases it. Measure the shape you are about to run 15,000 times.
-  * A 403 or 400 costs 0 RU. A fan-out that fails uniformly consumes no budget and triggers no
-    throttling - it looks fast and healthy while measuring nothing. Check status, not duration.
-  * x-ms-throttle-limit-percentage is documented as a proximity warning above 0.8 of budget. It
-    was never observed in testing, even while the tenant was actively returning 429s. Do not
-    build a control loop that depends on it; rely on 429 + Retry-After, which is reliable.
-"@ -ForegroundColor DarkGray
+# Cost is a property of the query SHAPE, not the object count: $select reduces it, $expand
+# raises it. A 403 or 400 costs 0 RU, so a fan-out that fails uniformly looks fast and healthy
+# while measuring nothing - check status, not duration.
 
 <#
 Expected output:
@@ -113,22 +94,5 @@ users list ($select)                    1
   cost per group     : 3 RU  (transitiveMembers ($select))
   total cost         : 47,337 RU
   floor at 800 RU/s : 59s (1.0 min) of pure budget consumption
-
-  Dropping $select would cost 15,779 RU more (33% increase).
-
-=== Session telemetry ===
-  requests           : 9  (9 ok, 0 failed)
-  resource units     : 18
-  throttle retries   : 0
-  pacing waits       : 1496 ms over 8 activations
-  average cost       : 2.00 RU per request
-
-Why this matters
-  * Cost is a property of the query SHAPE, not the object count. Adding $select reduces it;
-    $expand increases it. Measure the shape you are about to run 15,000 times.
-  * A 403 or 400 costs 0 RU. A fan-out that fails uniformly consumes no budget and triggers no
-    throttling - it looks fast and healthy while measuring nothing. Check status, not duration.
-  * x-ms-throttle-limit-percentage is documented as a proximity warning above 0.8 of budget. It
-    was never observed in testing, even while the tenant was actively returning 429s. Do not
-    build a control loop that depends on it; rely on 429 + Retry-After, which is reliable.
+  dropping $select   : 15,779 RU more (33% increase)
 #>

@@ -142,8 +142,8 @@ public class InvokeMgxRequest : MgxCmdletBase
     {
         // Reject absolute URLs (relative paths only); concatenation onto the versioned
         // base URL would otherwise silently produce /v1.0/https:/... on the wire.
-        if (Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
-            Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        if (Uri.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+            Uri.TrimStart().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
         {
             ThrowTerminatingError(new ErrorRecord(
                 new ArgumentException(
@@ -295,9 +295,11 @@ public class InvokeMgxRequest : MgxCmdletBase
 
     private void ExecuteList(string relativeUri, string? sourceId)
     {
-        // Track whether $count=true was auto-added (not user-requested via -CountVariable).
-        // If the endpoint rejects it with 400, retry without.
-        bool countAutoAdded = !string.IsNullOrEmpty(Filter) && string.IsNullOrEmpty(CountVariable);
+        // Track whether $count=true was auto-added (not user-requested via -CountVariable,
+        // and not already written into -Uri, where dropping it changes nothing and the
+        // "retry without count" rebuild would re-send a byte-identical request).
+        bool countAutoAdded = !string.IsNullOrEmpty(Filter) && string.IsNullOrEmpty(CountVariable)
+            && !ExistingQueryOptions(Uri).Contains("$count");
         bool includeAutoCount = countAutoAdded;
         bool suppressTop = false;
 
@@ -447,21 +449,15 @@ public class InvokeMgxRequest : MgxCmdletBase
                     "MalformedJsonResponse", ErrorCategory.InvalidData, relativeUri));
                 return;
             }
-            catch (GraphServiceException ex) when (includeAutoCount && countAutoAdded && ex.StatusCode == HttpStatusCode.BadRequest)
+            catch (GraphServiceException ex) when (IsCountRejection(ex, includeAutoCount && countAutoAdded))
             {
-                // Auto-added $count=true rejected by this endpoint; retry without it
-                WriteVerbose("Endpoint rejected $count=true (HTTP 400). Retrying without count parameter.");
+                WriteVerbose(CountRejectedVerbose);
                 includeAutoCount = false;
                 continue;
             }
-            catch (GraphServiceException ex) when (
-                !suppressTop
-                && !NoPageSize.IsPresent
-                && ex.StatusCode == HttpStatusCode.BadRequest
-                && string.Equals(ex.ErrorCode, "Request_UnsupportedQuery", StringComparison.OrdinalIgnoreCase))
+            catch (GraphServiceException ex) when (IsTopRejection(ex, suppressTop, NoPageSize.IsPresent))
             {
-                // Endpoint doesn't support $top (e.g., /directoryRoles). Retry without page size.
-                WriteVerbose("Endpoint rejected $top (Request_UnsupportedQuery). Retrying without page size.");
+                WriteVerbose(TopRejectedVerbose);
                 suppressTop = true;
                 continue;
             }
@@ -519,13 +515,25 @@ public class InvokeMgxRequest : MgxCmdletBase
         if (!ShouldProcess(relativeUri, method.Method))
             return;
 
+        string? serializedBody;
+        try
+        {
+            serializedBody = ResolveRequestBody(method);
+        }
+        catch (ArgumentException ex)
+        {
+            // Pre-flight: nothing was sent. Terminating, per about_Mgx_Errors.
+            ThrowTerminatingError(new ErrorRecord(ex, "InvalidBodyValue",
+                ErrorCategory.InvalidArgument, relativeUri));
+            return;
+        }
+        NoteNonJsonStringBody();
+
         try
         {
             var url = $"{VersionedBaseUrl}{NormalizePath(relativeUri)}";
             var client = GetClient();
             var headers = BuildHeaders();
-
-            var serializedBody = ResolveRequestBody(method);
             HttpContent? content = serializedBody != null
                 ? new StringContent(serializedBody, Encoding.UTF8, "application/json")
                 : null;
@@ -733,10 +741,22 @@ public class InvokeMgxRequest : MgxCmdletBase
         if (!ShouldProcess($"{httpMethod.Method} {uniqueIds.Count} items via {Uri}", "Bulk write"))
             return;
 
+        string? serializedBody;
         try
         {
             // Serialize body once (shared across all operations)
-            string? serializedBody = ResolveRequestBody(httpMethod);
+            serializedBody = ResolveRequestBody(httpMethod);
+        }
+        catch (ArgumentException ex)
+        {
+            ThrowTerminatingError(new ErrorRecord(ex, "InvalidBodyValue",
+                ErrorCategory.InvalidArgument, Uri));
+            return;
+        }
+        NoteNonJsonStringBody();
+
+        try
+        {
 
             // Build operations list: (id, resolved URL)
             var operations = uniqueIds.Select(id =>
@@ -843,7 +863,7 @@ public class InvokeMgxRequest : MgxCmdletBase
         bool has404 = false;
         foreach (var (key, ex) in errors)
         {
-            var statusCode = GetStatusCodeFromException(ex);
+            var statusCode = MgxErrorPresentation.TryGetStatus(ex);
 
             // Only a 404 that might mean "no such endpoint" is worth a beta hint. A 404 naming
             // a missing object says the path was fine, and hinting over it sends the caller to
@@ -862,14 +882,9 @@ public class InvokeMgxRequest : MgxCmdletBase
                 continue;
             }
 
-            // Preserve diagnostic specificity for infrastructure exceptions
-            var (errorId, category) = ex switch
-            {
-                Polly.CircuitBreaker.BrokenCircuitException => ("CircuitBroken", ErrorCategory.ResourceUnavailable),
-                HttpRequestException => ("HttpError", ErrorCategory.ConnectionError),
-                _ => ("FanOutError", statusCode.HasValue ? MapStatusToCategory(statusCode.Value) : ErrorCategory.NotSpecified)
-            };
-            WriteError(new ErrorRecord(ex, errorId, category, key));
+            var (errorId, category, report) =
+                MgxErrorPresentation.PresentItemFailure(ex, "FanOutError", CircuitBreakerMessage);
+            WriteError(new ErrorRecord(report, errorId, category, key));
         }
 
         if (has404)
@@ -894,13 +909,6 @@ public class InvokeMgxRequest : MgxCmdletBase
         return System.Text.RegularExpressions.Regex.Replace(
             Uri, @"\{id\}", System.Uri.EscapeDataString(id),
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-    }
-
-    private static HttpStatusCode? GetStatusCodeFromException(Exception ex)
-    {
-        if (ex is GraphServiceException gse) return gse.StatusCode;
-        if (ex is HttpRequestException hre && hre.StatusCode.HasValue) return hre.StatusCode.Value;
-        return null;
     }
 
     /// <summary>
@@ -931,11 +939,27 @@ public class InvokeMgxRequest : MgxCmdletBase
     private string BuildCollectionUrl(string relativeUri) => BuildCollectionUrl(relativeUri,
         includeCount: !string.IsNullOrEmpty(CountVariable) || !string.IsNullOrEmpty(Filter));
 
-    private string BuildCollectionUrl(string relativeUri, bool includeCount, bool noPageSize = false) => BuildListUrl(
-        VersionedBaseUrl, relativeUri,
-        new ODataListParams(NoPageSize.IsPresent || noPageSize, Top, PageSize, Filter,
-            Property, Sort, Search, Skip, ExpandProperty,
-            IncludeCount: includeCount));
+    private int _warnedDeferredOptions;
+
+    private void WarnDeferredOptions(List<string> deferred)
+    {
+        // Interlocked: URL building runs inside fan-out lambdas that can resume off the
+        // pipeline thread; the warning must fire exactly once and from one caller.
+        if (deferred.Count == 0 || Interlocked.Exchange(ref _warnedDeferredOptions, 1) == 1) return;
+        WriteWarning(DescribeDeferredOptions(deferred));
+    }
+
+    private string BuildCollectionUrl(string relativeUri, bool includeCount, bool noPageSize = false)
+    {
+        var url = BuildListUrl(
+            VersionedBaseUrl, relativeUri,
+            new ODataListParams(NoPageSize.IsPresent || noPageSize, Top, PageSize, Filter,
+                Property, Sort, Search, Skip, ExpandProperty,
+                IncludeCount: includeCount),
+            out var deferred);
+        WarnDeferredOptions(deferred);
+        return url;
+    }
 
     private string BuildGetUrl(string relativeUri)
     {
@@ -949,6 +973,8 @@ public class InvokeMgxRequest : MgxCmdletBase
             queryParams.Add($"$expand={EscapeQueryValue(string.Join(",", ExpandProperty))}");
 
         var existing = ExistingQueryOptions(baseUrl);
+        WarnDeferredOptions(queryParams.Where(qp => existing.Contains(qp.Split('=', 2)[0]))
+            .Select(qp => qp.Split('=', 2)[0]).ToList());
         queryParams.RemoveAll(qp => existing.Contains(qp.Split('=', 2)[0]));
 
         if (queryParams.Count == 0)
@@ -972,6 +998,29 @@ public class InvokeMgxRequest : MgxCmdletBase
     /// anything else is emitted whole.
     /// </summary>
     /// <summary>
+    /// A string -Body travels verbatim under Content-Type: application/json. When it is not
+    /// JSON that is usually intentional (a raw upload) - but the endpoint sees the wrong
+    /// content type unless -Headers overrides it, and the resulting 400 names neither.
+    /// A verbose note, not a warning: raw string bodies are a supported path.
+    /// </summary>
+    private void NoteNonJsonStringBody()
+    {
+        if (Body is null || UnwrapPSObject(Body) is not string s || string.IsNullOrWhiteSpace(s)) return;
+        if (Headers != null && Headers.Keys.Cast<object>()
+                .Any(k => string.Equals(k.ToString(), "Content-Type", StringComparison.OrdinalIgnoreCase)))
+            return;
+        try
+        {
+            using var _ = JsonDocument.Parse(s);
+        }
+        catch (JsonException)
+        {
+            WriteVerbose("-Body is a string that is not JSON; it is sent verbatim with "
+                + "Content-Type: application/json. Add a Content-Type to -Headers to declare its real type.");
+        }
+    }
+
+    /// <summary>
     /// A response body as JSON for output, or null when nothing further should be emitted:
     /// an empty body (204, or 200 with no content), a non-JSON body (emitted as text under
     /// -Raw, otherwise an error), or a body that declares JSON and does not parse.
@@ -984,12 +1033,13 @@ public class InvokeMgxRequest : MgxCmdletBase
             return null;
         }
 
+        var encoding = ResolveEncoding(response.Content.Headers.ContentType?.CharSet);
         var contentType = response.Content.Headers.ContentType?.MediaType;
         if (contentType != null && !contentType.EndsWith("json", StringComparison.OrdinalIgnoreCase))
         {
             if (Raw.IsPresent)
             {
-                WriteObject(Encoding.UTF8.GetString(bodyBytes));
+                WriteObject(encoding.GetString(bodyBytes));
                 return null;
             }
             WriteError(new ErrorRecord(
@@ -999,19 +1049,32 @@ public class InvokeMgxRequest : MgxCmdletBase
             return null;
         }
 
+        // Through a string, not the raw bytes: honors the declared charset. GetString keeps
+        // a BOM as U+FEFF, which the serializer refuses but the old stream path accepted -
+        // trim it explicitly.
+        var text = encoding.GetString(bodyBytes).TrimStart('\uFEFF');
         try
         {
-            return JsonSerializer.Deserialize<JsonElement>(bodyBytes);
+            return JsonSerializer.Deserialize<JsonElement>(text);
         }
         catch (JsonException)
         {
-            var snippet = Encoding.UTF8.GetString(bodyBytes, 0, Math.Min(bodyBytes.Length, 200));
+            var snippet = text[..Math.Min(text.Length, 200)];
             WriteError(new ErrorRecord(
                 new InvalidOperationException(
                     $"The response declared JSON but does not parse. Body starts: {snippet}"),
                 "MalformedJsonResponse", ErrorCategory.InvalidData, relativeUri));
             return null;
         }
+    }
+
+    /// <summary>The response's declared charset, defaulting to UTF-8. GetString strips a
+    /// matching BOM, which the byte-level Deserialize refused.</summary>
+    private static Encoding ResolveEncoding(string? charset)
+    {
+        if (string.IsNullOrEmpty(charset)) return Encoding.UTF8;
+        try { return Encoding.GetEncoding(charset.Trim('"')); }
+        catch (ArgumentException) { return Encoding.UTF8; }
     }
 
     private void OutputPayload(JsonElement json, string? sourceId)
@@ -1137,6 +1200,7 @@ public class InvokeMgxRequest : MgxCmdletBase
     internal static string SerializeBody(object body)
     {
         var value = UnwrapPSObject(body);
+        RefuseUnserializable(value, "-Body");
         if (value is string s) return s;
         // Still a PSObject after unwrapping: a PSCustomObject, whose members live on the wrapper
         if (value is PSObject pso) return JsonSerializer.Serialize(PSOToDict(pso), BodyJsonOptions);
@@ -1146,7 +1210,7 @@ public class InvokeMgxRequest : MgxCmdletBase
         return JsonSerializer.Serialize(value, BodyJsonOptions);
     }
 
-    internal static Dictionary<string, object?> PSOToDict(PSObject pso)
+    internal static Dictionary<string, object?> PSOToDict(PSObject pso, string path = "-Body")
     {
         // Every property kind, matching what ConvertTo-Json reads - so -Body $obj and
         // -Body ($obj | ConvertTo-Json) produce the same members. ScriptProperties are
@@ -1158,7 +1222,7 @@ public class InvokeMgxRequest : MgxCmdletBase
             object? raw;
             try { raw = prop.Value; }
             catch (GetValueException) { raw = null; }
-            dict[prop.Name] = UnwrapValue(raw);
+            dict[prop.Name] = UnwrapValue(raw, $"{path}.{prop.Name}");
         }
         return dict;
     }
@@ -1167,11 +1231,11 @@ public class InvokeMgxRequest : MgxCmdletBase
     /// Flatten any IDictionary (Hashtable or ordered dictionary) into a serializable
     /// dictionary, unwrapping nested PowerShell values.
     /// </summary>
-    internal static Dictionary<string, object?> DictionaryToDict(IDictionary source)
+    internal static Dictionary<string, object?> DictionaryToDict(IDictionary source, string path = "-Body")
     {
         var dict = new Dictionary<string, object?>();
         foreach (DictionaryEntry entry in source)
-            dict[entry.Key.ToString()!] = UnwrapValue(entry.Value);
+            dict[entry.Key.ToString()!] = UnwrapValue(entry.Value, $"{path}.{entry.Key}");
         return dict;
     }
 
@@ -1180,28 +1244,66 @@ public class InvokeMgxRequest : MgxCmdletBase
     /// A PSCustomObject keeps its members on the PSObject (its BaseObject is an empty
     /// marker), so it must be read through PSOToDict rather than its BaseObject.
     /// </summary>
-    internal static object? UnwrapValue(object? value)
+    private const int MaxBodyDepth = 64;
+
+    internal static object? UnwrapValue(object? value, string path = "-Body")
     {
+        // Depth from the path: each nesting level appends a segment. A self-referencing
+        // hashtable ($h.self = $h) recursed to a StackOverflowException, which no catch
+        // can stop - the process died. 64 levels is far beyond any real Graph body.
+        if (path.Length > MaxBodyDepth * 8)
+        {
+            var depth = path.Count(c => c is '.' or '[');
+            if (depth > MaxBodyDepth)
+                throw new ArgumentException(
+                    $"The value at '{path[..64]}...' nests deeper than {MaxBodyDepth} levels. "
+                    + "Is the body self-referencing?");
+        }
         if (value is PSObject pso)
         {
             var unwrapped = UnwrapPSObject(pso);
-            return ReferenceEquals(unwrapped, pso) ? PSOToDict(pso) : UnwrapValue(unwrapped);
+            return ReferenceEquals(unwrapped, pso) ? PSOToDict(pso, path) : UnwrapValue(unwrapped, path);
         }
+        RefuseUnserializable(value, path);
         if (value is IDictionary dict)
-            return DictionaryToDict(dict);
+            return DictionaryToDict(dict, path);
         // byte[] is Edm.Binary and serializes as base64; flattening it into object?[]
         // would emit a JSON array of integers instead.
         if (value is IEnumerable seq and not (string or byte[]))
-            return EnumerableToArray(seq);
+            return EnumerableToArray(seq, path);
         return value;
+    }
+
+    /// <summary>
+    /// Values that would serialize to something other than what they mean. A SecureString
+    /// reflects to {"Length":8} - the request "succeeds" carrying garbage instead of the
+    /// secret, or worse, would carry the secret if it round-tripped. NaN and Infinity have
+    /// no JSON representation, and STJ's own refusal does not say which property.
+    /// </summary>
+    private static void RefuseUnserializable(object? value, string path)
+    {
+        switch (value)
+        {
+            case System.Security.SecureString:
+            case PSCredential:
+            case ScriptBlock:
+            case System.Security.Cryptography.X509Certificates.X509Certificate:
+                throw new ArgumentException(
+                    $"The value at '{path}' is a {value.GetType().Name}, which does not serialize "
+                    + "to JSON meaningfully. Convert it to what the endpoint expects before sending.");
+            case double d when double.IsNaN(d) || double.IsInfinity(d):
+                throw new ArgumentException($"The value at '{path}' is {d}; JSON has no representation for it.");
+            case float f when float.IsNaN(f) || float.IsInfinity(f):
+                throw new ArgumentException($"The value at '{path}' is {f}; JSON has no representation for it.");
+        }
     }
 
     /// <summary>
     /// Flatten any non-string sequence (object[], ArrayList, List&lt;object&gt;, ...) into an array of
     /// unwrapped values.
     /// </summary>
-    private static object?[] EnumerableToArray(IEnumerable source) =>
-        source.Cast<object?>().Select(UnwrapValue).ToArray();
+    private static object?[] EnumerableToArray(IEnumerable source, string path = "-Body") =>
+        source.Cast<object?>().Select((v, i) => UnwrapValue(v, $"{path}[{i}]")).ToArray();
 
     #endregion
 

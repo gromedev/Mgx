@@ -30,8 +30,14 @@ public class ResponseFidelityTests
 
     private static void ResetTransport()
     {
+        // Restore every static InjectTransport touched - a later test in the collection
+        // that drives a cmdlet without injecting must not inherit this class's transport.
         Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
         Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
+        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
+        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
+        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
+        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
         ResiliencePipelineFactory.Reset();
     }
 
@@ -157,6 +163,95 @@ public class ResponseFidelityTests
 
             var error = Assert.Single(ps.Streams.Error);
             Assert.StartsWith("MalformedJsonResponse", error.FullyQualifiedErrorId);
+        }
+        finally { ResetTransport(); }
+    }
+
+    [Fact]
+    public void A_bom_prefixed_json_body_parses()
+    {
+        var wire = new MockHttpHandler();
+        var bom = new byte[] { 0xEF, 0xBB, 0xBF };
+        var body = System.Text.Encoding.UTF8.GetBytes("""{"id":"u1","displayName":"BOM"}""");
+        wire.QueueBytes(HttpStatusCode.OK, [.. bom, .. body], "application/json");
+        InjectTransport(wire);
+        try
+        {
+            using var ps = CreateShell();
+            ps.AddCommand("Invoke-MgxRequest").AddParameter("Uri", "/users/u1");
+            var output = ps.Invoke();
+
+            Assert.Empty(ps.Streams.Error);
+            var item = Assert.Single(output);
+            Assert.Equal("BOM", ((System.Collections.Hashtable)item.BaseObject)["displayName"]);
+        }
+        finally { ResetTransport(); }
+    }
+
+    [Fact]
+    public void A_utf16_body_is_decoded_by_its_declared_charset()
+    {
+        var wire = new MockHttpHandler();
+        wire.QueueBytes(HttpStatusCode.OK,
+            System.Text.Encoding.Unicode.GetBytes("plain utf-16 text"),
+            "text/plain; charset=utf-16");
+        InjectTransport(wire);
+        try
+        {
+            using var ps = CreateShell();
+            ps.AddCommand("Invoke-MgxRequest").AddParameter("Uri", "/users/u1").AddParameter("Raw", true);
+            var output = ps.Invoke();
+
+            var item = Assert.Single(output);
+            Assert.Equal("plain utf-16 text", item.BaseObject);
+        }
+        finally { ResetTransport(); }
+    }
+
+    [Fact]
+    public void A_malformed_export_page_is_an_error_record_not_a_crash()
+    {
+        var wire = new MockHttpHandler();
+        wire.QueueResponse(HttpStatusCode.OK, "not a collection envelope");
+        InjectTransport(wire);
+        var outFile = Path.Combine(Path.GetTempPath(), $"mgx-export-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            using var ps = CreateShell();
+            ps.AddCommand("Export-MgxCollection")
+              .AddParameter("Uri", "/users")
+              .AddParameter("OutputFile", outFile);
+            ps.Invoke();
+
+            var error = Assert.Single(ps.Streams.Error);
+            Assert.StartsWith("MalformedJsonResponse", error.FullyQualifiedErrorId);
+        }
+        finally
+        {
+            File.Delete(outFile);
+            ResetTransport();
+        }
+    }
+
+    [Fact]
+    public void A_304_from_a_conditional_download_is_not_an_error()
+    {
+        var wire = new MockHttpHandler();
+        wire.QueueEmpty((HttpStatusCode)304);
+        InjectTransport(wire);
+        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, true);
+        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null,
+            new ResilientGraphClientOptions().TotalTimeoutSeconds);
+        try
+        {
+            using var ps = CreateShell();
+            ps.AddScript("""
+                Get-MgxContent '/me/drive/items/x/content' -Headers @{ 'If-None-Match' = '"etag"' }
+                """);
+            var output = ps.Invoke();
+
+            Assert.Empty(output);
+            Assert.Empty(ps.Streams.Error);
         }
         finally { ResetTransport(); }
     }

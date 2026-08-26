@@ -1,6 +1,9 @@
 # Shared plumbing for the Mgx benchmark suite. Dot-source from each benchmark script:
 #   . "$PSScriptRoot/common.ps1"
-# Auth resolution order: existing Graph session, then $env:MGX_BENCH_APP, then ~/.mgx-bench/app.json.
+# Auth resolution order: existing Graph session, then AZURE_* certificate variables, then
+# AZURE_* secret variables, then $env:MGX_BENCH_APP / ~/.mgx-bench/app.json. With both a
+# certificate path and a secret set, the certificate wins - and a certificate path that
+# does not exist throws rather than falling through, so a stale path masks the secret.
 
 $ErrorActionPreference = 'Stop'
 
@@ -33,10 +36,20 @@ function Connect-MgxBenchmark {
         return
     }
 
+    # A secret in the environment, for an app that has no certificate uploaded. Same three
+    # variables minus the certificate, and like the certificate path it leaves nothing at rest.
+    if ($env:AZURE_TENANT_ID -and $env:AZURE_CLIENT_ID -and $env:AZURE_CLIENT_SECRET) {
+        $cred = [pscredential]::new($env:AZURE_CLIENT_ID,
+            (ConvertTo-SecureString $env:AZURE_CLIENT_SECRET -AsPlainText -Force))
+        Connect-MgGraph -TenantId $env:AZURE_TENANT_ID -ClientSecretCredential $cred -NoWelcome
+        Write-Host "Connected app-only by secret ($($env:AZURE_CLIENT_ID))"
+        return
+    }
+
     $credPath = if ($env:MGX_BENCH_APP) { $env:MGX_BENCH_APP }
                 else { Join-Path $HOME '.mgx-bench/app.json' }
     if (-not (Test-Path $credPath)) {
-        throw "No Graph session, no AZURE_* certificate variables, and no app credentials at '$credPath'."
+        throw "No Graph session, no AZURE_* certificate or secret variables, and no app credentials at '$credPath'."
     }
     $cfg  = Get-Content $credPath -Raw | ConvertFrom-Json
     $cred = [pscredential]::new($cfg.appId, (ConvertTo-SecureString $cfg.clientSecret -AsPlainText -Force))
@@ -82,6 +95,20 @@ function Get-BenchAppToken {
                     client_assertion      = $assertion
                     scope                 = 'https://graph.microsoft.com/.default'
                 }
+                return $resp.access_token
+            }
+            catch { if ($attempt -eq 3) { throw }; Start-Sleep -Seconds 5 }
+        }
+    }
+
+    if ($env:AZURE_TENANT_ID -and $env:AZURE_CLIENT_ID -and $env:AZURE_CLIENT_SECRET) {
+        foreach ($attempt in 1..3) {
+            try {
+                $resp = Invoke-RestMethod -Method POST -TimeoutSec 30 `
+                    -Uri "https://login.microsoftonline.com/$($env:AZURE_TENANT_ID)/oauth2/v2.0/token" `
+                    -Body @{ grant_type = 'client_credentials'; client_id = $env:AZURE_CLIENT_ID
+                             client_secret = $env:AZURE_CLIENT_SECRET
+                             scope = 'https://graph.microsoft.com/.default' }
                 return $resp.access_token
             }
             catch { if ($attempt -eq 3) { throw }; Start-Sleep -Seconds 5 }

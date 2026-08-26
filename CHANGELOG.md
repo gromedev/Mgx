@@ -1,99 +1,145 @@
 # Changelog
 
+## 2.1.3
+
+### Added
+
+- Added about_Mgx_Errors documentation detailing termination behavior, error record generation, and -ErrorAction/-ErrorVariable handling.
+- Added a performance benchmark measuring throughput under -Concurrency against connection pool limits.
+- Live test suite now supports client secret authentication alongside certificate-based authentication.
+
+### Fixed
+
+- SecureString, credential objects, and script blocks in -Body throw explicit errors rather than serializing as reflection noise.
+- Property path details are now included in error records when NaN or Infinity values fail -Body serialization.
+- Server errors, timeouts, and precondition failures assign specific ErrorCategory values instead of defaulting to NotSpecified.
+- Broken circuit exceptions across fan-out execution paths surface consistent error guidance.
+- Get-MgxContent forwards the full family of conditional headers (including If-None-Match) to content download hosts.
+- Piped input to Get-MgxContent validates -OutFile constraints prior to requesting download URLs.
+- BatchChunkFailed events now map underlying exception root causes to appropriate ErrorCategory values.
+- Failed batch chunks under -ErrorAction Stop write dead-letter files prior to terminating pipeline execution.
+- Typed parameters deferring to options already present in -Uri emit warnings rather than dropping silently.
+- Sync-MgxDelta state comparison evaluates active -Property sets correctly when -Uri $select parameters are present.
+- Embedded $count parameters in -Uri avoid triggering redundant degradation retries.
+- Encoded %24top options in -Uri combined with -Top parameters no longer emit duplicate query parameters.
+- Absolute -Uri inputs with leading whitespace are now rejected by the guard instead of being prepended to the versioned base URL.
+- Lowercase conditional headers are preserved and forwarded across two-hop content download requests.
+- client-request-id headers on two-hop content download paths avoid duplicate values.
+- Requests with bodies now emit warnings on malformed header names rather than raising unhandled crashes.
+- Caller-supplied Content-Length headers are ignored in favor of computed payload lengths, preventing request failures from length mismatches.
+- Request bodies over 4 MB pass directly to the SDK chain under Enable-MgxResilience instead of being rejected.
+- HTTP 304 Not Modified responses on conditional downloads complete cleanly without generating error records.
+- If-Match headers are stripped when requesting content download URLs to prevent HTTP 412 Precondition Failed errors.
+- Byte-level JSON parsing handles UTF-8 BOM prefixes correctly.
+- Response bodies and error snippets respect declared response character sets during decoding.
+- Export-MgxCollection handles malformed page responses cleanly by emitting error records instead of raw exceptions.
+- Circular self-referencing objects in -Body raise validation errors instead of causing process stack overflows.
+- Dead-letter file output preserves unescaped readable text formatting.
+- Benchmark 10 workload scaling was adjusted to trigger true throttling and measure adaptive pacing accurately.
+
+### Changed
+
+- Unified failure classification logic across retries, circuit breaking, batch retry checks, content downloads, and adaptive pacing.
+
+### Documentation
+
+- Reorganized examples by task to cover end-to-end workflows rather than isolated cmdlet usage.
+- Clarified that adaptive pacing responds directly to throttling signals, using observed latency for telemetry reporting rather than as a control input.
+- Verbose output now identifies non-JSON string -Body inputs and notes Content-Type override usage.
+- Updated cmdlet help to document -Body serialization contracts and prohibited parameter object types.
+
 ## 2.1.2
 
 ### Fixed
 
-- Invoke-MgxBatchRequest wrote no error records for failed items unless a dead-letter write also failed.
-- A 204 or empty response body on a GET ended the cmdlet with an unhandled error.
-- An HTML or otherwise non-JSON response body surfaced as an unhandled exception instead of an error record.
-- A JSON response body that did not parse crashed the pipeline instead of reporting what was received.
-- A '#' in a request path silently dropped everything after it.
-- Pre-encoded -Filter, -Search, -Property, -Sort and -ExpandProperty values were percent-encoded a second time.
-- Enums in -Body were sent as numbers, which Graph does not accept.
-- A byte array in -Body became a JSON array of integers instead of base64.
-- A TimeSpan in -Body was not sent as an ISO-8601 duration.
-- A DateTime without a kind was sent without an offset and refused.
-- A PSCustomObject -Body dropped every property that was not a NoteProperty, sending {} in the worst case.
-- Non-ASCII text in -Body was \u-escaped, making -Debug traces and dead-letter files unreadable.
-- An array in -Headers went on the wire as the literal text System.String[].
-- Invoke-MgxRequest, Expand-MgxRelation and Export-MgxCollection mangled an absolute -Uri instead of rejecting it.
-- Get-MgxContent did not escape drive and item ids piped into the download path.
-- A Content-Type or other content header in -Headers was silently dropped.
-- A client-request-id in -Headers had Mgx's own value appended after it.
-- If-Match and if-match in -Headers went on the wire as two headers.
-- A typed parameter duplicating a query option already written into -Uri sent it twice.
-- An attempt that timed out during Ctrl-C could schedule another retry.
-- Requests through Enable-MgxResilience carried no client-request-id to quote at Graph support.
-- An unexpected failure discarded the buffered retry history that explained it.
-- A request body over 4MB passed through Enable-MgxResilience unchecked and was buffered whole.
+- `Invoke-MgxBatchRequest` wrote no error records for failed items unless a dead-letter write also failed.
+- HTTP 204 and empty response bodies on GET requests complete cleanly instead of raising unhandled errors.
+- HTML and non-JSON response bodies surface as proper error records instead of unhandled exceptions.
+- Unparseable JSON response bodies report raw received text without crashing the pipeline.
+- '#' characters in request paths no longer truncate subsequent path content.
+- Pre-encoded values in `-Filter`, `-Search`, `-Property`, `-Sort`, and `-ExpandProperty` avoid double-percent-encoding.
+- Enum values in `-Body` transmit as strings instead of numbers.
+- Byte arrays in `-Body` serialize as base64 strings instead of JSON integer arrays.
+- `TimeSpan` values in `-Body` format correctly as ISO-8601 durations.
+- `DateTime` values without a `Kind` property include valid offsets to prevent endpoint rejection.
+- `PSCustomObject` inputs to `-Body` retain non-NoteProperty members instead of serializing to `{}`.
+- Non-ASCII text in `-Body` avoids `\u`-escaping to keep `-Debug` traces and dead-letter files readable.
+- Array values in `-Headers` transmit properly instead of serializing to the literal string `System.String[]`.
+- `Invoke-MgxRequest`, `Expand-MgxRelation`, and `Export-MgxCollection` preserve absolute `-Uri` inputs without mangling.
+- `Get-MgxContent` properly escapes drive and item IDs piped into download paths.
+- Content-Type and other content headers in `-Headers` are preserved instead of being silently dropped.
+- Custom `client-request-id` values in `-Headers` no longer have internal Mgx IDs appended.
+- Case-variant `If-Match` headers in `-Headers` avoid sending duplicate headers.
+- Typed parameters duplicating query options already in `-Uri` no longer emit twice.
+- Timed-out request attempts during Ctrl-C cancellation no longer schedule redundant retries.
+- Requests routed through `Enable-MgxResilience` include required `client-request-id` headers.
+- Unexpected failures preserve buffered retry histories for diagnostics.
+- A request body over 4 MB passed through `Enable-MgxResilience` unchecked and was buffered whole.
 
 ## 2.1.1
 
 ### Fixed
 
-- Enable-MgxResilience ignored throttling: pacing never slowed, telemetry reported no retries, and a throttled request could fail outright.
+- `Enable-MgxResilience` now respects throttling signals, properly slowing pacing, logging telemetry retries, and preventing throttled requests from failing outright.
 
 ### Changed
 
-- Under Enable-MgxResilience, a 503 or 504 on a write is no longer retried. Throttling (429) is unaffected.
+- HTTP 503 and 504 errors on write operations are no longer retried under `Enable-MgxResilience` (throttling 429 retries are unaffected).
 
 ## 2.1.0
 
-Adds proactive throttle avoidance, ranged content downloads, and resumable enumeration.
-
 ### Added
 
-- Adaptive request pacing, on by default. Requests are spaced before they are sent, per workload; opt out with Set-MgxOption -NoAdaptivePacing.
-- Get-MgxContent, to download file and media content whole or by byte range (-First).
-- Sync-MgxDelta -CheckpointPath, to resume interrupted enumerations.
-- Sync-MgxDelta -Latest, to baseline state without enumerating.
-- Sync-MgxDelta -Prefer, to send drive delta Prefer tokens.
-- Resource units consumed, in telemetry output, benchmarks and examples.
+- Added adaptive request pacing by default per workload, with opt-out via `Set-MgxOption -NoAdaptivePacing`.
+- Added `Get-MgxContent` to download file and media content whole or by byte range (`-First`).
+- Added `Sync-MgxDelta -CheckpointPath` to resume interrupted enumerations at page boundaries or every 500 items in JSONL mode.
+- Added `Sync-MgxDelta -Latest` to baseline state from the current moment without enumerating.
+- Added `Sync-MgxDelta -Prefer` to send drive delta Prefer tokens.
+- Added Resource Units Consumed reporting to telemetry outputs, benchmark results, and examples.
 
 ### Fixed
 
-- -Latest was honored after a state invalidation, dropping every change since the last sync.
-- Delta resume dropped the interrupted run's items when an earlier run had already completed, and advanced the delta token past them.
-- Export resume dropped the interrupted run's items when an earlier export had already written the output file.
-- Export resume wrote a page's items twice when a run was interrupted twice inside the same page.
-- Delta resume kept the previous sync's rows in front of the interrupted sync's output.
-- Export resume started the export over when the interrupted run had died on a transient error.
-- A resume checkpoint naming a file that was never a temp consumed it as data.
-- A refused delta token was reported as an endpoint not supporting delta queries.
-- Sync-MgxDelta as a session's first cmdlet sent its request to the public cloud endpoint.
-- A denied or read-only output file ended a delta sync with an unhandled error on Windows.
-- A missing drive item suggested retrying in beta instead of reporting the item absent.
-- -Top was ignored when combined with -All, returning the whole collection.
-- Get-Help described output shapes and parameters from before 2.0.0.
-- Enumeration returned part of a collection without error when a nextLink was refused.
-- A delta sync stopped with an error when a page contained a non-object item.
-- Get-MgxContent left an unwritable -OutFile as an unhandled error naming a temp path.
-- A non-Graph JSON error body threw from inside the exception it was being used to build, surfacing a CDN failure as a security refusal.
-- A $batch 429 set a pacing cap that nothing enforced and nothing cleared, so telemetry reported it forever.
-- Get-MgxContent ignored Retry-After when a download host sent it as an HTTP date.
-- Get-Help was missing the examples for -CheckpointPath, -Latest, -Prefer, adaptive pacing, and two Get-MgxContent endpoints, and did not document Set-MgxOption -BatchChunkConcurrency.
-- Seven examples rendered blank tables, and one reported password secrets as certificates.
-- Repeat 429s could raise the adaptive cap above -RateLimitPerSecond.
-- Delta state did not record its API version, so runs omitting -ApiVersion silently synced the other one.
-- -Debug wrote pre-authenticated download URLs verbatim, from redirect headers and from response bodies.
-- Get-MgxContent -OutFile with piped input downloaded every item but kept only the last.
-- -Offset was ignored when a server returned a whole-body 200.
-- An offset past end of file overwrote an existing -OutFile with an empty one.
-- Two-hop content downloads were reported as failed requests.
-- Adaptive pacing fired synchronized bursts when sleep times were clamped.
-- Enable-MgxResilience recorded no telemetry: request counts, HTTP time and rate-limiter wait all stayed 0.
-- Invoke-MgGraphRequest with a relative URI failed while resilience was enabled.
-- $batch envelopes were bucketed as Other rather than their target workload.
-- Slow start opened above ceilings set below 4 rps.
-- ResiliencePipelineFactory.Reset() reverted configuration and kept batch pacer state across credential changes.
-- Ctrl-C during file cleanup raised disposed-object errors.
+- `-Latest` flag behavior preserved after state invalidation to avoid dropping changes since the previous sync.
+- Delta resume retains interrupted run items and properly manages delta tokens when previous runs completed.
+- Export resume retains interrupted run items when previous exports have written output files.
+- Export resume prevents duplicate page item writes when runs are interrupted twice within the same page.
+- Delta resume outputs interrupted sync data cleanly without prepending previous sync rows.
+- Export resume recovers transient error interruptions without restarting exports from scratch.
+- Resume checkpoints ignore non-temp files to prevent consuming them as data.
+- Refused delta tokens report distinct error messages instead of claiming unsupported delta endpoints.
+- `Sync-MgxDelta` targets correct cloud endpoints when run as the first cmdlet in a session.
+- Access-denied or read-only output files raise clear errors on Windows without unhandled exceptions.
+- Missing drive items report absent items directly without suggesting retry on beta endpoints.
+- `-Top` parameter functions correctly when combined with `-All`.
+- `Get-Help` reflects post-2.0.0 output shapes and parameters.
+- Enumerations report errors cleanly when `nextLink` URLs are refused instead of returning partial collections.
+- Delta syncs handle non-object items within pages without halting.
+- `Get-MgxContent` reports unwritable `-OutFile` errors clearly against target paths rather than temporary paths.
+- Non-Graph JSON error bodies surface CDN failures accurately without throwing nested exceptions.
+- Batch 429 responses clear pacing caps properly without persisting in telemetry endlessly.
+- `Get-MgxContent` respects HTTP date-formatted `Retry-After` headers from download hosts.
+- `Get-Help` documentation updated with examples for `-CheckpointPath`, `-Latest`, `-Prefer`, adaptive pacing, `Get-MgxContent` endpoints, and `Set-MgxOption -BatchChunkConcurrency`.
+- Example table rendering fixed across seven examples, and password secret examples updated to avoid misclassification as certificates.
+- Adaptive caps respect `-RateLimitPerSecond` ceilings during repeated 429 throttling events.
+- Delta state records API versions to prevent un-versioned runs from silently syncing alternate versions.
+- `-Debug` tracing redacts pre-authenticated download URLs from redirect headers and response bodies.
+- `Get-MgxContent -OutFile` with piped input appends/manages output files without overwriting all but the final item.
+- `-Offset` parameter respected when servers return full-body HTTP 200 responses.
+- Offsets past end-of-file preserve existing `-OutFile` targets instead of overwriting with empty files.
+- Two-hop content downloads record as successful requests.
+- Adaptive pacing prevents synchronized burst requests when queue sleep times are clamped.
+- `Enable-MgxResilience` populates telemetry metrics for request counts, HTTP time, and rate-limiter waits.
+- `Invoke-MgGraphRequest` supports relative URIs while resilience is enabled.
+- `$batch` envelopes bucket under target workloads instead of `Other`.
+- Slow start respects rate limit ceilings configured below 4 rps.
+- `ResiliencePipelineFactory.Reset()` isolates configuration changes and resets pacer state across credential changes.
+- Ctrl-C cancellation during file cleanup completes without throwing disposed-object errors.
 
 ### Documentation
 
-- Graph delta responses repeat objects across pages; deduplicate on id, or baseline with -Latest.
-- Adaptive pacing applies to every request except batch outer POSTs.
-- Measured throttling behavior: resource unit budgets are scoped per application and tenant, and x-ms-throttle-limit-percentage is not emitted.
+- Documented Graph delta response object duplication across pages, recommending `id` deduplication or `-Latest` baselining.
+- Clarified that adaptive pacing applies to every request except batch outer POSTs.
+- Documented measured throttling behavior: resource unit budgets are scoped per application and tenant, and `x-ms-throttle-limit-percentage` is not emitted.
 
 ## 2.0.1
 
@@ -110,7 +156,7 @@ Patch release. Three fixes; no feature or API changes.
 ### Breaking
 
 - Invoke-MgxRequest, Invoke-MgxBatchRequest, Expand-MgxRelation and Sync-MgxDelta now emit case-insensitive Hashtables instead of PSObjects, matching Invoke-MgGraphRequest. Use -Raw | ConvertFrom-Json for the old shape.
-- @odata.type is preserved under its own key; all other @odata.* transport metadata is stripped, including @odata.etag.
+- @odata.type is preserved under its own key; all other @odata.- transport metadata is stripped, including @odata.etag.
 - Removed the custom format views (Mgx.User, Mgx.Group, and the rest); dictionaries render with PowerShell's built-in Name/Value view.
 - Lowered the floor to PowerShell 7.4 (LTS) and .NET 8, down from 7.5.
 - Removed Microsoft.Graph.Authentication from RequiredModules. Cmdlets needing auth now report GraphAuthModuleNotLoaded with install instructions.

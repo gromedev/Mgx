@@ -1,3 +1,4 @@
+using Mgx.Engine.Errors;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
@@ -582,15 +583,10 @@ public sealed class GraphBatchClient
                         var retryAfterValue = item.Headers
                             .FirstOrDefault(h => string.Equals(h.Key, "Retry-After", StringComparison.OrdinalIgnoreCase))
                             .Value;
-                        if (retryAfterValue != null &&
-                            System.Net.Http.Headers.RetryConditionHeaderValue.TryParse(retryAfterValue, out var ra))
                         {
-                            var delay = ra.Delta
-                                ?? (ra.Date.HasValue ? ra.Date.Value - DateTimeOffset.UtcNow : (TimeSpan?)null);
-                            if (delay.HasValue)
+                            if (RetryAfterPolicy.TryResolveSeconds(retryAfterValue, _maxRetryAfterSeconds,
+                                    out var seconds, out var clamped))
                             {
-                                var seconds = (int)Math.Ceiling(delay.Value.TotalSeconds);
-                                var clamped = Math.Min(Math.Max(seconds, 0), _maxRetryAfterSeconds);
                                 if (clamped < seconds && attempt < MaxPerRequestRetries)
                                 {
                                     _pendingVerbose.Enqueue(
@@ -660,14 +656,12 @@ public sealed class GraphBatchClient
     }
 
     /// <summary>
-    /// Determines if a batch response item should be retried.
-    /// POST is non-idempotent: only retry on 429 (matches Kiota SDK behavior), not on 5xx/408 (could create duplicates).
-    /// Other methods (GET, PATCH, PUT, DELETE) retry on 429/408/500/502/503/504 (aligned with ResiliencePipelineFactory).
+    /// Whether a batch response item should be retried: the same classifier and policy the
+    /// request pipeline uses, so the two cannot drift apart again. Batch items carry a
+    /// status and inline headers, never an exception - that is the whole difference.
     /// </summary>
     private static bool IsRetryable(int statusCode, string method)
-    {
-        if (statusCode == 429) return true;
-        if (string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase)) return false;
-        return statusCode is 408 or 500 or 502 or 503 or 504;
-    }
+        => MgxErrorPolicy.ShouldRetry(
+            MgxErrorClassifier.Classify(statusCode).Class,
+            isIdempotent: !string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase));
 }

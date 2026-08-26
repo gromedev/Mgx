@@ -24,7 +24,12 @@ public sealed class ResilientGraphClient : IDisposable
     private readonly ConcurrentQueue<string> _pendingWarnings = new();
     private readonly ConcurrentQueue<string> _pendingDebug = new();
 
-    /// <summary>Maximum request body size (4MB). Graph API rejects larger bodies on most endpoints.</summary>
+    /// <summary>
+    /// Maximum request body size (4MB). Bodies on this path are JSON to Graph endpoints,
+    /// where 4MB is the service's own cap, so refusing early is a favor. The resilience
+    /// wrap deliberately differs: it carries SDK requests (content uploads run to 250MB)
+    /// and passes an over-cap body to the SDK untouched instead of refusing it.
+    /// </summary>
     internal const int MaxRequestBodyBytes = 4 * 1024 * 1024;
 
     /// <summary>
@@ -219,14 +224,32 @@ public sealed class ResilientGraphClient : IDisposable
                     {
                         foreach (var (key, value) in headers)
                         {
+                            // Content-Length is computed from the actual body; a caller value
+                            // can only disagree with it, and the transport fails the request
+                            // on either direction of the mismatch.
+                            if (string.Equals(key, "Content-Length", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (attempt == 1)
+                                    _pendingWarnings.Enqueue(
+                                        "Header 'Content-Length' is computed from the request body and was not overridden.");
+                                continue;
+                            }
                             if (request.Headers.TryAddWithoutValidation(key, value)) continue;
                             // The request collection refuses content headers (Content-Type,
                             // Content-Disposition, ...); they belong on the content, replacing
-                            // any default the buffered content carried.
+                            // any default the buffered content carried. Remove throws on a
+                            // malformed name where TryAdd merely returns false - a name both
+                            // collections refuse must warn, not crash the request.
                             if (request.Content != null)
                             {
-                                request.Content.Headers.Remove(key);
-                                if (request.Content.Headers.TryAddWithoutValidation(key, value)) continue;
+                                try
+                                {
+                                    request.Content.Headers.Remove(key);
+                                    if (request.Content.Headers.TryAddWithoutValidation(key, value)) continue;
+                                }
+                                catch (Exception ex) when (ex is FormatException or ArgumentException)
+                                {
+                                }
                             }
                             if (attempt == 1)
                                 _pendingWarnings.Enqueue($"Header '{key}' is not valid on this request and was not sent.");

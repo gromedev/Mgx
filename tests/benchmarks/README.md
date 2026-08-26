@@ -23,7 +23,7 @@ there is no session telemetry to read - expected, not a failure.
 - A seeded test tenant (~100k users, ~15k groups) for the tenant benchmarks.
   `06-fault-gauntlet.ps1` needs **no tenant** — it runs against a local mock.
 
-Never point these scripts at a production tenant. Benchmarks 04 and 07 create and delete objects; 07 deliberately provokes throttling.
+Never point these scripts at a production tenant. Benchmarks 04 and 07 create and delete objects; 07 and 10 deliberately provoke throttling.
 
 ## The benchmarks
 
@@ -42,9 +42,12 @@ Never point these scripts at a production tenant. Benchmarks 04 and 07 create an
 | 11 | `11-throttle-accuracy.ps1` | Under throttling, retrieval hinges on honoring `Retry-After` | yes |
 | 12 | `12-delta-replay.ps1` | Delta enumerations repeat objects; replay factor vs ground truth | yes |
 | 13 | `13-resource-unit-rate.ps1` | Sustained RU ceiling vs burst allowance, at held send rates | yes |
+| 14 | `14-pacing-cold-cost.ps1` | What pacing costs a short run that finishes during the ramp | yes |
+| 15 | `15-fanout-concurrency-scaling.ps1` | What `-Concurrency` buys, and whether the connection pool is the ceiling | yes |
 
-11-13 are not in `run.ps1`: each deliberately drives the tenant to 429s, so they run standalone
-(10 also throttles on purpose, which is why `run.ps1` puts it last).
+11-15 are not in `run.ps1`. 11-13 each deliberately drive the tenant to 429s, so they run
+standalone (10 also throttles on purpose, which is why `run.ps1` puts it last). 14 and 15 are
+cheap and answer one question each; they are read on their own rather than as part of a sweep.
 
 ## Methodology
 

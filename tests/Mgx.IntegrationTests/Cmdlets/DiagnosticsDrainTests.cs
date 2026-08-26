@@ -54,6 +54,9 @@ public class DiagnosticsDrainTests
         {
             Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
             Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
+            Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
+            Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
+            Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
             ResiliencePipelineFactory.Reset();
         }
     }

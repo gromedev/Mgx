@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '2.1.2'
+    ModuleVersion     = '2.1.3'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -52,8 +52,24 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
-v2.1.2
+v2.1.3
+Added
+- about_Mgx_Errors documentation: termination behavior, error records, -ErrorAction/-ErrorVariable handling.
+- Live test suite supports client secret authentication alongside certificates.
+Fixed
+- SecureString, credential objects, and script blocks in -Body throw explicit errors rather than serializing as reflection noise.
+- Server errors, timeouts, and precondition failures assign specific ErrorCategory values instead of NotSpecified.
+- Get-MgxContent forwards the conditional header family (including If-None-Match) to content download hosts.
+- Failed batch chunks under -ErrorAction Stop write dead-letter files prior to terminating.
+- Typed parameters deferring to options already present in -Uri emit warnings rather than dropping silently.
+- Request bodies over 4 MB pass directly to the SDK chain under Enable-MgxResilience instead of being rejected.
+- HTTP 304 on conditional downloads completes cleanly without an error record.
+- Circular self-referencing objects in -Body raise validation errors instead of a process stack overflow.
+Changed
+- Unified failure classification across retries, circuit breaking, batch retry checks, content downloads, and adaptive pacing.
+See CHANGELOG.md for the full list.
 
+v2.1.2
 Fixed
 - URI handling: a '#' in a path dropped everything after it, pre-encoded query values were encoded twice, piped drive and item ids went unescaped, an absolute -Uri was mangled rather than refused, and a typed parameter could repeat an option already in -Uri.
 - Body serialization: enums went out as numbers, byte arrays as integer lists, TimeSpan and a Kind-less DateTime in forms Graph refuses, and a PSCustomObject body lost every property that was not a NoteProperty.
@@ -62,14 +78,7 @@ Fixed
 - An empty, non-JSON or malformed response body ended the cmdlet with an unhandled error.
 - An unexpected failure discarded the retry history explaining it, and a timed-out attempt could retry after Ctrl-C.
 
-v2.1.1
-Patch release. One fix; no feature or API changes.
-
-Fixed
-- Enable-MgxResilience ignored throttling: pacing never slowed, telemetry reported no retries, and a throttled request could fail outright.
-
-Changed
-- Under Enable-MgxResilience, a 503 or 504 on a write is no longer retried. Throttling (429) is unaffected.
+See CHANGELOG.md for the full history.
 '@
         }
     }

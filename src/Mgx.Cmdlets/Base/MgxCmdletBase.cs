@@ -997,9 +997,58 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         var q = url.IndexOf('?');
         if (q < 0) return set;
         foreach (var part in url[(q + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
-            set.Add(part.Split('=', 2)[0]);
+            // Decoded: %24top and $top are the same option to the server.
+            set.Add(Uri.UnescapeDataString(part.Split('=', 2)[0]));
         return set;
     }
+
+    private static readonly Dictionary<string, string> s_optionParameterNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["$filter"] = "-Filter", ["$select"] = "-Property", ["$orderby"] = "-Sort",
+        ["$search"] = "-Search", ["$expand"] = "-ExpandProperty", ["$skip"] = "-Skip",
+        ["$top"] = "-Top",
+    };
+
+    /// <summary>One warning line for typed parameters that deferred to options in -Uri.</summary>
+    protected static string DescribeDeferredOptions(IReadOnlyList<string> deferred)
+    {
+        var names = deferred.Select(o =>
+            s_optionParameterNames.TryGetValue(o, out var param) ? $"{param} ({o})" : o);
+        return $"{string.Join(", ", names)}: -Uri already carries the option, so the parameter's " +
+               "value was not added to the query. The -Uri value was sent.";
+    }
+
+    /// <summary>The decoded value of a query option in a built URL, or null when absent.</summary>
+    protected static string? GetQueryOptionValue(string url, string name)
+    {
+        var q = url.IndexOf('?');
+        if (q < 0) return null;
+        foreach (var part in url[(q + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var pieces = part.Split('=', 2);
+            if (string.Equals(Uri.UnescapeDataString(pieces[0]), name, StringComparison.OrdinalIgnoreCase))
+                return pieces.Length > 1 ? Uri.UnescapeDataString(pieces[1]) : string.Empty;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Query-degradation retries, shared by the collection paths: some endpoints refuse an
+    /// auto-added $count=true with a bare 400, and some (e.g. /directoryRoles) refuse $top
+    /// with Request_UnsupportedQuery. Both recover by dropping the option and retrying.
+    /// </summary>
+    protected static bool IsCountRejection(GraphServiceException ex, bool countWasAutoAdded)
+        => countWasAutoAdded && ex.StatusCode == HttpStatusCode.BadRequest;
+
+    protected static bool IsTopRejection(GraphServiceException ex, bool topSuppressed, bool noPageSize)
+        => !topSuppressed && !noPageSize
+           && ex.StatusCode == HttpStatusCode.BadRequest
+           && string.Equals(ex.ErrorCode, "Request_UnsupportedQuery", StringComparison.OrdinalIgnoreCase);
+
+    protected const string CountRejectedVerbose =
+        "Endpoint rejected $count=true (HTTP 400). Retrying without count parameter.";
+    protected const string TopRejectedVerbose =
+        "Endpoint rejected $top (Request_UnsupportedQuery). Retrying without page size.";
 
     private static readonly Regex s_encodedTriplet = new("%[0-9A-Fa-f]{2}", RegexOptions.Compiled);
 
@@ -1076,6 +1125,17 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         bool IncludeCount = false);
 
     protected static string BuildListUrl(string versionedBaseUrl, string relativeUri, ODataListParams p)
+        => BuildListUrl(versionedBaseUrl, relativeUri, p, out _);
+
+    /// <summary>
+    /// <paramref name="deferredToUri"/> reports typed parameters that were NOT sent because
+    /// -Uri already carries the option. Callers warn: silently preferring the -Uri value
+    /// turns "-Property displayName" into a different projection with no sign anything was
+    /// ignored. Excluded from the report: the automatic page-size $top (only an explicit
+    /// -Top counts) and the automatic $count.
+    /// </summary>
+    protected static string BuildListUrl(string versionedBaseUrl, string relativeUri, ODataListParams p,
+        out List<string> deferredToUri)
     {
         var baseUrl = $"{versionedBaseUrl}{NormalizePath(relativeUri)}";
         var queryParams = new List<string>();
@@ -1116,7 +1176,13 @@ public abstract class MgxCmdletBase : MgxCmdletCore
             queryParams.Add("$count=true");
 
         var existing = ExistingQueryOptions(baseUrl);
+        var removed = queryParams.Where(qp => existing.Contains(qp.Split('=', 2)[0]))
+            .Select(qp => qp.Split('=', 2)[0]).ToList();
         queryParams.RemoveAll(qp => existing.Contains(qp.Split('=', 2)[0]));
+        deferredToUri = removed.Where(name =>
+                !string.Equals(name, "$count", StringComparison.OrdinalIgnoreCase)
+                && (!string.Equals(name, "$top", StringComparison.OrdinalIgnoreCase) || p.Top > 0))
+            .ToList();
 
         if (queryParams.Count == 0)
             return baseUrl;
@@ -1167,16 +1233,11 @@ public abstract class MgxCmdletBase : MgxCmdletCore
         WriteWarning("This endpoint may only be available in beta. Retry with -ApiVersion beta.");
     }
 
-    protected static ErrorCategory MapStatusToCategory(HttpStatusCode statusCode) => statusCode switch
-    {
-        HttpStatusCode.NotFound => ErrorCategory.ObjectNotFound,
-        HttpStatusCode.Unauthorized => ErrorCategory.AuthenticationError,
-        HttpStatusCode.Forbidden => ErrorCategory.PermissionDenied,
-        HttpStatusCode.BadRequest => ErrorCategory.InvalidArgument,
-        HttpStatusCode.Conflict => ErrorCategory.ResourceExists,
-        (HttpStatusCode)429 => ErrorCategory.LimitsExceeded,
-        _ => ErrorCategory.NotSpecified
-    };
+    // Derived from the failure class, so every status the classifier knows gets a real
+    // category: a 500 is ResourceUnavailable and a 408 ConnectionError where the old
+    // six-entry map left both NotSpecified.
+    protected static ErrorCategory MapStatusToCategory(HttpStatusCode statusCode)
+        => MgxErrorPresentation.CategoryForStatus(statusCode);
 
     /// <summary>
     /// Handles the three common terminal exception types (GraphServiceException,

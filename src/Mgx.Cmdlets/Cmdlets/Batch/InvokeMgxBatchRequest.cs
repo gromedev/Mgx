@@ -25,6 +25,13 @@ namespace Mgx.Cmdlets.Cmdlets.Batch;
 [OutputType(typeof(Hashtable))]
 public class InvokeMgxBatchRequest : MgxCmdletBase
 {
+    /// <summary>Dead-letter lines are read by people; keep non-ASCII readable, matching
+    /// the request serializer's escaping.</summary>
+    private static readonly JsonSerializerOptions s_deadLetterJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
     /// <summary>
     /// Graph API URLs to batch. Accepts absolute URLs (https://graph.microsoft.com/v1.0/users/id)
     /// or relative URLs (/users/id). Also accepts Hashtables or PSObjects with Url/Method/Body members.
@@ -187,13 +194,15 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                 JsonElement? body = null;
                 if (input.Body != null)
                 {
-                    var json = InvokeMgxRequest.SerializeBody(input.Body);
                     try
                     {
+                        var json = InvokeMgxRequest.SerializeBody(input.Body);
                         body = JsonSerializer.Deserialize<JsonElement>(json);
                     }
-                    catch (JsonException ex)
+                    catch (Exception ex) when (ex is JsonException or ArgumentException)
                     {
+                        // ArgumentException: a value serialization refuses (SecureString, NaN),
+                        // named by property path. JsonException: a string body that is not JSON.
                         WriteError(new ErrorRecord(
                             new ArgumentException(
                                 $"Body for {input.Method} {input.Url} is not valid JSON: {ex.Message}", ex),
@@ -241,16 +250,6 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                 WriteObject(result);
             }
 
-            // A chunk's POST failed after earlier chunks were applied. Their results are above;
-            // this says why the rest never went, and NotSent names them.
-            if (batchResult.ChunkFailure != null)
-            {
-                var notSent = batchResult.NotSent.Count;
-                WriteError(new ErrorRecord(batchResult.ChunkFailure, "BatchChunkFailed",
-                    ErrorCategory.NotSpecified,
-                    $"{notSent} of {results.Count} operations were not sent"));
-            }
-
             // Write failed items to dead-letter file (append mode)
             if (resolvedDeadLetterPath != null)
             {
@@ -284,7 +283,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                         if (errorMsg != null)
                             deadLetter["Error"] = errorMsg;
 
-                        writer.WriteLine(deadLetter.ToJsonString());
+                        writer.WriteLine(deadLetter.ToJsonString(s_deadLetterJsonOptions));
                         failedCount++;
                     }
                 }
@@ -295,6 +294,21 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
 
                 if (failedCount > 0)
                     WriteVerbose($"Wrote {failedCount} failed items to dead-letter file: {resolvedDeadLetterPath}");
+            }
+
+            // A chunk's POST failed after earlier chunks were applied. Their results are above;
+            // this says why the rest never went, and NotSent names them. After the dead-letter
+            // write, like the item errors below, so -ErrorAction Stop cannot cut the file short.
+            if (batchResult.ChunkFailure != null)
+            {
+                var notSent = batchResult.NotSent.Count;
+                // The id stays BatchChunkFailed; the category and wrapping come from the
+                // failure itself - a throttled chunk is LimitsExceeded, an open circuit
+                // ResourceUnavailable with the guidance text, not NotSpecified.
+                var (_, category, report) = MgxErrorPresentation.PresentItemFailure(
+                    batchResult.ChunkFailure, "BatchChunkFailed", CircuitBreakerMessage);
+                WriteError(new ErrorRecord(report, "BatchChunkFailed", category,
+                    $"{notSent} of {results.Count} operations were not sent"));
             }
 
             // Emit errors for failed items (enables -ErrorAction Stop, populates $Error).

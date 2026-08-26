@@ -1,3 +1,4 @@
+using Mgx.Engine.Errors;
 using System.Net;
 using System.Net.Http.Headers;
 using Polly;
@@ -99,18 +100,10 @@ public static class GraphContentClient
     /// is the only bound on the sleep.
     /// </summary>
     internal static TimeSpan? ResolveRetryDelay(RetryConditionHeaderValue? retryAfter)
-    {
-        var cap = TimeSpan.FromSeconds(120);
-        if (retryAfter?.Delta is { } delta)
-            return delta > cap ? cap : delta;
-        if (retryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            if (delay > TimeSpan.Zero)
-                return delay > cap ? cap : delay;
-        }
-        return null;
-    }
+        // The 120s cap is hardcoded because this pipeline is a type-initialized static and
+        // cannot see ResilientGraphClientOptions; making it options-driven is a redesign of
+        // this class, not a parameter change.
+        => RetryAfterPolicy.Resolve(retryAfter, TimeSpan.FromSeconds(120));
 
     private static readonly ResiliencePipeline<HttpResponseMessage> s_downloadPipeline =
         new ResiliencePipelineBuilder<HttpResponseMessage>()
@@ -123,13 +116,13 @@ public static class GraphContentClient
                 MaxDelay = TimeSpan.FromSeconds(120),
                 ShouldHandle = args =>
                 {
-                    if (args.Outcome.Result?.StatusCode is (HttpStatusCode)429
-                        or HttpStatusCode.InternalServerError
-                        or HttpStatusCode.BadGateway
-                        or HttpStatusCode.ServiceUnavailable
-                        or HttpStatusCode.GatewayTimeout)
-                        return ValueTask.FromResult(true);
-                    return ValueTask.FromResult(args.Outcome.Exception is HttpRequestException);
+                    var info = args.Outcome.Result is { } response
+                        ? MgxErrorClassifier.Classify(response)
+                        : args.Outcome.Exception is { } ex
+                            ? MgxErrorClassifier.Classify(ex, cancellationRequested: false)
+                            : new MgxErrorInfo(MgxErrorClass.Permanent, 0);
+                    return ValueTask.FromResult(
+                        MgxErrorPolicy.ShouldRetryDownload(info, args.Outcome.Exception));
                 },
                 DelayGenerator = args =>
                     ValueTask.FromResult(ResolveRetryDelay(args.Outcome.Result?.Headers.RetryAfter)),
@@ -153,9 +146,12 @@ public static class GraphContentClient
         CancellationToken cancellationToken)
     {
         var graphHost = new Uri(requestUri).Host;
+        // Preserve case-insensitivity: Dictionary(IDictionary) silently swaps in the
+        // ordinal comparer, which made the hop-2 conditional forward and the
+        // client-request-id suppression casing-sensitive on this path only.
         var requestHeaders = headers != null
-            ? new Dictionary<string, string>(headers)
-            : new Dictionary<string, string>();
+            ? new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (range != null)
             requestHeaders["Range"] = range.ToString();
 
@@ -201,7 +197,8 @@ public static class GraphContentClient
                         $"Download host '{TryGetHost(absolute)}' is not on the allowed list "
                         + "(SharePoint/OneDrive download hosts only). Refusing to fetch content from it.");
 
-                var hop2 = await FetchFromDownloadHostAsync(validated, range, cancellationToken);
+                var hop2 = await FetchFromDownloadHostAsync(validated, range, cancellationToken,
+                    FilterDownloadHeaders(requestHeaders));
 
                 if (hop2.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
                     && authAttempt == 0)
@@ -239,14 +236,16 @@ public static class GraphContentClient
         string downloadUrl,
         RangeHeaderValue? range,
         TimeSpan bodyReadTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Dictionary<string, string>? headers = null)
     {
         var validated = DownloadUrlValidator.Validate(downloadUrl)
             ?? throw new InvalidOperationException(
                 $"Download host '{TryGetHost(downloadUrl)}' is not on the allowed list "
                 + "(SharePoint/OneDrive download hosts only). Refusing to fetch content from it.");
 
-        var response = await FetchFromDownloadHostAsync(validated, range, cancellationToken);
+        var response = await FetchFromDownloadHostAsync(validated, range, cancellationToken,
+            FilterDownloadHeaders(headers));
         if (response.IsSuccessStatusCode)
             return await WrapAsync(response, fromDownloadHost: true, bodyReadTimeout, cancellationToken);
 
@@ -257,11 +256,37 @@ public static class GraphContentClient
     }
 
     /// <summary>
+    /// The caller headers that cross to the download host: the READ-conditional family
+    /// plus Accept. Everything else stays on hop 1 - the download host is token-free by
+    /// construction, and correlation or auth headers must never reach it. If-Match and
+    /// If-Unmodified-Since stay behind too: they are write validators, and a Graph etag
+    /// forwarded to a SharePoint blob host cannot match - it would turn a shared
+    /// -Headers splat into a 412 on every download.
+    /// </summary>
+    private static readonly string[] s_forwardableDownloadHeaders =
+        ["If-None-Match", "If-Modified-Since", "If-Range", "Accept"];
+
+    private static Dictionary<string, string>? FilterDownloadHeaders(Dictionary<string, string>? headers)
+    {
+        if (headers == null) return null;
+        Dictionary<string, string>? filtered = null;
+        foreach (var (key, value) in headers)
+        {
+            // Compare by name, not by the source dictionary's comparer - a caller-built
+            // dictionary may be case-sensitive, and header names are not.
+            if (s_forwardableDownloadHeaders.Any(n => string.Equals(n, key, StringComparison.OrdinalIgnoreCase)))
+                (filtered ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase))[key] = value;
+        }
+        return filtered;
+    }
+
+    /// <summary>
     /// Token-free fetch with manual, re-validated redirects. Every hop must pass the
     /// allowlist: an open redirect on an allowlisted host is not a pass.
     /// </summary>
     private static async Task<HttpResponseMessage> FetchFromDownloadHostAsync(
-        string url, RangeHeaderValue? range, CancellationToken cancellationToken)
+        string url, RangeHeaderValue? range, CancellationToken cancellationToken,
+        Dictionary<string, string>? conditionalHeaders = null)
     {
         var current = url;
         for (var redirects = 0; ; redirects++)
@@ -277,6 +302,9 @@ public static class GraphContentClient
                         var request = new HttpRequestMessage(HttpMethod.Get, target);
                         if (range != null)
                             request.Headers.Range = range;
+                        if (conditionalHeaders != null)
+                            foreach (var (name, value) in conditionalHeaders)
+                                request.Headers.TryAddWithoutValidation(name, value);
                         return await (DownloadClientForTests ?? s_downloadClient).SendAsync(
                             request, HttpCompletionOption.ResponseHeadersRead, ctx.CancellationToken);
                     },

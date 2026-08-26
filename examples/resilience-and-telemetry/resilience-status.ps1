@@ -1,7 +1,9 @@
-# Check and toggle SDK resilience injection.
+# Add retry, circuit breaking, and rate limiting to existing Microsoft.Graph
+# scripts without changing a line of their code - then check it and take it off.
 #
-# Get-MgxResilience reports whether the Polly pipeline is currently
-# injected into the Microsoft.Graph SDK HTTP transport.
+# Enable-MgxResilience injects a Polly pipeline into the SDK's HTTP transport, so
+# unmodified SDK cmdlets (Get-MgUser, Get-MgGroup, ...) retry on 429/5xx and honor
+# Retry-After. Get-MgxResilience reports whether it is currently injected;
 # Disable-MgxResilience removes it and restores the original SDK behavior.
 #
 # Requirements: Connect-MgGraph -Scopes "User.Read.All"
