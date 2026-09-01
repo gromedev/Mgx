@@ -1,5 +1,4 @@
 using System.Net;
-using System.Reflection;
 using Mgx.Engine.Http;
 
 namespace Mgx.IntegrationTests;
@@ -12,36 +11,8 @@ namespace Mgx.IntegrationTests;
 [Collection("Pipeline")]
 public class SkipLogicTests
 {
-    private static readonly Type Base = typeof(Mgx.Cmdlets.Base.MgxCmdletBase);
-    private const BindingFlags Static = BindingFlags.NonPublic | BindingFlags.Static;
     private const string NotFoundBody =
         """{ "error": { "code": "Request_ResourceNotFound", "message": "missing" } }""";
-
-    private static void InjectTransport(HttpMessageHandler wire)
-    {
-        Base.GetField("s_graphHttpClient", Static)!.SetValue(null, new HttpClient(wire));
-        Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null,
-            Mgx.Cmdlets.Base.MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
-        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
-        Base.GetField("s_clientOptions", Static)!.SetValue(null,
-            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void ResetTransport()
-    {
-        // Restore every static InjectTransport touched - a later test in the collection
-        // that drives a cmdlet without injecting must not inherit this class's transport.
-        Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
-        Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
-        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
-        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
-        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
-        ResiliencePipelineFactory.Reset();
-    }
 
     private static (int Output, List<System.Management.Automation.ErrorRecord> Errors, List<string> Warnings)
         Run(string script)
@@ -69,13 +40,11 @@ public class SkipLogicTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.NotFound, NotFoundBody);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var (_, errors, _) = Run(script);
             Assert.Empty(errors);
         }
-        finally { ResetTransport(); }
     }
 
     [Theory]
@@ -87,13 +56,11 @@ public class SkipLogicTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.NotFound, NotFoundBody);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var (_, errors, _) = Run(script);
             Assert.NotEmpty(errors);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -101,8 +68,7 @@ public class SkipLogicTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.NotFound, NotFoundBody);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var (output, errors, warnings) = Run(
                 "'u1','u2','u3' | Invoke-MgxRequest -Uri '/users/{id}' -SkipNotFound");
@@ -110,6 +76,5 @@ public class SkipLogicTests
             Assert.Empty(errors);
             Assert.Contains(warnings, w => w.Contains("Skipped 3"));
         }
-        finally { ResetTransport(); }
     }
 }

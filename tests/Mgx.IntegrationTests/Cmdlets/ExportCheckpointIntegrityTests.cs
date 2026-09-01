@@ -1,6 +1,5 @@
 using System.Management.Automation;
 using System.Net;
-using System.Reflection;
 using System.Text;
 using Mgx.Cmdlets.Base;
 using Mgx.Engine.Http;
@@ -53,33 +52,8 @@ public class ExportCheckpointIntegrityTests
         }
     }
 
-    private static void InjectMock(HttpMessageHandler handler)
-    {
-        ResiliencePipelineFactory.Reset();
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, new HttpClient(handler));
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        t.GetField("s_ownsHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, false);
-        t.GetField("s_graphEndpoint", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, "https://graph.microsoft.com");
-        t.GetField("s_clientOptions", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void CleanupMock()
-    {
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthContextRef", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static long? Export(string outputPath, string? checkpointPath, bool all, int top = 0)
+    private static long? Export(string outputPath, string? checkpointPath, bool all, int top = 0,
+        string uri = "/users")
     {
         using var ps = PowerShell.Create();
         ps.AddCommand("Import-Module")
@@ -91,7 +65,7 @@ public class ExportCheckpointIntegrityTests
         ps.Commands.Clear();
 
         var cmd = ps.AddCommand("Export-MgxCollection")
-                    .AddParameter("Uri", "/users")
+                    .AddParameter("Uri", uri)
                     .AddParameter("OutputFile", outputPath);
         if (checkpointPath != null) cmd.AddParameter("CheckpointPath", checkpointPath);
         if (all) cmd.AddParameter("All");
@@ -127,7 +101,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             // Run 1: a one-item probe export. Completes, no checkpoint.
             handler.Queue(HttpStatusCode.OK, Page1);
@@ -154,7 +128,6 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -175,7 +148,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             handler.Queue(HttpStatusCode.OK, Page1);
             handler.Queue(HttpStatusCode.InternalServerError, ServerError);
@@ -189,7 +162,6 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -207,7 +179,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             handler.Queue(HttpStatusCode.OK, Page1);
             handler.Queue(HttpStatusCode.InternalServerError, ServerError);
@@ -225,7 +197,65 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The last step of a completed export is the move that puts its temp over the output, and
+    /// that move can fail with every page already fetched: a destination another process holds
+    /// open, a read-only file, a share that dropped. Deleting the checkpoint before it made
+    /// that failure read as "nothing was resumable", and the temp holding the whole export was
+    /// deleted with it - hours of enumeration, at the one moment all of it was on disk. The two
+    /// files have to be left exactly as an interruption leaves them, and the next run has to
+    /// resume from them.
+    /// </summary>
+    [Fact]
+    public void A_failed_promotion_keeps_the_checkpoint_and_the_temp_holding_the_export()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // Something at the output path the promotion cannot replace, so both pages are
+            // fetched and written and the move at the end of the run is what fails.
+            Directory.CreateDirectory(output);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.OK, Page2);
+            Assert.Null(Export(output, checkpoint, all: true));
+
+            Assert.True(File.Exists(checkpoint),
+                "the failed promotion deleted the position the next run resumes from");
+            var cp = PaginationCheckpoint.Load(checkpoint);
+            Assert.NotNull(cp);
+            Assert.NotNull(cp!.TempFile);
+            var temp = Path.Combine(dir, cp.TempFile!);
+            Assert.True(File.Exists(temp),
+                "the failed promotion deleted the temp holding every item the export fetched");
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"],
+                File.ReadAllLines(temp));
+
+            // With the occupier gone: the temp is promoted, one page is fetched - the one the
+            // checkpoint recorded - and the export is not enumerated again from the start.
+            Directory.Delete(output);
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var before = handler.Requests.Count;
+            var reported = Export(output, checkpoint, all: true);
+
+            Assert.Equal(1, handler.Requests.Count - before);
+            Assert.Contains("skiptoken=P2", handler.Requests[before]);
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+            Assert.False(File.Exists(checkpoint));
+            Assert.Empty(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+        }
+        finally
+        {
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -243,7 +273,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             handler.Queue(HttpStatusCode.OK, Page1);
             handler.Queue(HttpStatusCode.OK, Page2);
@@ -263,7 +293,6 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -282,7 +311,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             handler.Queue(HttpStatusCode.OK, Page1);
             Assert.Equal(1, Export(output, checkpointPath: null, all: false, top: 1));
@@ -298,6 +327,7 @@ public class ExportCheckpointIntegrityTests
                 ItemsCollected = 2,
                 PageItemsAlreadyWritten = 0,
                 TempFile = Path.GetFileName(temp),
+                OutputFile = output,
                 DataLength = new FileInfo(temp).Length
             }.Save(checkpoint);
 
@@ -310,7 +340,6 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -331,7 +360,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             // A previous export completed and left its output behind.
             File.WriteAllText(output, "{\"id\":\"old1\"}\n{\"id\":\"old2\"}\n{\"id\":\"old3\"}\n");
@@ -358,7 +387,6 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -386,7 +414,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             // One real run, only so the checkpoint on disk carries the exact URL the cmdlet
             // builds for these parameters.
@@ -428,7 +456,7 @@ public class ExportCheckpointIntegrityTests
             Assert.Equal(lines.Length, lines.Distinct().Count());
             Assert.Equal(1001, lines.Length);
         }
-        finally { CleanupMock(); try { Directory.Delete(dir, true); } catch { } }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
     /// <summary>
@@ -446,7 +474,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             File.WriteAllText(output, "{\"id\":\"u1\"}\n{\"id\":\"u2\"}\n");
             new PaginationCheckpoint
@@ -470,7 +498,6 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -490,7 +517,7 @@ public class ExportCheckpointIntegrityTests
         try
         {
             var handler = new ScriptedHandler();
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             // Another export holds its temp open, exactly as StreamWriter does.
             using (var held = new FileStream(live, FileMode.Create, FileAccess.Write, FileShare.Read))
@@ -510,7 +537,219 @@ public class ExportCheckpointIntegrityTests
         }
         finally
         {
-            CleanupMock();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A checkpoint written by a release that recorded no output file, against the output it
+    /// was in fact collecting into. The files corroborate it - the output is there and holds
+    /// the bytes it counted - so an upgrade partway through an export still resumes.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_from_before_outputs_were_recorded_resumes_against_its_own_output()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            File.WriteAllText(output, "{\"id\":\"u1\"}\n{\"id\":\"u2\"}\n");
+            new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users?$top=999",
+                NextLink = "https://graph.microsoft.com/v1.0/users?$skiptoken=P2",
+                ItemsCollected = 2,
+                PageItemsAlreadyWritten = 0,
+                TempFile = null,
+                DataLength = new FileInfo(output).Length,
+            }.Save(checkpoint);
+
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var before = handler.Requests.Count;
+            var reported = Export(output, checkpoint, all: true);
+
+            Assert.Contains("skiptoken=P2", handler.Requests[before]);
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The layout a pre-2.1.0 release left when a fresh export was killed: a checkpoint naming
+    /// no temp and recording no length, its items in a temp beside an output that was never
+    /// promoted. Deciding ownership from what such a checkpoint records refuses it for want of
+    /// anything recorded, and the export then swept the temp holding those items and enumerated
+    /// the collection again. What is on disk decides it instead - a temp carrying this output's
+    /// own name, and no output for its items to be confused with.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_from_before_temps_were_recorded_adopts_the_temp_holding_its_items()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // A fresh run's first page, in the temp it died holding.
+            var temp = Path.Combine(dir, $"out.jsonl.{Guid.NewGuid():N}.tmp");
+            File.WriteAllText(temp, "{\"id\":\"u1\"}\n{\"id\":\"u2\"}\n");
+            new PaginationCheckpoint
+            {
+                Resource = "https://graph.microsoft.com/v1.0/users?$top=999",
+                NextLink = "https://graph.microsoft.com/v1.0/users?$skiptoken=P2",
+                ItemsCollected = 2,
+                PageItemsAlreadyWritten = 0
+            }.Save(checkpoint);
+
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var before = handler.Requests.Count;
+            var reported = Export(output, checkpoint, all: true);
+
+            // Resumed onto the recovered items rather than fetching them a second time.
+            Assert.Contains("skiptoken=P2", handler.Requests[before]);
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+            Assert.False(File.Exists(temp), "the temp its items came from was left behind");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The same shape of checkpoint, against an output it was never measured against. Nothing
+    /// in it names a file, and a null read as "mine" let a second export act on the first
+    /// one's position - here by declaring the temp it names unusable and deleting the
+    /// checkpoint, which is the one thing that made the first export's items unreachable.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_from_before_outputs_were_recorded_is_not_this_exports_by_default()
+    {
+        var dir = NewDir();
+        var mine = Path.Combine(dir, "users.jsonl");
+        var theirs = Path.Combine(dir, "other.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // An export to users.jsonl collects page 1 into its temp and dies on page 2.
+            handler.Queue(HttpStatusCode.OK, Page1);
+            Export(mine, checkpoint, all: true);
+            var temp = Assert.Single(Directory.GetFiles(dir, "users.jsonl.*.tmp"));
+
+            // Its checkpoint, as the release before this one would have written it.
+            var upgraded = PaginationCheckpoint.Load(checkpoint)!;
+            upgraded.OutputFile = null;
+            upgraded.Save(checkpoint);
+
+            // A second export shares the checkpoint path and fails on its first page.
+            Export(theirs, checkpoint, all: true);
+
+            Assert.True(File.Exists(checkpoint), "the other export's position was deleted");
+            Assert.True(File.Exists(temp), "the other export's temp was taken");
+
+            // The first export still resumes onto what it had already collected.
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var reported = Export(mine, checkpoint, all: true);
+
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(mine));
+            Assert.Equal(3, reported);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The same export, resumed with -Uri typed differently. Graph answers "/users" and
+    /// "/Users" from one collection, so both runs enumerate the same thing - but the recorded
+    /// resource was compared ordinally, which made the second run a different export: the
+    /// resume was refused, the collection was fetched again from its first page, and the
+    /// caller was told their checkpoint belonged to something else.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_written_under_another_spelling_of_the_resource_still_resumes()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            Export(output, checkpoint, all: true, uri: "/users");
+
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var before = handler.Requests.Count;
+            var reported = Export(output, checkpoint, all: true, uri: "/Users");
+
+            Assert.Contains("skiptoken=P2", handler.Requests[before]);
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+            Assert.Equal(3, reported);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The endpoint a session reports is not stable between runs: it comes back with a trailing
+    /// slash, through a gateway prefix, or from a sovereign cloud. None of that changes which
+    /// resource an export enumerates, but comparing whole URLs made it change whose checkpoint
+    /// the file on disk was - so the resume was refused and the collection re-enumerated from
+    /// the first page.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_written_under_another_spelling_of_the_endpoint_still_resumes()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+
+            using (MgxTransportScope.Inject(handler, endpoint: "https://graph.microsoft.com/"))
+            {
+                handler.Queue(HttpStatusCode.OK, Page1);
+                Export(output, checkpoint, all: true);
+            }
+
+            var cp = PaginationCheckpoint.Load(checkpoint);
+            Assert.NotNull(cp);
+            Assert.Contains("//v1.0/users", cp!.Resource);
+
+            using (MgxTransportScope.Inject(handler, endpoint: "https://graph.microsoft.com"))
+            {
+                handler.Queue(HttpStatusCode.OK, Page2);
+                var before = handler.Requests.Count;
+                var reported = Export(output, checkpoint, all: true);
+
+                Assert.Contains("skiptoken=P2", handler.Requests[before]);
+                Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"], Lines(output));
+                Assert.Equal(3, reported);
+            }
+        }
+        finally
+        {
             try { Directory.Delete(dir, true); } catch { }
         }
     }

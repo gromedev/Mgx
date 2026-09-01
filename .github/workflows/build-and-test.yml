@@ -50,12 +50,15 @@ jobs:
           --results-directory TestResults
 
       # A run that executes nothing exits 0 and looks identical to a run that executes
-      # everything, so assert on the count as well as the exit code. Raise the floor as the
-      # suite grows.
+      # everything, so assert on the count as well as the exit code. The floor is the exact
+      # measured total - a handful of tests early-return on hosts that cannot exercise them,
+      # but every test executes and counts on every leg, so each leg reports the same number,
+      # and slack in the floor is just that many tests free to disappear unnoticed. Raise it
+      # with the suite.
       - name: Assert xUnit actually ran
         shell: pwsh
         run: |
-          $floor = 2700
+          $floor = 2995
           $trx = Get-ChildItem TestResults -Filter *.trx | Select-Object -First 1
           if (-not $trx) { throw "No .trx produced - the test run did not report results." }
           $c = ([xml](Get-Content $trx.FullName -Raw)).TestRun.ResultSummary.Counters
@@ -82,8 +85,10 @@ jobs:
           if ($result.FailedCount -gt 0) {
               throw "$($result.FailedCount) Pester test(s) failed."
           }
-          # Same reasoning as the xUnit floor above: silence is not success.
-          $floor = 235
+          # Silence is not success here either. This floor keeps a small margin rather than
+          # sitting on the measured total, because the number it has to hold on is the one the
+          # compat leg below reports and that host is not this one. Raise both together.
+          $floor = 240
           $ran = [int]$result.PassedCount + [int]$result.SkippedCount
           if ($ran -lt $floor) {
               throw "Only $ran Pester test(s) ran, expected at least $floor. The suite is not running."
@@ -174,7 +179,9 @@ jobs:
           $r = Invoke-TestHarness -IgnoreCodeCoverage
           "$($r.PassedCount) passed, $($r.FailedCount) failed, $($r.SkippedCount) skipped" | Write-Host
           if ($r.FailedCount -gt 0) { throw "$($r.FailedCount) test(s) failed" }
-          $floor = 235
+          # The same margin the main leg carries, for the same reason: this is the host the
+          # Pester total has to be true on, and nothing measures it outside this job.
+          $floor = 240
           $ran = [int]$r.PassedCount + [int]$r.SkippedCount
           if ($ran -lt $floor) {
               throw "Only $ran test(s) ran on this host, expected at least $floor."
@@ -184,3 +191,63 @@ jobs:
           $env:MGX_EXPECT_PSVERSION = '${{ matrix.psversion }}'
           pwsh -NoProfile -File ./compat-surface-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "surface tests failed on PowerShell ${{ matrix.psversion }}" }
+
+  # Module load and ALC resolution are irreversible in-process, so tests/Ecosystem spawns a
+  # child pwsh per load-order permutation. The neighbors are real Gallery installs because the
+  # failure being hunted is a binding conflict against the assemblies those modules actually
+  # ship - Az.Accounts carries its own System.Text.Json - which no mock can reproduce.
+  ecosystem:
+    name: Ecosystem isolation
+    runs-on: windows-latest
+    needs: build-and-test
+    if: github.repository == 'gromedev/mgx'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Mgx.slnx
+
+      - name: Install platyPS
+        shell: pwsh
+        run: Install-PSResource -Name platyPS -TrustRepository -Scope AllUsers
+
+      - name: Build module
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release
+
+      - name: Install ecosystem modules
+        shell: pwsh
+        run: |
+          # The matrix throws rather than skips when one is missing, so a failed install
+          # fails here, loudly, not inside a permutation.
+          Install-PSResource -Name Az.Accounts, PnP.PowerShell, ExchangeOnlineManagement -TrustRepository -Scope AllUsers
+
+      - name: Run ecosystem matrix
+        shell: pwsh
+        run: |
+          Import-Module ./tests/TestHarness.psm1
+          $r = Invoke-TestHarness -TestPath ./tests/Ecosystem -TestResultsFile TestResults/ecosystem-results.xml
+          if ($r.FailedCount -gt 0) { throw "$($r.FailedCount) ecosystem permutation(s) failed." }
+
+          # Nine permutations, one test each. The floor is exact: deleting a permutation
+          # must drop the count below it rather than pass as a smaller green run.
+          $floor = 9
+          if ($r.PassedCount -lt $floor) {
+              throw "Only $($r.PassedCount) ecosystem permutation(s) ran, expected at least $floor. The matrix is not running."
+          }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecosystem-results
+          path: TestResults/ecosystem-results.xml
+          if-no-files-found: ignore

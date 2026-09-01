@@ -211,13 +211,17 @@ public class ExpandMgxRelation : MgxCmdletBase
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    var errorBody = await response.Content.ReadAsStringAsync(ct);
+                    var errorBody = await client.ReadBodyAsStringAsync(response, ct);
                     throw new GraphServiceException(response.StatusCode, errorBody);
                 }
 
-                using var stream = await response.Content.ReadAsStreamAsync(ct);
-                var json = await JsonSerializer.DeserializeAsync<JsonElement>(stream, cancellationToken: ct);
-                var root = json.Clone();
+                // The same read the rest of the module does: the declared charset, and the
+                // byte-order mark the byte-level deserialize refuses - which lost every
+                // relation to a per-URL error. A body this cannot use is this URL's failure,
+                // which is what the fan-out reports and where the streams are written from.
+                var bodyBytes = await client.ReadBodyAsBytesAsync(response, ct);
+                var payload = ReadJsonPayloadCore(response.Content.Headers.ContentType, bodyBytes);
+                var root = ReadRelationBody(payload);
 
                 if (root.ValueKind == JsonValueKind.Object
                     && root.TryGetProperty("value", out var valueEl)
@@ -370,6 +374,42 @@ public class ExpandMgxRelation : MgxCmdletBase
             WriteObject(target);
         }
     }
+
+    /// <summary>
+    /// The relation carried by a body, whatever that body declares itself to be. A relation is
+    /// not always an entity: /$count answers text/plain with the number in the body, and this
+    /// cmdlet has no -Raw to fall back on, so the declared type decides how the bytes are
+    /// decoded and not whether they are read. A body that is no JSON value at all carries no
+    /// relation to attach, which is this URL's failure.
+    /// </summary>
+    private static JsonElement ReadRelationBody(JsonPayload payload)
+    {
+        if (payload.Kind == JsonPayloadKind.Parsed)
+            return payload.Json.Clone();
+
+        if (payload.Kind == JsonPayloadKind.NotJson)
+        {
+            try
+            {
+                // Decoded by the declared charset above; the mark GetString leaves behind is
+                // still the serializer's invalid start character.
+                return JsonSerializer.Deserialize<JsonElement>(payload.Text.TrimStart('\uFEFF'));
+            }
+            catch (JsonException) { }
+        }
+
+        throw new InvalidOperationException(DescribeUnusableBody(payload));
+    }
+
+    /// <summary>Why a body carries no relation to attach, for the per-URL error record.</summary>
+    private static string DescribeUnusableBody(JsonPayload payload) => payload.Kind switch
+    {
+        JsonPayloadKind.Empty => "The response has no content, so there is no relation to attach.",
+        JsonPayloadKind.NotJson => $"The response is {payload.MediaType} and does not parse as JSON. "
+             + "Body starts: " + payload.Text[..Math.Min(payload.Text.Length, 200)],
+        _ => "The response declared JSON but does not parse. Body starts: "
+             + payload.Text[..Math.Min(payload.Text.Length, 200)],
+    };
 
     private string BuildUrl(string id)
     {

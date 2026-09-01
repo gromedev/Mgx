@@ -5,7 +5,8 @@
          (LTS) and up. This project stays on net10.0 because Microsoft.PowerShell.SDK 7.6.x
          requires it, and referencing a net8.0 project from net10.0 is fine. What that buys is
          the shipped assembly exercised on the newest runtime; the older hosts are covered by
-         the `compat` matrix in CI, which imports the module under 7.4/7.5/7.6 for real. -->
+         the `compat` matrix in CI, which imports the module for real under the ends of the
+         supported range, 7.4 and 7.6. -->
     <TargetFramework>net10.0</TargetFramework>
     <RollForward>Major</RollForward>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -41,6 +41,7 @@ Describe 'Compiled help matches its markdown source' {
             @{ Text = 'ODataType';  Why = '2.0.0 replaced PSObjects with hashtables; @odata.type is a key now' }
             @{ Text = 'instead of PSObjects'; Why = '-Raw returns raw JSON instead of hashtables' }
             @{ Text = 'ephemeral and deleted on success'; Why = 'Sync-MgxDelta gained -CheckpointPath in 2.1.0' }
+            @{ Text = 'belongs to a chunk that was refused'; Why = 'after a chunk failure the batch-level retry pass is skipped for every candidate, including ones a cleanly answered chunk left failing' }
         )
         $raw = Get-Content $script:Maml -Raw
         $hits = $stale | Where-Object { $raw -match [regex]::Escape($_.Text) }

@@ -54,4 +54,6 @@ $null = $ids | Invoke-MgxRequest -Uri '/users/{id}?$select=id' -Concurrency $Con
 $sw.Stop()
 
 $t = Get-MgxTelemetry
-"RESULT|{0}|{1}|{2}" -f $sw.Elapsed.TotalSeconds, $t.Requests, $t.AdaptivePacingWaitMs
+# The parent arm parses this back with [double], which is invariant; format it the same way
+# or a comma decimal separator reads as a thousands group and the wall clock is 10000x out.
+"RESULT|{0}|{1}|{2}" -f $sw.Elapsed.TotalSeconds.ToString([cultureinfo]::InvariantCulture), $t.Requests, $t.AdaptivePacingWaitMs

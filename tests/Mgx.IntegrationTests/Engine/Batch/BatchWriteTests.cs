@@ -645,7 +645,7 @@ public class BatchWriteTests
     }
 
     [Fact]
-    public async Task BatchGet_ResponseCountMismatch_Throws()
+    public async Task BatchGet_ResponseCountMismatch_IsReportedAsAChunkFailure()
     {
         // Send 3 requests but mock returns only 2 response items
         var truncatedResponse = """
@@ -671,8 +671,9 @@ public class BatchWriteTests
             new("/users/c"),
         };
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => batchClient.ExecuteBatchIndexedAsync(ops, CancellationToken.None));
+        var result = await batchClient.ExecuteBatchIndexedAsync(ops, CancellationToken.None);
+
+        var ex = Assert.IsType<InvalidOperationException>(result.ChunkFailure);
         Assert.Contains("count mismatch", ex.Message);
         Assert.Contains("sent 3", ex.Message);
         Assert.Contains("received 2", ex.Message);
@@ -1270,7 +1271,7 @@ public class BatchWriteTests
     }
 
     [Fact]
-    public async Task R2_3c_MismatchedResponseIds_Throws()
+    public async Task R2_3c_MismatchedResponseIds_AreReportedAsAChunkFailure()
     {
         // Response IDs don't match request IDs — should throw InvalidOperationException
         var mismatchedResponse = """
@@ -1298,16 +1299,18 @@ public class BatchWriteTests
             new BatchOperation("/users/2")
         };
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => batchClient.ExecuteBatchIndexedAsync(ops, CancellationToken.None));
+        var result = await batchClient.ExecuteBatchIndexedAsync(ops, CancellationToken.None);
+
+        var ex = Assert.IsType<InvalidOperationException>(result.ChunkFailure);
         Assert.Contains("missing result", ex.Message);
     }
 
     [Fact]
-    public async Task R2_3d_Phase2_TransportError_PropagatesException()
+    public async Task R2_3d_Phase2_TransportError_IsReportedWithTheResults()
     {
-        // Per-chunk retries exhaust on 503. Phase 2 batch-level retry hits
-        // a transport error (HttpRequestException). Should propagate.
+        // Per-chunk retries exhaust on 503. Phase 2 batch-level retry hits a transport error
+        // (HttpRequestException). The pass runs once every chunk has been sent, so the run
+        // already holds the outcome of the whole batch: the failure is reported alongside it.
         var handler = new MockHttpHandler();
         // Per-chunk: 4 attempts all 503
         for (int i = 0; i < 4; i++)
@@ -1331,9 +1334,14 @@ public class BatchWriteTests
             new BatchOperation("/users/2")
         };
 
-        // The transport error during Phase 2 should propagate
-        await Assert.ThrowsAnyAsync<Exception>(
-            () => batchClient.ExecuteBatchIndexedAsync(ops, CancellationToken.None));
+        var result = await batchClient.ExecuteBatchIndexedAsync(ops, CancellationToken.None);
+
+        Assert.NotNull(result.ChunkFailure);
+        // The 503s are what the server said about these two operations, and the retry pass
+        // failing did not change that.
+        Assert.Equal(2, result.Results.Count);
+        Assert.All(result.Results, r => Assert.Equal(503, r.Response.Status));
+        Assert.Equal(2, result.Telemetry.Failed);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1700,7 +1708,7 @@ public class BatchWriteTests
     }
 
     [Fact]
-    public async Task BatchResponseCountMismatch_ThrowsInvalidOperationException()
+    public async Task BatchResponseCountMismatch_IsReportedAsAChunkFailure()
     {
         var handler = new MockHttpHandler();
         handler.QueueResponse(HttpStatusCode.OK, """
@@ -1722,9 +1730,9 @@ public class BatchWriteTests
             new("/users/3")
         };
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => batchClient.ExecuteBatchIndexedAsync(operations));
+        var result = await batchClient.ExecuteBatchIndexedAsync(operations);
 
+        var ex = Assert.IsType<InvalidOperationException>(result.ChunkFailure);
         Assert.Contains("response count mismatch", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1744,7 +1752,7 @@ public class BatchWriteTests
     }
 
     [Fact]
-    public async Task BatchEmptyResponsesFromGraph_ThrowsInvalidOperationException()
+    public async Task BatchEmptyResponsesFromGraph_IsReportedAsAChunkFailure()
     {
         var handler = new MockHttpHandler();
         handler.QueueResponse(HttpStatusCode.OK, """{ "responses": [] }""");
@@ -1753,9 +1761,9 @@ public class BatchWriteTests
         using var client = new ResilientGraphClient(httpClient, new ResilientGraphClientOptions { NoRateLimit = true });
         var batchClient = new GraphBatchClient(client);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => batchClient.ExecuteBatchIndexedAsync(new[] { new BatchOperation("/users/1") }));
+        var result = await batchClient.ExecuteBatchIndexedAsync(new[] { new BatchOperation("/users/1") });
 
+        var ex = Assert.IsType<InvalidOperationException>(result.ChunkFailure);
         Assert.Contains("empty or malformed", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 }

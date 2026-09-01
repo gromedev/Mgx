@@ -35,6 +35,7 @@ public class MockHttpHandler : HttpMessageHandler
     private readonly Queue<MockResponse> _responses = new();
     private readonly List<HttpRequestMessage> _requests = [];
     private readonly List<CapturedRequest> _captured = [];
+    private readonly List<HttpStatusCode> _served = [];
     private readonly object _lock = new();
     private MockResponse? _defaultResponse;
 
@@ -55,6 +56,15 @@ public class MockHttpHandler : HttpMessageHandler
     public List<CapturedRequest> CapturedRequests
     {
         get { lock (_lock) { return [.. _captured]; } }
+    }
+
+    /// <summary>
+    /// The status codes handed back, in order. A test whose assertion is that nothing was
+    /// reported needs some way to know the wire reported something to begin with.
+    /// </summary>
+    public List<HttpStatusCode> ServedStatusCodes
+    {
+        get { lock (_lock) { return [.. _served]; } }
     }
 
     public void QueueResponse(HttpStatusCode statusCode, string? body = null, Dictionary<string, string>? headers = null, string contentType = "application/json")
@@ -122,6 +132,7 @@ public class MockHttpHandler : HttpMessageHandler
             _requests.Add(request);
             _captured.Add(captured);
             mock = _responses.Count > 0 ? _responses.Dequeue() : (_defaultResponse ?? new MockResponse(HttpStatusCode.OK, null, null, null, null, null));
+            if (mock.Exception == null) _served.Add(mock.StatusCode);
         }
 
         if (mock.Exception != null)

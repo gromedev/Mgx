@@ -456,6 +456,188 @@ public class SyncMgxDelta : MgxCmdletBase
 
 
     /// <summary>
+    /// Whose the checkpoint on disk is, and where it is not this sync's, why not. Three things
+    /// have to agree before it is this run's.
+    ///
+    /// The output mode: a checkpoint that names an output file, names a temp of one, or records
+    /// a byte length was written by a sync collecting into a file, and its position counts items
+    /// that went there rather than down the pipeline. Resuming a pipeline sync from it emits
+    /// neither those items nor anything before them and then saves a delta token over the lot.
+    /// The length carries as much of that as the names do: a file-mode run records no temp once
+    /// it is appending, and none when a cancellation promoted the one it had, so a release that
+    /// did not yet record the output left file-mode checkpoints naming neither - and every one
+    /// of them was adopted here. A length is measured on a file, and a pipeline run has none to
+    /// measure. The reverse is refused on the same grounds.
+    ///
+    /// The output itself, on file-mode runs: two syncs of the same -Uri build the same resource,
+    /// so that comparison says nothing about WHICH file a recorded length was counted in, and
+    /// applied to another sync's it cut that file to this one's offset, mid-line.
+    ///
+    /// The resource, endpoint-independently and however -Uri was typed: what was enumerated, not
+    /// where Graph was reached, and not which spelling reached it - Graph answers "/users/delta"
+    /// and "/Users/delta" from one collection, so a case the caller typed differently between
+    /// two runs is the same enumeration and refusing it costs the run its own position.
+    ///
+    /// Nothing here decides differently than the bare predicate this replaced; what a refusal
+    /// can then say is what changes. A checkpoint recording no output was believed for as long
+    /// as the files beside it corroborated it, so losing that corroboration - a temp since
+    /// removed, an output since replaced - is one sync and no second run anywhere, and it is
+    /// the shape every release before this one wrote.
+    /// </summary>
+    private CheckpointOwnership OwnershipOf(PaginationCheckpoint checkpoint, string? outputPath,
+        string requestUrl)
+    {
+        if (outputPath == null)
+        {
+            if (checkpoint.OutputFile != null || checkpoint.TempFile != null
+                || checkpoint.DataLength != null)
+            {
+                return CheckpointOwnership.AnotherSyncs;
+            }
+        }
+        else if (!RecordedOutputMatches(checkpoint.OutputFile, checkpoint.TempFile,
+                     checkpoint.DataLength, outputPath))
+        {
+            return checkpoint.OutputFile != null
+                ? CheckpointOwnership.AnotherSyncs
+                : CheckpointOwnership.Uncorroborated;
+        }
+
+        return SameResourceIdentity(ResourceIdentity(checkpoint.Resource),
+                   ResourceIdentity(requestUrl))
+            ? CheckpointOwnership.Mine
+            : CheckpointOwnership.AnotherSyncs;
+    }
+
+    /// <summary>Which of the three a checkpoint on disk is.</summary>
+    private enum CheckpointOwnership
+    {
+        /// <summary>This sync's.</summary>
+        Mine,
+
+        /// <summary>
+        /// Another sync's: it records another output, another enumeration, or the other
+        /// output mode.
+        /// </summary>
+        AnotherSyncs,
+
+        /// <summary>
+        /// Records no output file, and the files beside this one no longer stand for it. Which
+        /// sync wrote it cannot be told from here, and telling the caller it was another one is
+        /// a diagnosis they can go and check and find nothing behind.
+        /// </summary>
+        Uncorroborated,
+    }
+
+    /// <summary>
+    /// Whether the temp a refused checkpoint names is a file the stale-temp sweep would reach.
+    /// The name comes off a checkpoint, which is untrusted once it is on disk, and nothing here
+    /// opens it - all it decides is whether the sweep runs at all, so a name of some other shape
+    /// is answered no rather than refused: the sweep cannot delete it either, and skipping the
+    /// sweep for it would leave real orphans behind for nothing.
+    ///
+    /// "Some other shape" is the sweep's own test of a name and not a looser one kept here.
+    /// Matching on the prefix and the suffix alone answers yes for "users.jsonl.{guid}.tmp"
+    /// beside an output named "users" - a file the sweep passes over, because the glob's '*'
+    /// spans dots and the sweep's own filter does not - so a checkpoint left by the run next
+    /// door suppressed this output's sweep and its real orphans stayed on disk, which is the
+    /// case this comment says is answered no.
+    /// </summary>
+    private static bool RefusedTempIsOnDisk(string? tempFile, string outputPath)
+    {
+        if (tempFile == null || tempFile != Path.GetFileName(tempFile)) return false;
+        if (!IsRunTempName(Path.GetFileName(outputPath), tempFile)) return false;
+        var dir = Path.GetDirectoryName(outputPath);
+        return !string.IsNullOrEmpty(dir) && File.Exists(Path.Combine(dir, tempFile));
+    }
+
+    /// <summary>
+    /// What a caller can act on when the checkpoint on disk records an enumeration this run
+    /// cannot resume: what is known about the file, what this run does instead, and that a
+    /// -CheckpointPath belongs to one enumeration. Refusing it is the whole response - the file
+    /// is left alone, and so is any staging file beside it, because whatever wrote them may
+    /// still resume from exactly those.
+    ///
+    /// Which sync wrote it is not something this can tell, and asserting a second one sent the
+    /// caller looking for a run that in the commonest shape here does not exist: a checkpoint
+    /// saved during a delta enumeration, found by the same command line after the state
+    /// recording that delta was lost - corrupt, deleted by hand, a -DeltaPath since moved - so
+    /// the run builds a full-sync URL and refuses its own earlier position. There is no second
+    /// sync to find, and giving each its own -CheckpointPath is what the caller already did.
+    /// Both readings are offered and neither is asserted; what this run does about it is the
+    /// same either way.
+    /// </summary>
+    private static string ForeignCheckpointWarning(string checkpointPath, string? outputPath, string deltaPath) =>
+        $"The resume checkpoint at '{checkpointPath}' records an enumeration this run cannot "
+        + $"resume from, so it is left as it is and this run enumerates from what '{deltaPath}' "
+        + "records"
+        + (outputPath != null ? $", into '{outputPath}'" : "")
+        + ". It is either another sync's, sharing this -CheckpointPath, or this sync's own from "
+        + "a pass it no longer makes - a delta enumeration whose state has since been lost "
+        + "leaves exactly this. Two syncs sharing one -CheckpointPath overwrite each other's "
+        + "resume position; give each its own.";
+
+    /// <summary>
+    /// What a caller can act on when a checkpoint that records no output file is refused: it
+    /// was written before the output was recorded, nothing beside this run's output stands for
+    /// it any more, and this run enumerates from the delta token instead. Naming a different
+    /// sync there sends the caller looking for a second run over the same -CheckpointPath, and
+    /// there is none to find - a temp that has since been removed and an output that has since
+    /// been replaced reach the same refusal.
+    /// </summary>
+    private static string UncorroboratedCheckpointWarning(
+        string checkpointPath, string outputPath, string deltaPath) =>
+        $"The resume checkpoint at '{checkpointPath}' records no output file, and the files "
+        + $"beside '{outputPath}' no longer corroborate it, so it is left as it is and this run "
+        + $"enumerates from the delta token in '{deltaPath}', into '{outputPath}'; no changes "
+        + "are lost.";
+
+    /// <summary>
+    /// What this run tells the caller about a checkpoint it will not resume from, or null when
+    /// it is this sync's and there is nothing to tell. Uncorroborated is reachable only from
+    /// the branch that has an output to name; a pipeline run refuses on the output mode, which
+    /// is another sync's checkpoint however little else is known about it.
+    /// </summary>
+    private string? RefusalFor(PaginationCheckpoint checkpoint, string? outputPath,
+        string requestUrl, string checkpointPath, string deltaPath)
+        => OwnershipOf(checkpoint, outputPath, requestUrl) switch
+        {
+            CheckpointOwnership.Mine => null,
+            CheckpointOwnership.Uncorroborated when outputPath != null =>
+                UncorroboratedCheckpointWarning(checkpointPath, outputPath, deltaPath),
+            _ => ForeignCheckpointWarning(checkpointPath, outputPath, deltaPath),
+        };
+
+    /// <summary>
+    /// What a reconcile leaves for the caller to do. Two of the three say do not resume, and
+    /// they are not the same answer: one is a checkpoint a live sync is still using, which is
+    /// left standing along with the temp it names, and the other is a checkpoint describing
+    /// items that are in no file, which is deleted wherever this run is able to delete it.
+    /// </summary>
+    private enum CheckpointRecovery
+    {
+        /// <summary>
+        /// The files hold what the checkpoint says they hold - promoted, trimmed or already
+        /// so - and the run resumes from the position it records.
+        /// </summary>
+        Resumable,
+
+        /// <summary>
+        /// Another sync is writing the temp this checkpoint names. Nothing here is this run's
+        /// to recover or to remove: the checkpoint stays, its temp is spared this run's sweep,
+        /// and this run enumerates from the delta state.
+        /// </summary>
+        Refused,
+
+        /// <summary>
+        /// The items the checkpoint counts are in no file this run can reach, so there is
+        /// nothing to resume from. The delete that goes with it is attempted and may fail; the
+        /// answer holds either way.
+        /// </summary>
+        Discarded,
+    }
+
+    /// <summary>
     /// Put the files into the state the checkpoint claims, or delete the checkpoint. A
     /// checkpoint records which file its items were written to and how many bytes of that file
     /// they occupy, which makes three cases decidable instead of guessed.
@@ -478,28 +660,44 @@ public class SyncMgxDelta : MgxCmdletBase
     ///
     /// When the counted items turn out to be in no file, the delta link has not moved, so
     /// re-enumerating costs time and loses nothing while resuming past them loses them for good.
+    ///
+    /// A named temp open in another run is none of those: the files are exactly what the
+    /// checkpoint says they are, and the sync they belong to has not been interrupted. Its
+    /// items are that run's, and the checkpoint is the position it comes back to, so both are
+    /// left where they are - and the caller still must not resume, since a position whose items
+    /// are in a file this run cannot have leaves them out of the output while the delta token
+    /// advances past them.
+    ///
+    /// Whether the checkpoint may be resumed from is the answer, and not the file left on disk.
+    /// A bail-out that deletes the checkpoint it has just given up on can fail to delete it - a
+    /// checkpoint directory this account may read but not unlink from is answered false and
+    /// leaves the file - so a caller reading the refusal off File.Exists read the one thing a
+    /// failed delete gets wrong, resumed from the nextLink the warning had promised to
+    /// re-enumerate past, and advanced the delta token over items that are in no file at all.
+    /// Discarded binds either way; the file that outlives it is given up on again next run.
     /// </summary>
-    private void ReconcileCheckpointWithFiles(string checkpointPath, string outputPath, PaginationCheckpoint checkpoint)
+    private CheckpointRecovery ReconcileCheckpointWithFiles(string checkpointPath, string outputPath, PaginationCheckpoint checkpoint)
     {
         if (checkpoint.DataLength is not { } dataLength)
         {
             if (!File.Exists(outputPath))
             {
                 if (TryAdoptOrphanedTemp(outputPath, checkpoint.ItemsCollected))
-                    WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
-                else
                 {
-                    WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
-                    PaginationCheckpoint.Delete(checkpointPath);
+                    WriteWarning($"Recovered {checkpoint.ItemsCollected} items from an interrupted sync's temp file. Resuming from checkpoint.");
+                    return CheckpointRecovery.Resumable;
                 }
-                return;
+
+                WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                PaginationCheckpoint.Delete(checkpointPath);
+                return CheckpointRecovery.Discarded;
             }
 
             WriteWarning(
                 "The resume checkpoint does not record which file the interrupted sync's items are in. "
                 + "Re-enumerating from the last saved delta token; no changes are lost.");
             PaginationCheckpoint.Delete(checkpointPath);
-            return;
+            return CheckpointRecovery.Discarded;
         }
 
         if (checkpoint.TempFile != null)
@@ -510,29 +708,46 @@ public class SyncMgxDelta : MgxCmdletBase
                 // Those items are the output now. Repoint the checkpoint at it immediately,
                 // so a second interruption cannot promote the same temp a second time.
                 checkpoint.TempFile = null;
+                checkpoint.OutputFile = Path.GetFullPath(outputPath);
                 checkpoint.DataLength = new FileInfo(outputPath).Length;
                 try { checkpoint.Save(checkpointPath); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     WriteWarning($"Checkpoint save failed after recovery: {ex.Message}");
                 }
-                return;
+                return CheckpointRecovery.Resumable;
+            }
+
+            // The temp is there and whole, and another run has it open - so the sync this
+            // checkpoint belongs to is not interrupted at all, it is collecting into that file
+            // right now. Its items are that run's, the checkpoint is the position it comes back
+            // to, and this run has nothing here to recover: deleting the checkpoint below, or
+            // resuming from it, would be the same mistake as unlinking the temp, one file over.
+            if (NamedTempIsHeld(outputPath, checkpoint.TempFile, dataLength))
+            {
+                WriteWarning(
+                    "Another sync is still writing the temp file this resume checkpoint names, so the "
+                    + $"{checkpoint.ItemsCollected} items it records are that run's and are not recovered here. "
+                    + "Both files are left as they are and this run re-enumerates from the last saved delta "
+                    + "token; no changes are lost. Two syncs writing one -OutputFile replace each other's "
+                    + "result; give each its own.");
+                return CheckpointRecovery.Refused;
             }
 
             WriteWarning(
                 $"The interrupted sync's temp file is missing or incomplete, so the {checkpoint.ItemsCollected} items it "
                 + "recorded are not on disk. Re-enumerating from the last saved delta token; no changes are lost.");
             PaginationCheckpoint.Delete(checkpointPath);
-            return;
+            return CheckpointRecovery.Discarded;
         }
 
-        if (!TryTrimOutputToCheckpoint(outputPath, dataLength))
-        {
-            WriteWarning(
-                $"'{outputPath}' no longer holds the {checkpoint.ItemsCollected} items the resume checkpoint records. "
-                + "Re-enumerating from the last saved delta token; no changes are lost.");
-            PaginationCheckpoint.Delete(checkpointPath);
-        }
+        if (TryTrimOutputToCheckpoint(outputPath, dataLength)) return CheckpointRecovery.Resumable;
+
+        WriteWarning(
+            $"'{outputPath}' no longer holds the {checkpoint.ItemsCollected} items the resume checkpoint records. "
+            + "Re-enumerating from the last saved delta token; no changes are lost.");
+        PaginationCheckpoint.Delete(checkpointPath);
+        return CheckpointRecovery.Discarded;
     }
 
     private void ExecuteDeltaSync(
@@ -547,6 +762,32 @@ public class SyncMgxDelta : MgxCmdletBase
         Stopwatch sw)
     {
         bool isFullResync = false;
+        // Whether this run has already decided the checkpoint on disk is another sync's, and
+        // the temp that checkpoint points at. Both outlive the attempt that refused, because
+        // the 410 door below sends the loop round again: an attempt that has forgotten the
+        // refusal deletes the position it was told to leave alone and sweeps away the temp
+        // holding its items, seconds after warning that neither would be touched. Ownership is
+        // still re-decided on every load - the checkpoint is a file, and the sync that owns it
+        // is still going - but only ever this way round, and never granted back: the retry
+        // rebuilds the request URL, so a checkpoint refused against the delta link can compare
+        // equal to the full re-sync one, and that is not evidence of anything.
+        var refusedCheckpoint = false;
+        string? refusedTemp = null;
+        // The temp an attempt of this run kept when it died, because a checkpoint counting its
+        // items was on disk. Nothing else records it: the sweep at the top of the next attempt
+        // is the only thing that reclaims a temp, and a refusal holds that off over every temp
+        // beside this output - so when the checkpoint stops naming the file, by being replaced
+        // with the next attempt's or deleted by the run that completed, this is what says which
+        // one is now a partial copy of the caller's changes that nothing refers to.
+        string? keptTemp = null;
+        // Whether an attempt of this run has written a checkpoint of its own over
+        // -CheckpointPath. The refusal above leaves the file where it is and then the very next
+        // page boundary saves over the same path, so what the refusal was protecting is gone
+        // and what is there is this run's - which is the one thing the 410 door has to know
+        // before it spares the file on the refusal's account. Run-scoped, unlike the
+        // per-attempt flag of the same reading further down: that one answers which attempt
+        // saved the checkpoint now on disk, and the keep it feeds needs exactly that.
+        var tookOverCheckpoint = false;
 
         for (int attempt = 0; attempt < 2; attempt++)
         {
@@ -567,76 +808,150 @@ public class SyncMgxDelta : MgxCmdletBase
                 var currentFetchUrl = requestUrl;
                 var appendOutput = false;
 
-                if (checkpointPath != null && File.Exists(checkpointPath))
+                // Refusing is the whole response: the checkpoint is left where it is because
+                // the sync that wrote it resumes from exactly that, and the items it counted
+                // are in the temp it names. A refusal already made is not revisited - this run
+                // has nothing to resume from either way, and the two files stay out of its
+                // reach for the rest of it.
+                if (checkpointPath != null && File.Exists(checkpointPath) && !refusedCheckpoint)
                 {
-                    // JSONL crash: the checkpoint survives but the output was never promoted from
-                    // its temp file. Promote the temp (trimmed to the checkpointed length) so
-                    // resume appends to real data instead of declaring staleness. Without this
-                    // the resume restarts at checkpoint.NextLink and the crashed run's items,
-                    // sitting only in the temp, are never emitted - while the delta token
-                    // advances past them on success.
-                    if (outputPath != null)
+                    // Ownership first, in both output modes. A sync writing to the pipeline used
+                    // to skip this block entirely, so a checkpoint from a JSONL sync resumed it
+                    // at that sync's nextLink: the pages before it went to the file and never to
+                    // the pipeline, and the delta token was saved over them on success, which
+                    // puts those changes permanently out of reach.
+                    var orphanCp = PaginationCheckpoint.Load(checkpointPath);
+                    if (orphanCp != null
+                        && RefusalFor(orphanCp, outputPath, requestUrl, checkpointPath, deltaPath)
+                            is { } refusal)
                     {
-                        var orphanCp = PaginationCheckpoint.Load(checkpointPath);
-
-                        // The resource is checked before anything is merged. The temp glob is
-                        // shaped from the output path, so a checkpoint belonging to a different
-                        // enumeration must never be allowed to pull a file into this one. The
-                        // mismatch itself is handled a few lines below; here we only decline.
-                        var resourceMatches = orphanCp != null
-                            && string.Equals(orphanCp.Resource, requestUrl, StringComparison.Ordinal);
-
-                        if (resourceMatches && orphanCp!.NextLink != null)
-                        {
-                            ReconcileCheckpointWithFiles(checkpointPath, outputPath, orphanCp);
-                        }
-                        else if (!File.Exists(outputPath))
-                        {
-                            WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
-                            PaginationCheckpoint.Delete(checkpointPath);
-                        }
+                        // What the refusal leaves has to survive the sweep in this same run,
+                        // and the 410 retry that runs it a second time.
+                        refusedCheckpoint = true;
+                        refusedTemp = orphanCp.TempFile;
+                        WriteWarning(refusal);
                     }
-
-                    if (File.Exists(checkpointPath))
+                    else
                     {
-                        var checkpoint = PaginationCheckpoint.Load(checkpointPath);
-                        if (checkpoint?.NextLink == null)
+                        // JSONL crash: the checkpoint survives but the output was never promoted
+                        // from its temp file. Promote the temp (trimmed to the checkpointed
+                        // length) so resume appends to real data instead of declaring staleness.
+                        // Without this the resume restarts at checkpoint.NextLink and the crashed
+                        // run's items, sitting only in the temp, are never emitted - while the
+                        // delta token advances past them on success.
+                        //
+                        // A load that answers null reaches none of it. "Checkpoint found but
+                        // output file is missing" is a reading of the checkpoint's contents, and
+                        // a checkpoint nothing could read has none to go on: the delete below is
+                        // for a file that says a sync completed, not for one this run failed to
+                        // open. That case is answered where it is decided, a few lines down.
+
+                        // Whether the reconcile left a position worth reloading. Not the same
+                        // question as whether the file is still there: a bail-out deletes the
+                        // checkpoint it gave up on, that delete fails wherever the account cannot
+                        // unlink from the checkpoint's directory, and the file it leaves is what
+                        // File.Exists then answered yes to - so the run reloaded the position it
+                        // had just warned it would re-enumerate past, appended this sync's rows
+                        // onto the previous sync's, and saved a token past items held in no file.
+                        // A checkpoint that outlives being given up on is given up on again next
+                        // run. Resumable where there was nothing to reconcile: a pipeline sync
+                        // has no output to put into any state, and a checkpoint that could not be
+                        // read is answered on its own terms below.
+                        var recovery = CheckpointRecovery.Resumable;
+                        if (outputPath != null && orphanCp != null)
                         {
-                            WriteVerbose("Checkpoint is stale (corrupt or completed). Deleting.");
-                            PaginationCheckpoint.Delete(checkpointPath);
-                        }
-                        else if (!string.Equals(checkpoint.Resource, requestUrl, StringComparison.Ordinal))
-                        {
-                            // A checkpoint from a different enumeration (different deltaLink,
-                            // different parameters, a completed sync in between).
-                            WriteWarning("Checkpoint belongs to a different enumeration. Deleting checkpoint and starting fresh.");
-                            PaginationCheckpoint.Delete(checkpointPath);
-                        }
-                        else
-                        {
-                            // SSRF validation: the checkpoint nextLink is untrusted (a file on disk)
-                            var expectedHost = new System.Uri(requestUrl);
-                            var validatedLink = NextLinkValidator.Validate(checkpoint.NextLink, expectedHost);
-                            if (validatedLink != null
-                                && checkpoint.ItemsCollected >= 0
-                                && checkpoint.PageItemsAlreadyWritten >= 0)
+                            if (orphanCp.NextLink != null)
                             {
-                                resume = new ResumeState(
-                                    validatedLink,
-                                    checkpoint.PageItemsAlreadyWritten,
-                                    checkpoint.ItemsCollected);
-                                currentFetchUrl = validatedLink;
-                                resumedItemCount = checkpoint.ItemsCollected;
-                                appendOutput = outputPath != null && File.Exists(outputPath);
-                                WriteVerbose($"Resuming delta enumeration from checkpoint: {resumedItemCount} items already processed"
-                                    + (checkpoint.PageItemsAlreadyWritten > 0
-                                        ? $", skipping {checkpoint.PageItemsAlreadyWritten} items on first page."
-                                        : "."));
+                                recovery = ReconcileCheckpointWithFiles(
+                                    checkpointPath, outputPath, orphanCp);
+
+                                // A temp another sync still holds is refused the way an
+                                // ownership refusal is, and for the same two reasons: the
+                                // reload below would otherwise resume from a position whose
+                                // items are in a file this run cannot have - leaving them out
+                                // of the output while the delta token advances past them - and
+                                // the sweep in this same run would take that temp the moment
+                                // its holder is gone, with the checkpoint naming it still on
+                                // disk.
+                                if (recovery == CheckpointRecovery.Refused)
+                                {
+                                    refusedCheckpoint = true;
+                                    refusedTemp = orphanCp.TempFile;
+                                }
+                            }
+                            else if (!File.Exists(outputPath))
+                            {
+                                WriteWarning("Checkpoint found but output file is missing. Deleting stale checkpoint and starting fresh.");
+                                PaginationCheckpoint.Delete(checkpointPath);
+                            }
+                        }
+
+                        // The refusal above is a refusal of this checkpoint, not of one
+                        // read of it: reloading and resuming from the file just left alone is
+                        // the resume it was made to stop. And a checkpoint given up on is not
+                        // resumed from either, however the delete that went with it fared.
+                        if (recovery == CheckpointRecovery.Resumable
+                            && !refusedCheckpoint && File.Exists(checkpointPath))
+                        {
+                            var checkpoint = PaginationCheckpoint.Load(checkpointPath);
+                            if (checkpoint == null)
+                            {
+                                // Left where it is. Load answers null for a file torn by a crash
+                                // and for one that is locked or that this account cannot open,
+                                // and this run does the same thing either way - resume stays
+                                // null, so the sync re-enumerates from the delta token. Deleting
+                                // it changed nothing here and destroyed a position the next run,
+                                // or another account, could still have resumed from.
+                                WriteWarning(
+                                    "The resume checkpoint could not be read, so it cannot say how far the "
+                                    + "interrupted sync got. Re-enumerating from the last saved delta token; "
+                                    + "no changes are lost.");
+                            }
+                            else if (checkpoint.NextLink == null)
+                            {
+                                // A completion marker is this run's to remove, and the reading is
+                                // the file's own: the sync that wrote it finished. Leaving it is
+                                // not free - -Latest is suppressed by the checkpoint file merely
+                                // existing - so a marker that outlives its sync costs the next
+                                // -Latest run the baseline it asked for.
+                                WriteVerbose("Checkpoint indicates the previous sync completed. Deleting stale checkpoint.");
+                                PaginationCheckpoint.Delete(checkpointPath);
+                            }
+                            else if (RefusalFor(checkpoint, outputPath, requestUrl,
+                                         checkpointPath, deltaPath) is { } reloadedRefusal)
+                            {
+                                // Decided again on this load rather than carried over: the
+                                // checkpoint is a file, and the sync that owns it is still going.
+                                refusedCheckpoint = true;
+                                refusedTemp = checkpoint.TempFile;
+                                WriteWarning(reloadedRefusal);
                             }
                             else
                             {
-                                WriteWarning("Checkpoint nextLink failed validation. Deleting checkpoint and starting fresh.");
-                                PaginationCheckpoint.Delete(checkpointPath);
+                                // SSRF validation: the checkpoint nextLink is untrusted (a file on disk)
+                                var expectedHost = new System.Uri(requestUrl);
+                                var validatedLink = NextLinkValidator.Validate(checkpoint.NextLink, expectedHost);
+                                if (validatedLink != null
+                                    && checkpoint.ItemsCollected >= 0
+                                    && checkpoint.PageItemsAlreadyWritten >= 0)
+                                {
+                                    resume = new ResumeState(
+                                        validatedLink,
+                                        checkpoint.PageItemsAlreadyWritten,
+                                        checkpoint.ItemsCollected);
+                                    currentFetchUrl = validatedLink;
+                                    resumedItemCount = checkpoint.ItemsCollected;
+                                    appendOutput = outputPath != null && File.Exists(outputPath);
+                                    WriteVerbose($"Resuming delta enumeration from checkpoint: {resumedItemCount} items already processed"
+                                        + (checkpoint.PageItemsAlreadyWritten > 0
+                                            ? $", skipping {checkpoint.PageItemsAlreadyWritten} items on first page."
+                                            : "."));
+                                }
+                                else
+                                {
+                                    WriteWarning("Checkpoint nextLink failed validation. Deleting checkpoint and starting fresh.");
+                                    PaginationCheckpoint.Delete(checkpointPath);
+                                }
                             }
                         }
                     }
@@ -660,6 +975,33 @@ public class SyncMgxDelta : MgxCmdletBase
                 // are. Set once the writer exists; null on the pipeline path, which has no file.
                 string? checkpointTempFile = null;
                 long? checkpointDataLength = null;
+                // Whether the checkpoint on disk is one THIS attempt saved. A checkpoint an
+                // earlier attempt left names an earlier temp, and the two are not
+                // interchangeable when it comes to deciding what a file on disk is still for.
+                var savedOwnCheckpoint = false;
+
+                // A temp a failed attempt of this run kept is kept on one condition: a
+                // checkpoint counting its items is on disk. Saving a checkpoint here is what
+                // ends that - the file just written names this attempt's temp, or the output on
+                // a resumed run, and never the earlier one - so from that moment nothing on
+                // disk refers to it, no recovery can reach it, and the sweep is still being
+                // held off on behalf of the refusal that carried it this far. Left where it
+                // was, it outlived the sync that made it: a partial copy of the caller's
+                // changes beside the finished output, waiting for some later run's sweep.
+                //
+                // Never the temp the checkpoint now names, which is this attempt's own. Best
+                // effort otherwise: a file something else holds open is not worth failing a
+                // finished sync over.
+                void ReleaseKeptTemp()
+                {
+                    var kept = keptTemp;
+                    if (kept == null
+                        || string.Equals(Path.GetFileName(kept), checkpointTempFile,
+                            StringComparison.OrdinalIgnoreCase))
+                        return;
+                    keptTemp = null;
+                    try { if (File.Exists(kept)) File.Delete(kept); } catch { }
+                }
 
                 void OnPageComplete(PageCompletedInfo info)
                 {
@@ -680,8 +1022,12 @@ public class SyncMgxDelta : MgxCmdletBase
                             ItemsCollected = totalProcessed,
                             PageItemsAlreadyWritten = 0,
                             TempFile = checkpointTempFile,
+                            OutputFile = outputPath != null ? Path.GetFullPath(outputPath) : null,
                             DataLength = checkpointDataLength
                         }.Save(checkpointPath);
+                        savedOwnCheckpoint = true;
+                        tookOverCheckpoint = true;
+                        ReleaseKeptTemp();
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
@@ -705,7 +1051,24 @@ public class SyncMgxDelta : MgxCmdletBase
                         // crash's checkpoint, and one success makes those rows permanent.
                         // Sweeping here is what keeps "a temp exists only while a checkpoint
                         // describing it exists" true across runs.
-                        DeleteStaleTemps(outputPath);
+                        //
+                        // Which is exactly why a refusal is the one case it is wrong in: the
+                        // checkpoint describing that temp IS on disk, left there deliberately a
+                        // moment ago, and sweeping the temp took the one file that made it worth
+                        // keeping - so the sync it belongs to came back to a position pointing at
+                        // nothing and re-enumerated from the start. The sweep is all or nothing
+                        // over this output's temps, so a run that has just refused leaves them to
+                        // the next run that has not.
+                        if (RefusedTempIsOnDisk(refusedTemp, outputPath))
+                        {
+                            WriteVerbose(
+                                $"Left the temp files beside '{outputPath}' alone: '{refusedTemp}' "
+                                + "holds the items of the checkpoint this run refused.");
+                        }
+                        else
+                        {
+                            DeleteStaleTemps(outputPath);
+                        }
                     }
                     var writePath = appendOutput ? outputPath : $"{outputPath}.{Guid.NewGuid():N}.tmp";
                     // A resumed run appends to the output itself, so there is no temp to name.
@@ -763,8 +1126,12 @@ public class SyncMgxDelta : MgxCmdletBase
                                                     ItemsCollected = totalProcessed,
                                                     PageItemsAlreadyWritten = pageItemsWritten,
                                                     TempFile = checkpointTempFile,
+                                                    OutputFile = outputPath != null ? Path.GetFullPath(outputPath) : null,
                                                     DataLength = checkpointDataLength
                                                 }.Save(checkpointPath);
+                                                savedOwnCheckpoint = true;
+                                                tookOverCheckpoint = true;
+                                                ReleaseKeptTemp();
                                             }
                                             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                                             {
@@ -812,8 +1179,10 @@ public class SyncMgxDelta : MgxCmdletBase
                                         ItemsCollected = totalProcessed,
                                         PageItemsAlreadyWritten = pageItemsWritten,
                                         TempFile = null,
+                                        OutputFile = Path.GetFullPath(outputPath),
                                         DataLength = promotedLength
                                     }.Save(checkpointPath);
+                                    ReleaseKeptTemp();
                                 }
                                 catch (Exception promoteEx) when (promoteEx is IOException or UnauthorizedAccessException)
                                 {
@@ -833,8 +1202,24 @@ public class SyncMgxDelta : MgxCmdletBase
                                 // Keep the temp for the next run to promote. It is deleted by
                                 // promotion, by a later fresh run's own failure once the checkpoint
                                 // is gone, or on the missing-output path below.
-                                var resumable = checkpointPath != null && File.Exists(checkpointPath);
-                                if (!resumable)
+                                //
+                                // The checkpoint counting them has to be one this attempt saved.
+                                // Any other is an earlier attempt's, naming an earlier temp, and
+                                // this attempt's items are then counted by nothing: keeping the
+                                // file left a page no recovery can reach, and the newest temp
+                                // beside an output is what the pre-length adoption path picks up
+                                // on a line count alone.
+                                var resumable = checkpointPath != null && File.Exists(checkpointPath)
+                                    && savedOwnCheckpoint;
+                                if (resumable)
+                                {
+                                    // Named, because nothing else on disk will be: the sweep the
+                                    // next attempt reaches is held off by the refusal, not by
+                                    // this, and the checkpoint that makes the file worth keeping
+                                    // is replaced or deleted without a word about it.
+                                    keptTemp = writePath;
+                                }
+                                else
                                 {
                                     try { if (File.Exists(writePath)) File.Delete(writePath); } catch { }
                                 }
@@ -889,6 +1274,13 @@ public class SyncMgxDelta : MgxCmdletBase
                 // rather than a resumable position into a completed enumeration (wrong).
                 DeleteCheckpoint(checkpointPath, "sync completed");
 
+                // And with it goes the last thing that could have named a temp an earlier
+                // attempt kept - the attempt that finished need never have saved a checkpoint of
+                // its own to release it, if everything it had left fitted in one page. Only
+                // here, on the way out of a run that completed: an attempt that dies leaves the
+                // checkpoint and the temp it names for the next run to resume from.
+                ReleaseKeptTemp();
+
                 // Save delta state ONLY after successful completion (Architect P0).
                 // Zero-item responses still save the token (Adversarial P0).
                 if (capturedDeltaLink != null)
@@ -935,13 +1327,38 @@ public class SyncMgxDelta : MgxCmdletBase
                 && ex.StatusCode == HttpStatusCode.Gone)
             {
                 // 410 Gone: delta token expired (>7 days for directory objects).
-                // Delete delta state AND any checkpoint - both describe the dead
+                // Delete delta state AND any checkpoint of this run's - both describe the dead
                 // enumeration - and restart with full sync.
                 // Second attempt builds fresh URL (no delta token), so 410 won't recur.
                 DrainClientMessages();
                 if (!DeltaState.Delete(deltaPath))
                     WriteVerbose("Could not delete expired delta state (file may be locked). It will be overwritten.");
-                DeleteCheckpoint(checkpointPath, "delta token expired (410 Gone)");
+                // The refusal has to still hold over the file that is actually there. A
+                // checkpoint refused as another sync's is spared here because that sync resumes
+                // from exactly it - but the first page boundary of this run saves over the same
+                // path, and from then on the refused file is gone and the position on disk is
+                // this run's own. Sparing that one keeps a position into the enumeration the 410
+                // has just declared dead: the retry re-enumerates in full, so the resource it
+                // records matches nothing this command line builds again, and every later run
+                // refuses it in turn - warning about a sync that was never there and holding off
+                // its stale-temp sweep on that account. It goes the way any other position into
+                // a dead enumeration goes.
+                if (refusedCheckpoint && !tookOverCheckpoint)
+                {
+                    // The token that expired is this run's; the checkpoint is not. It was
+                    // refused moments ago as another sync's, and that sync resumes from exactly
+                    // it - so an expired token of this one's is no reason to delete it, and
+                    // deleting it took the other sync's position away right after the refusal
+                    // said it would be left where it was.
+                    WriteVerbose(
+                        "Left the resume checkpoint alone (delta token expired (410 Gone)): it "
+                        + "records an enumeration this run refused, which this run's token says "
+                        + "nothing about.");
+                }
+                else
+                {
+                    DeleteCheckpoint(checkpointPath, "delta token expired (410 Gone)");
+                }
                 isFullResync = true;
                 requestUrl = BuildListUrl(VersionedBaseUrl, Uri,
                     new ODataListParams(false, Top, Top > 0 ? Top : 999, Filter, Property, null, null, 0, null));

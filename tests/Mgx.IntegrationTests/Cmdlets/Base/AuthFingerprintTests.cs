@@ -7,17 +7,56 @@ namespace Mgx.IntegrationTests.Cmdlets;
 /// The cached Graph HttpClient is keyed on this fingerprint. Keying it on tenant id alone
 /// meant that reconnecting the same tenant with a different app registration silently reused
 /// the previous application's token, so every one of these cases is a stale-credential bug.
+/// (Corpus: M365DSC-4426, stale credentials.)
 /// </summary>
+[Collection("Pipeline")]
 public class AuthFingerprintTests
 {
     [Fact]
-    public void Reports_the_graph_sdk_as_absent_when_it_is_not_loaded()
+    public void A_session_with_no_context_reads_as_disconnected_not_as_a_missing_module()
     {
-        // Microsoft.Graph.Authentication is a soft dependency, so its absence is a state the
-        // module has to detect rather than assume away: it selects GraphAuthModuleNotLoaded
-        // over "run Connect-MgGraph", which would name a cmdlet the session does not have.
-        // This xUnit process loads no Graph assemblies, so absence is the honest answer here.
-        Assert.False(MgxCmdletBase.IsGraphAuthLoaded());
+        // Microsoft.Graph.Authentication is a soft dependency, so "absent" and "present but
+        // disconnected" are different states needing different advice: naming Connect-MgGraph
+        // to someone who does not have the module sends them to a cmdlet that does not exist.
+        //
+        // Only the disconnected half is reachable through the cmdlet in this process: the suite
+        // declares a stand-in GraphSession for the resilience-injection scenarios and FindType
+        // resolves a type by full name, so IsGraphAuthLoaded answers true from the type alone
+        // whether or not a test has armed a session. The absent half is held by the test below,
+        // which asks the choice itself rather than the state it is made from.
+        using var scope = GraphSessionScope.Arm();
+
+        using var ps = PowerShell.Create();
+        ps.AddCommand("Import-Module")
+          .AddParameter("Assembly", typeof(Mgx.Cmdlets.Cmdlets.InvokeMgxRequest).Assembly);
+        ps.Invoke();
+        ps.Commands.Clear();
+        ps.AddCommand("Invoke-MgxRequest").AddParameter("Uri", "/users/u1");
+        var thrown = Record.Exception(() => ps.Invoke());
+
+        var ids = ps.Streams.Error.Select(e => e.FullyQualifiedErrorId).ToList();
+        if (thrown is CmdletInvocationException invocation)
+            ids.Add(invocation.ErrorRecord.FullyQualifiedErrorId);
+
+        Assert.Contains(ids, id => id.StartsWith("NotConnected", StringComparison.Ordinal));
+        Assert.DoesNotContain(ids, id => id.StartsWith("GraphAuthModuleNotLoaded", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_absent_module_and_a_disconnected_session_give_different_advice()
+    {
+        // Naming Connect-MgGraph to someone without the module is the failure this splits, so
+        // the two messages have to differ in the instruction, not only in the error id.
+        var disconnected = MgxCmdletBase.DescribeMissingConnection(graphAuthLoaded: true);
+        var absent = MgxCmdletBase.DescribeMissingConnection(graphAuthLoaded: false);
+
+        Assert.Equal("NotConnected", disconnected.ErrorId);
+        Assert.Contains("Connect-MgGraph", disconnected.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Install-PSResource", disconnected.Message, StringComparison.Ordinal);
+
+        Assert.Equal("GraphAuthModuleNotLoaded", absent.ErrorId);
+        Assert.Contains("Install-PSResource -Name Microsoft.Graph.Authentication",
+            absent.Message, StringComparison.Ordinal);
     }
 
 

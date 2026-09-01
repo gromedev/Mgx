@@ -10,7 +10,7 @@
 
     Run:  Invoke-Pester -Path ./tests/Live
     Needs AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_CERTIFICATE_PATH for a directory
-    tenant, and optionally MGX_LIVE_CONTENT_* for the content tests (see tests/Live/README.md).
+    tenant, and optionally MGX_LIVE_CONTENT_* for the content tests.
 #>
 
 BeforeAll {

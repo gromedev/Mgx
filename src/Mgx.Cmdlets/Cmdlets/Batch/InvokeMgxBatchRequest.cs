@@ -152,7 +152,14 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
             {
                 target = $"GET {_collected.Count} requests via $batch";
             }
-            else if (writeOps.All(o => string.Equals(o.Method, writeOps[0].Method, StringComparison.OrdinalIgnoreCase)))
+            // Only when the batch is that method and nothing else. The count is the whole
+            // batch by the reasoning above, and a write verb welded onto it described requests
+            // that were not in it: one DELETE among nineteen GETs read "DELETE 20 requests via
+            // $batch" at the one surface whose purpose is saying what is about to happen. With
+            // reads present the writes are named as their own count, the way a batch of several
+            // write methods already names them.
+            else if (writeOps.Count == _collected.Count
+                && writeOps.All(o => string.Equals(o.Method, writeOps[0].Method, StringComparison.OrdinalIgnoreCase)))
             {
                 target = $"{writeOps[0].Method} {_collected.Count} requests via $batch";
             }
@@ -224,6 +231,13 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
             var results = batchResult.Results;
             var telemetry = batchResult.Telemetry;
 
+            // Every line this run prints about itself reads these: the dead-letter line, the
+            // chunk-failure target, the verbose summary and the warning. Counting for
+            // themselves, they drifted - the warning said the batch-level retry pass had been
+            // withheld over runs in which it had gone out, been answered, and been refused on a
+            // later chunk, while the verbose line beside it credited the run with the retries.
+            var summary = BatchRunSummary.Of(results, telemetry, batchResult.ChunkFailure != null);
+
             // Output all results as Hashtables (success and failure)
             for (int i = 0; i < results.Count; i++)
             {
@@ -240,9 +254,9 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                         : null
                 };
 
-                // Status 0 means the operation was never sent, because a chunk before it failed.
-                // It is not a success and must not read as one - the caller has to be able to
-                // tell a write that may have landed from one that certainly did not.
+                // Status 0 means the operation was never sent, because another chunk failed
+                // first. It is not a success and must not read as one - the caller has to be
+                // able to tell a write that may have landed from one that certainly did not.
                 if (item.Status == GraphBatchClient.NotSentStatus)
                     result["NotSent"] = true;
 
@@ -253,7 +267,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
             // Write failed items to dead-letter file (append mode)
             if (resolvedDeadLetterPath != null)
             {
-                var failedCount = 0;
+                var wrote = false;
                 try
                 {
                     using var writer = new StreamWriter(resolvedDeadLetterPath, append: true);
@@ -284,31 +298,41 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                             deadLetter["Error"] = errorMsg;
 
                         writer.WriteLine(deadLetter.ToJsonString(s_deadLetterJsonOptions));
-                        failedCount++;
                     }
+                    wrote = true;
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     WriteWarning($"Failed to write dead-letter file '{resolvedDeadLetterPath}': {ex.Message}");
                 }
 
-                if (failedCount > 0)
-                    WriteVerbose($"Wrote {failedCount} failed items to dead-letter file: {resolvedDeadLetterPath}");
+                // The file takes both, and they are not the same thing to a caller deciding what
+                // to re-pipe: a refused write may already have been applied and one that was
+                // never sent certainly was not. Only after the write finished - a line stating
+                // what is in a file the run could not finish writing states it of nothing.
+                if (wrote && summary.Failed + summary.NotSent > 0)
+                {
+                    var written = summary.NotSent > 0
+                        ? $"{summary.Failed} failed and {summary.NotSent} not-sent items"
+                        : $"{summary.Failed} failed items";
+                    WriteVerbose($"Wrote {written} to dead-letter file: {resolvedDeadLetterPath}");
+                }
             }
 
-            // A chunk's POST failed after earlier chunks were applied. Their results are above;
-            // this says why the rest never went, and NotSent names them. After the dead-letter
-            // write, like the item errors below, so -ErrorAction Stop cannot cut the file short.
+            // A chunk's POST failed while other chunks were being applied. Their results are
+            // above; this says why the rest never went, and NotSent names them. After the
+            // dead-letter write, like the item errors below, so -ErrorAction Stop cannot cut
+            // the file short.
             if (batchResult.ChunkFailure != null)
             {
-                var notSent = batchResult.NotSent.Count;
                 // The id stays BatchChunkFailed; the category and wrapping come from the
                 // failure itself - a throttled chunk is LimitsExceeded, an open circuit
                 // ResourceUnavailable with the guidance text, not NotSpecified.
                 var (_, category, report) = MgxErrorPresentation.PresentItemFailure(
                     batchResult.ChunkFailure, "BatchChunkFailed", CircuitBreakerMessage);
                 WriteError(new ErrorRecord(report, "BatchChunkFailed", category,
-                    $"{notSent} of {results.Count} operations were not sent"));
+                    $"{summary.Failed} of {summary.Total} operations failed, "
+                    + $"{summary.NotSent} were not sent"));
             }
 
             // Emit errors for failed items (enables -ErrorAction Stop, populates $Error).
@@ -321,7 +345,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                     var skipped = submitted[i];
                     WriteError(new ErrorRecord(
                         new InvalidOperationException(
-                            $"{skipped.Method} {skipped.Url} was not sent: an earlier chunk failed."),
+                            $"{skipped.Method} {skipped.Url} was not sent: another chunk of the batch failed."),
                         "BatchItemNotSent", ErrorCategory.NotSpecified, skipped.Url));
                 }
                 else if (item.Status >= 400)
@@ -337,8 +361,7 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
                 }
             }
 
-            // Structured telemetry summary
-            WriteBatchTelemetry(telemetry);
+            WriteBatchTelemetry(telemetry, summary);
         }
         catch (Exception ex) when (ex is GraphServiceException or BrokenCircuitException or HttpRequestException)
         {
@@ -490,7 +513,59 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
         return null;
     }
 
-    private void WriteBatchTelemetry(BatchTelemetry telemetry)
+    /// <summary>
+    /// What the run did, computed once so that every line stating it states the same thing.
+    /// </summary>
+    /// <param name="Total">Operations submitted.</param>
+    /// <param name="Succeeded">Answered with a status in [200,400).</param>
+    /// <param name="Failed">Answered with a status of 400 or above, refusals included.</param>
+    /// <param name="NotSent">Never POSTed, so certainly not applied.</param>
+    /// <param name="BatchLevelRetries">Items the batch-level retry pass put on the wire.</param>
+    /// <param name="Pass">What became of that pass.</param>
+    private sealed record BatchRunSummary(
+        int Total, int Succeeded, int Failed, int NotSent, int BatchLevelRetries, RetryPass Pass)
+    {
+        internal static BatchRunSummary Of(
+            IReadOnlyList<(BatchOperation Operation, GraphBatchResponseItem Response)> results,
+            BatchTelemetry telemetry,
+            bool stopped)
+        {
+            // The not-sent count comes from the results rather than from telemetry, which
+            // counts what was answered. A refused item carries a status and an unsent one does
+            // not, so the results are what say which is which.
+            var notSent = results.Count(r => r.Response.Status == GraphBatchClient.NotSentStatus);
+
+            // Which of the two ways a stopped run stopped is decided by what the pass put on
+            // the wire, not by the stop itself. The count is taken as each of the pass's chunks
+            // is sent, so nonzero means the pass went out; a run stopped by a chunk failure
+            // before the pass never reaches the pass at all, and leaves it at zero.
+            var pass = !stopped ? RetryPass.RanClean
+                : telemetry.BatchLevelRetries > 0 ? RetryPass.RanRefused
+                : RetryPass.Withheld;
+
+            return new BatchRunSummary(telemetry.TotalRequests, telemetry.Succeeded,
+                telemetry.Failed, notSent, telemetry.BatchLevelRetries, pass);
+        }
+    }
+
+    /// <summary>What became of the batch-level retry pass, which decides what the warning
+    /// may claim about the attempts an item had.</summary>
+    private enum RetryPass
+    {
+        /// <summary>Nothing stopped the run: every item had the attempts it qualified for,
+        /// whether or not any of them needed the pass.</summary>
+        RanClean,
+
+        /// <summary>The pass went out and its own POST was refused. What it carried before
+        /// that may have been applied on the server.</summary>
+        RanRefused,
+
+        /// <summary>A chunk failed before the pass, so it was skipped for every candidate and
+        /// nothing of it reached the wire.</summary>
+        Withheld,
+    }
+
+    private void WriteBatchTelemetry(BatchTelemetry telemetry, BatchRunSummary summary)
     {
         // Propagate per-item 429 counts to session telemetry
         if (telemetry.ThrottleEncounters > 0)
@@ -503,24 +578,40 @@ public class InvokeMgxBatchRequest : MgxCmdletBase
 
         // Always emit verbose summary with timing breakdown
         var elapsedSec = telemetry.TotalElapsedMs / 1000.0;
-        var throughput = telemetry.TotalElapsedMs > 0 ? telemetry.TotalRequests / elapsedSec : 0;
-        var summary = $"Batch: {telemetry.Succeeded} succeeded, {telemetry.Failed} failed out of {telemetry.TotalRequests} requests in {elapsedSec:F1}s ({throughput:F1}/sec).";
+        var throughput = telemetry.TotalElapsedMs > 0 ? summary.Total / elapsedSec : 0;
+        var notSentPart = summary.NotSent > 0 ? $", {summary.NotSent} not sent" : string.Empty;
+        var line = $"Batch: {summary.Succeeded} succeeded, {summary.Failed} failed{notSentPart} out of {summary.Total} requests in {elapsedSec:F1}s ({throughput:F1}/sec).";
         if (telemetry.ItemRetries > 0)
-            summary += $" Item retries: {telemetry.ItemRetries}.";
+            line += $" Item retries: {telemetry.ItemRetries}.";
         if (telemetry.ThrottleEncounters > 0)
-            summary += $" Throttle (429) encounters: {telemetry.ThrottleEncounters}.";
-        if (telemetry.BatchLevelRetries > 0)
-            summary += $" Batch-level retries: {telemetry.BatchLevelRetries}.";
+            line += $" Throttle (429) encounters: {telemetry.ThrottleEncounters}.";
+        if (summary.BatchLevelRetries > 0)
+            line += $" Batch-level retries: {summary.BatchLevelRetries}.";
         if (telemetry.TotalRetryDelayMs > 0)
-            summary += $" Time in retry delays: {telemetry.TotalRetryDelayMs / 1000.0:F1}s.";
-        WriteVerbose(summary);
+            line += $" Time in retry delays: {telemetry.TotalRetryDelayMs / 1000.0:F1}s.";
+        WriteVerbose(line);
 
-        // Warn if any items failed after all retry attempts
-        if (telemetry.Failed > 0)
+        // The one line a caller running without -Verbose sees at all, so it says both what
+        // failed and what never went out - and does not credit the run with retries it withheld,
+        // nor deny it the ones it sent.
+        if (summary.Failed > 0 || summary.NotSent > 0)
         {
-            WriteWarning(
-                $"{telemetry.Failed} of {telemetry.TotalRequests} batch items failed after all retry attempts. "
-                + "Check $Error for details on each failed item.");
+            var outcome = summary.NotSent > 0
+                ? $"{summary.Failed} of {summary.Total} batch items failed and {summary.NotSent} were not sent."
+                : $"{summary.Failed} of {summary.Total} batch items failed.";
+            // "after all retry attempts" holds only of a run that ran them, and "withheld" only
+            // of a pass that never left. Between them is the pass that went out, was answered,
+            // and was refused on a later chunk: the items it carried may have been applied, and
+            // a caller told the pass never ran has no reason to check before resubmitting them.
+            var retries = summary.Pass switch
+            {
+                RetryPass.Withheld =>
+                    " A chunk failed, so the run stopped sending and the retry pass was withheld.",
+                RetryPass.RanRefused =>
+                    " The retry pass was sent and then refused, so the run stopped sending.",
+                _ => " They failed after all retry attempts.",
+            };
+            WriteWarning(outcome + retries + " Check $Error for details on each item.");
         }
     }
 

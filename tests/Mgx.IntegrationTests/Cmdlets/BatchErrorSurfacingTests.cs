@@ -1,5 +1,4 @@
 using System.Net;
-using System.Reflection;
 using Mgx.Engine.Http;
 
 namespace Mgx.IntegrationTests;
@@ -12,35 +11,6 @@ namespace Mgx.IntegrationTests;
 [Collection("Pipeline")]
 public class BatchErrorSurfacingTests
 {
-    private static readonly Type Base = typeof(Mgx.Cmdlets.Base.MgxCmdletBase);
-    private const BindingFlags Static = BindingFlags.NonPublic | BindingFlags.Static;
-
-    private static void InjectTransport(HttpMessageHandler wire)
-    {
-        Base.GetField("s_graphHttpClient", Static)!.SetValue(null, new HttpClient(wire));
-        Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null,
-            Mgx.Cmdlets.Base.MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
-        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
-        Base.GetField("s_clientOptions", Static)!.SetValue(null,
-            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void ResetTransport()
-    {
-        // Restore every static InjectTransport touched - a later test in the collection
-        // that drives a cmdlet without injecting must not inherit this class's transport.
-        Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
-        Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
-        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
-        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
-        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
-        ResiliencePipelineFactory.Reset();
-    }
-
     private static System.Management.Automation.PowerShell CreateShell()
     {
         var ps = System.Management.Automation.PowerShell.Create();
@@ -66,8 +36,7 @@ public class BatchErrorSurfacingTests
     {
         var wire = new MockHttpHandler();
         wire.QueueResponse(HttpStatusCode.OK, OneOkOneNotFound);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             using var ps = CreateShell();
             ps.AddCommand("Invoke-MgxBatchRequest")
@@ -82,7 +51,6 @@ public class BatchErrorSurfacingTests
             Assert.Equal(System.Management.Automation.ErrorCategory.ObjectNotFound,
                 error.CategoryInfo.Category);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -90,8 +58,7 @@ public class BatchErrorSurfacingTests
     {
         var wire = new MockHttpHandler();
         wire.QueueResponse(HttpStatusCode.OK, OneOkOneNotFound);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             using var ps = CreateShell();
             ps.AddCommand("Invoke-MgxBatchRequest")
@@ -101,7 +68,6 @@ public class BatchErrorSurfacingTests
             var ex = Assert.ThrowsAny<Exception>(() => ps.Invoke());
             Assert.Contains("u2", ex.Message);
         }
-        finally { ResetTransport(); }
     }
 
     /// <summary>First POST answers its chunk in full; every later POST is refused outright.</summary>
@@ -136,7 +102,7 @@ public class BatchErrorSurfacingTests
     [Fact]
     public void Stop_preference_cannot_cut_the_dead_letter_file_short()
     {
-        InjectTransport(new FirstChunkOnlyHandler());
+        using var transport = MgxTransportScope.Inject(new FirstChunkOnlyHandler());
         var deadLetter = Path.Combine(Path.GetTempPath(), $"mgx-dl-{Guid.NewGuid():N}.jsonl");
         try
         {
@@ -148,9 +114,9 @@ public class BatchErrorSurfacingTests
               .AddParameter("ErrorAction", "Stop");
             try { ps.Invoke(); } catch { /* Stop terminates - expected */ }
 
-            // First chunk answered 20 items (all 200 in this fixture), second chunk's POST
-            // failed, so 5 items were never sent. Every failure must be on disk even though
-            // Stop terminated at the first error record.
+            // First chunk answered 20 items (all 200 in this fixture), second chunk's POST was
+            // refused, so its 5 items failed. Every failure must be on disk even though Stop
+            // terminated at the first error record.
             Assert.True(File.Exists(deadLetter), "dead-letter file was not written");
             var lines = File.ReadAllLines(deadLetter);
             Assert.Equal(5, lines.Length);
@@ -158,15 +124,13 @@ public class BatchErrorSurfacingTests
         finally
         {
             File.Delete(deadLetter);
-            ResetTransport();
         }
     }
 
     [Fact]
-    public void Items_a_failed_chunk_never_sent_each_write_an_error_record()
+    public void Items_of_a_refused_chunk_each_write_an_error_record()
     {
-        InjectTransport(new FirstChunkOnlyHandler());
-        try
+        using (MgxTransportScope.Inject(new FirstChunkOnlyHandler()))
         {
             using var ps = CreateShell();
             ps.AddCommand("Invoke-MgxBatchRequest")
@@ -175,12 +139,70 @@ public class BatchErrorSurfacingTests
             ps.Invoke();
 
             var errors = ps.Streams.Error.ToList();
-            Assert.Equal(5, errors.Count(e => e.FullyQualifiedErrorId.StartsWith("BatchItemNotSent")));
+            // The second chunk's five items went out and were refused, so each reads as a failed
+            // request. None of them is "not sent": that is reserved for a chunk never POSTed.
+            Assert.Equal(5, errors.Count(e => e.FullyQualifiedErrorId.StartsWith("BatchItemError")));
+            Assert.DoesNotContain(errors, e => e.FullyQualifiedErrorId.StartsWith("BatchItemNotSent"));
             var chunk = Assert.Single(errors, e => e.FullyQualifiedErrorId.StartsWith("BatchChunkFailed"));
             // The chunk died on a 400; the record carries the classified category, not NotSpecified.
             Assert.Equal(System.Management.Automation.ErrorCategory.InvalidArgument,
                 chunk.CategoryInfo.Category);
+            // Nothing was left unsent here - the refused chunk was the last one. The record has
+            // to say what did happen to its five operations, not only what did not.
+            Assert.Equal("5 of 25 operations failed, 0 were not sent", chunk.TargetObject);
         }
-        finally { ResetTransport(); }
+    }
+
+    /// <summary>One chunk, both items answered, the second sub-response missing its status.</summary>
+    private const string OneOkOneWithoutAStatus = """
+    { "responses": [
+        { "id": "1", "status": 204, "body": null },
+        { "id": "2", "body": null }
+    ] }
+    """;
+
+    /// <summary>
+    /// "Not sent" is the cmdlet's word for a write that certainly did not reach the server, and
+    /// it carries a NotSent flag on the output, an error record telling the caller another chunk
+    /// failed, and a dead-letter line the help documents as re-pipeable. A PATCH the server
+    /// answered must reach none of those.
+    /// </summary>
+    [Fact]
+    public void A_write_answered_without_a_status_is_not_offered_back_for_resubmission()
+    {
+        var wire = new MockHttpHandler();
+        wire.QueueResponse(HttpStatusCode.OK, OneOkOneWithoutAStatus);
+        var deadLetter = Path.Combine(Path.GetTempPath(), $"mgx-dl-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            using (MgxTransportScope.Inject(wire))
+            {
+                using var ps = CreateShell();
+                ps.AddCommand("Invoke-MgxBatchRequest")
+                  .AddParameter("Uri", new[] { "/users/u1", "/users/u2" })
+                  .AddParameter("Method", "PATCH")
+                  .AddParameter("Body", new System.Collections.Hashtable { ["x"] = 1 })
+                  .AddParameter("DeadLetterPath", deadLetter);
+                var output = ps.Invoke();
+
+                var second = Assert.IsType<System.Collections.Hashtable>(output[1].BaseObject);
+                Assert.Equal("/users/u2", second["Url"]);
+                Assert.NotEqual(0, Assert.IsType<int>(second["Status"]));
+                Assert.False(second.ContainsKey("NotSent"),
+                    "a write the server answered was flagged as one that never went out");
+
+                Assert.DoesNotContain(ps.Streams.Error,
+                    e => e.FullyQualifiedErrorId.StartsWith("BatchItemNotSent", StringComparison.Ordinal));
+            }
+
+            var line = Assert.Single(File.ReadAllLines(deadLetter), l => l.Contains("/users/u2", StringComparison.Ordinal));
+            // Compact, as the writer emits it: the dead-letter serializer does not indent, so a
+            // needle with a space after the colon matches nothing the file can ever hold.
+            Assert.DoesNotContain("\"Status\":0", line, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(deadLetter)) File.Delete(deadLetter);
+        }
     }
 }

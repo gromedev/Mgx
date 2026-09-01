@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Management.Automation;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -487,11 +488,11 @@ public class InvokeMgxRequest : MgxCmdletBase
 
             if (!response.IsSuccessStatusCode)
             {
-                var body = response.Content.ReadAsStringAsync(CancellationToken).GetAwaiter().GetResult();
+                var body = client.ReadBodyAsStringAsync(response, CancellationToken).GetAwaiter().GetResult();
                 throw new GraphServiceException(response.StatusCode, body);
             }
 
-            var bodyBytes = response.Content.ReadAsByteArrayAsync(CancellationToken).GetAwaiter().GetResult();
+            var bodyBytes = client.ReadBodyAsBytesAsync(response, CancellationToken).GetAwaiter().GetResult();
             var json = ReadJsonPayload(response, bodyBytes, relativeUri);
             if (json != null)
                 OutputPayload(json.Value, sourceId);
@@ -546,7 +547,7 @@ public class InvokeMgxRequest : MgxCmdletBase
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    var body = response.Content.ReadAsStringAsync(CancellationToken).GetAwaiter().GetResult();
+                    var body = client.ReadBodyAsStringAsync(response, CancellationToken).GetAwaiter().GetResult();
                     throw new GraphServiceException(response.StatusCode, body);
                 }
 
@@ -556,7 +557,7 @@ public class InvokeMgxRequest : MgxCmdletBase
 
                 // stream.Length throws NotSupportedException on network/decompression streams.
                 // Read as bytes to safely handle null ContentLength (chunked transfer) and empty bodies.
-                var bodyBytes = response.Content.ReadAsByteArrayAsync(CancellationToken).GetAwaiter().GetResult();
+                var bodyBytes = client.ReadBodyAsBytesAsync(response, CancellationToken).GetAwaiter().GetResult();
                 var jsonEl = ReadJsonPayload(response, bodyBytes, relativeUri);
                 if (jsonEl != null)
                     OutputPayload(jsonEl.Value, sourceId);
@@ -692,34 +693,33 @@ public class InvokeMgxRequest : MgxCmdletBase
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        var body = await response.Content.ReadAsStringAsync(ct);
+                        var body = await client.ReadBodyAsStringAsync(response, ct);
                         throw new GraphServiceException(response.StatusCode, body);
                     }
 
-                    using var stream = await response.Content.ReadAsStreamAsync(ct);
-                    var json = await JsonSerializer.DeserializeAsync<JsonElement>(stream, cancellationToken: ct);
+                    // The body crosses to the cmdlet thread undecoded. ReadJsonPayload answers
+                    // the charset, the empty body, the non-JSON body and the parse failure, and
+                    // every one of those answers is a verbose, output or error record - none of
+                    // which a worker thread may write.
+                    var bodyBytes = await client.ReadBodyAsBytesAsync(response, ct);
+                    var contentType = response.Content.Headers.ContentType;
 
-                    // Clone JsonElement to detach from the parent JsonDocument's buffer.
-                    // Without Clone(), the JsonElement holds a reference to the document's internal
-                    // memory, which could become invalid after the response stream is disposed.
-                    var cloned = json.Clone();
-
-                    // Must marshal back to the cmdlet thread for WriteObject
-                    // ConcurrentFanOut collects results; we output them after
-                    // Store in a thread-safe structure
                     lock (_entityFanOutResults)
                     {
-                        _entityFanOutResults.Add((id, cloned));
+                        _entityFanOutResults.Add((id, response.StatusCode, contentType, bodyBytes));
                     }
                 },
                 CancellationToken).GetAwaiter().GetResult();
             DrainClientMessages();
 
             // Output results on the cmdlet thread
-            foreach (var (sourceId, json) in _entityFanOutResults)
+            foreach (var (sourceId, status, contentType, bodyBytes) in _entityFanOutResults)
             {
+                var json = ReadJsonPayload(status, contentType, bodyBytes, ResolveTemplate(sourceId));
+                if (json == null)
+                    continue;
                 totalItems++;
-                OutputItem(json, sourceId);
+                OutputItem(json.Value, sourceId);
             }
 
             HandleFanOutErrors(errors);
@@ -730,7 +730,8 @@ public class InvokeMgxRequest : MgxCmdletBase
         }
     }
 
-    private readonly List<(string sourceId, JsonElement json)> _entityFanOutResults = [];
+    private readonly List<(string sourceId, HttpStatusCode status,
+        MediaTypeHeaderValue? contentType, byte[] bodyBytes)> _entityFanOutResults = [];
 
     /// <summary>
     /// Write fan-out: execute POST/PATCH/PUT/DELETE for each piped ID concurrently.
@@ -843,7 +844,10 @@ public class InvokeMgxRequest : MgxCmdletBase
             }
 
             var ex = new InvalidOperationException($"HTTP {error.StatusCode} for '{error.Id}': {error.Message}");
-            // StatusCode 0 = infrastructure exception (network, circuit breaker, deserialization)
+            // StatusCode 0 = a write that reached no HTTP status at all: the network, an open
+            // circuit. Not a body that stalls or does not parse - the server answered those, and
+            // they carry the status it answered with, so they take the branch below and read as
+            // what they are rather than as a request that never arrived.
             var (errorId, category) = error.StatusCode == 0
                 ? ("BulkWriteInfraError", ErrorCategory.ConnectionError)
                 : ("BulkWriteError", MapStatusToCategory(statusCode));
@@ -1026,55 +1030,45 @@ public class InvokeMgxRequest : MgxCmdletBase
     /// -Raw, otherwise an error), or a body that declares JSON and does not parse.
     /// </summary>
     private JsonElement? ReadJsonPayload(HttpResponseMessage response, byte[] bodyBytes, string relativeUri)
-    {
-        if (bodyBytes.Length == 0)
-        {
-            WriteVerbose($"HTTP {(int)response.StatusCode}: response has no content; nothing to emit.");
-            return null;
-        }
+        => ReadJsonPayload(response.StatusCode, response.Content.Headers.ContentType, bodyBytes, relativeUri);
 
-        var encoding = ResolveEncoding(response.Content.Headers.ContentType?.CharSet);
-        var contentType = response.Content.Headers.ContentType?.MediaType;
-        if (contentType != null && !contentType.EndsWith("json", StringComparison.OrdinalIgnoreCase))
+    /// <summary>
+    /// The same read for a caller that no longer holds the response: the entity fan-out reads
+    /// the body on a worker thread and decodes it here, where writing to the streams is legal.
+    /// </summary>
+    private JsonElement? ReadJsonPayload(HttpStatusCode statusCode, MediaTypeHeaderValue? declaredType,
+        byte[] bodyBytes, string relativeUri)
+    {
+        var payload = ReadJsonPayloadCore(declaredType, bodyBytes);
+        switch (payload.Kind)
         {
-            if (Raw.IsPresent)
-            {
-                WriteObject(encoding.GetString(bodyBytes));
+            case JsonPayloadKind.Empty:
+                WriteVerbose($"HTTP {(int)statusCode}: response has no content; nothing to emit.");
                 return null;
-            }
-            WriteError(new ErrorRecord(
-                new InvalidOperationException(
-                    $"The response is {contentType}, not JSON. Use -Raw to receive it as text, or Get-MgxContent for file and media content."),
-                "NonJsonResponse", ErrorCategory.InvalidData, relativeUri));
-            return null;
-        }
 
-        // Through a string, not the raw bytes: honors the declared charset. GetString keeps
-        // a BOM as U+FEFF, which the serializer refuses but the old stream path accepted -
-        // trim it explicitly.
-        var text = encoding.GetString(bodyBytes).TrimStart('\uFEFF');
-        try
-        {
-            return JsonSerializer.Deserialize<JsonElement>(text);
-        }
-        catch (JsonException)
-        {
-            var snippet = text[..Math.Min(text.Length, 200)];
-            WriteError(new ErrorRecord(
-                new InvalidOperationException(
-                    $"The response declared JSON but does not parse. Body starts: {snippet}"),
-                "MalformedJsonResponse", ErrorCategory.InvalidData, relativeUri));
-            return null;
-        }
-    }
+            case JsonPayloadKind.NotJson:
+                if (Raw.IsPresent)
+                {
+                    WriteObject(payload.Text);
+                    return null;
+                }
+                WriteError(new ErrorRecord(
+                    new InvalidOperationException(
+                        $"The response is {payload.MediaType}, not JSON. Use -Raw to receive it as text, or Get-MgxContent for file and media content."),
+                    "NonJsonResponse", ErrorCategory.InvalidData, relativeUri));
+                return null;
 
-    /// <summary>The response's declared charset, defaulting to UTF-8. GetString strips a
-    /// matching BOM, which the byte-level Deserialize refused.</summary>
-    private static Encoding ResolveEncoding(string? charset)
-    {
-        if (string.IsNullOrEmpty(charset)) return Encoding.UTF8;
-        try { return Encoding.GetEncoding(charset.Trim('"')); }
-        catch (ArgumentException) { return Encoding.UTF8; }
+            case JsonPayloadKind.Malformed:
+                var snippet = payload.Text[..Math.Min(payload.Text.Length, 200)];
+                WriteError(new ErrorRecord(
+                    new InvalidOperationException(
+                        $"The response declared JSON but does not parse. Body starts: {snippet}"),
+                    "MalformedJsonResponse", ErrorCategory.InvalidData, relativeUri));
+                return null;
+
+            default:
+                return payload.Json;
+        }
     }
 
     private void OutputPayload(JsonElement json, string? sourceId)
@@ -1161,11 +1155,114 @@ public class InvokeMgxRequest : MgxCmdletBase
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters =
         {
+            // Claims [Flags] enums only; every other enum falls through to the converter below.
+            new GraphFlagsEnumConverter(),
             new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
             new GraphDurationConverter(),
             new GraphDateTimeConverter(),
         },
     };
+
+    /// <summary>
+    /// OData spells a flags combination "ignoreCase,multiline"; JsonStringEnumConverter writes
+    /// ", " between the names, which Graph will not parse back into a flags-typed enum.
+    ///
+    /// Only that multi-name form is rewritten, and only its separator. Each name in it is
+    /// written by the converter STJ would otherwise have used, one member at a time, so a
+    /// combination spells its members exactly as they spell themselves alone. Resolving them
+    /// here from Enum.ToString did not: it picks the other name when two members share a value,
+    /// and it cannot see [JsonStringEnumMemberName], so a member sent as "read-only" alone went
+    /// out as "read" in a combination, which is not a name the service was ever given.
+    ///
+    /// Everything else - a single member, an alias, a combination with a name of its own, a
+    /// value with bits no member covers - is handed to that converter whole, so name resolution
+    /// and the numeric fallback stay byte-for-byte what they were. Formatting the number here
+    /// instead would carry the current culture's negative sign, which sv-SE writes as U+2212.
+    ///
+    /// Components are taken largest first, so a member covering several bits wins over the bits
+    /// themselves, and are written in ascending value order: {A=1,B=2,C=4,BC=6} at 7 is "a,bc".
+    /// </summary>
+    private sealed class GraphFlagsEnumConverter : JsonConverterFactory
+    {
+        public override bool CanConvert(Type typeToConvert)
+            => typeToConvert.IsEnum && typeToConvert.IsDefined(typeof(FlagsAttribute), inherit: false);
+
+        public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options)
+            => (JsonConverter)Activator.CreateInstance(
+                typeof(FlagsConverter<>).MakeGenericType(typeToConvert),
+                new JsonStringEnumConverter(JsonNamingPolicy.CamelCase).CreateConverter(typeToConvert, options))!;
+
+        private sealed class FlagsConverter<T> : JsonConverter<T> where T : struct, Enum
+        {
+            /// <summary>Every declared value with bits of its own, largest first.</summary>
+            private static readonly ulong[] s_members = Enum.GetValues<T>()
+                .Select(ToBits).Where(bits => bits != 0).Distinct().OrderByDescending(bits => bits).ToArray();
+
+            private readonly JsonConverter<T> _inner;
+
+            public FlagsConverter(JsonConverter<T> inner) => _inner = inner;
+
+            public override T Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+                => _inner.Read(ref reader, typeToConvert, options);
+
+            public override T ReadAsPropertyName(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+                => _inner.ReadAsPropertyName(ref reader, typeToConvert, options);
+
+            public override void Write(Utf8JsonWriter writer, T value, JsonSerializerOptions options)
+            {
+                if (JoinNames(value, options) is { } joined) writer.WriteStringValue(joined);
+                else _inner.Write(writer, value, options);
+            }
+
+            public override void WriteAsPropertyName(Utf8JsonWriter writer, T value, JsonSerializerOptions options)
+            {
+                if (JoinNames(value, options) is { } joined) writer.WritePropertyName(joined);
+                else _inner.WriteAsPropertyName(writer, value, options);
+            }
+
+            /// <summary>The comma-joined form, or null when the value is not a multi-name one.</summary>
+            private string? JoinNames(T value, JsonSerializerOptions options)
+            {
+                var remaining = ToBits(value);
+                var names = new List<string>();
+
+                foreach (var member in s_members)
+                {
+                    if (remaining == 0) break;
+                    if ((remaining & member) != member) continue;
+                    if (NameOf(member, options) is not { } name) return null;
+
+                    // Chosen largest first, written smallest first.
+                    names.Insert(0, name);
+                    remaining &= ~member;
+                }
+
+                // One name is not this converter's business - a lone member, an alias, a
+                // combination named in its own right, zero - and neither is a value with bits
+                // left over, which has no names at all and belongs in the numeric fallback.
+                return remaining == 0 && names.Count > 1 ? string.Join(",", names) : null;
+            }
+
+            /// <summary>What the inner converter writes for one member alone, unquoted.</summary>
+            private string? NameOf(ulong member, JsonSerializerOptions options)
+            {
+                var buffer = new System.Buffers.ArrayBufferWriter<byte>(initialCapacity: 32);
+                using (var writer = new Utf8JsonWriter(buffer))
+                    _inner.Write(writer, (T)Enum.ToObject(typeof(T), member), options);
+
+                var reader = new Utf8JsonReader(buffer.WrittenSpan);
+                return reader.Read() && reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+            }
+
+            /// <summary>The value's bits, sign-extended rather than refused for a signed enum.</summary>
+            private static ulong ToBits(T value) => ((IConvertible)value).GetTypeCode() switch
+            {
+                TypeCode.Byte or TypeCode.UInt16 or TypeCode.UInt32 or TypeCode.UInt64
+                    => ((IConvertible)value).ToUInt64(provider: null),
+                _ => unchecked((ulong)((IConvertible)value).ToInt64(provider: null)),
+            };
+        }
+    }
 
     /// <summary>Edm.Duration is ISO-8601 ("PT1H"); STJ's default "01:00:00" is refused.</summary>
     private sealed class GraphDurationConverter : JsonConverter<TimeSpan>

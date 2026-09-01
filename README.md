@@ -1,6 +1,10 @@
 # Mgx
 
-High-performance, resilient Microsoft Graph access for PowerShell.
+High-performance, resilient Microsoft Graph access for PowerShell. 
+
+```powershell
+Install-Module Mgx
+```
 
 `Mgx` is a PowerShell client for Microsoft Graph built for long-running and high-volume workloads. It handles the parts that become difficult when a script makes thousands of requests: pagination, concurrency, throttling, retries, dead connections, memory usage, and recovery from interruption.
 

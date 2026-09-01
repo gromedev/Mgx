@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using Mgx.Engine.Http;
 
@@ -13,6 +14,7 @@ namespace Mgx.IntegrationTests.Engine;
 /// Stateful tests run inside PacerScope (which re-enables the gate the suite-wide
 /// ModuleInitializer turned off) and in the Pipeline collection so nothing runs concurrently
 /// with them against the process-static state.
+/// (Corpus: M365DSC-7273, sustained throttling.)
 /// </summary>
 [Collection("Pipeline")]
 public class AdaptiveRequestPacerTests
@@ -183,6 +185,34 @@ public class AdaptiveRequestPacerTests
         var state = AdaptiveRequestPacer.DescribeState();
         Assert.NotNull(state);
         Assert.Contains("proximity 95%", state);
+    }
+
+    [Fact]
+    public void DescribeState_renders_the_latency_ratio_with_an_invariant_separator()
+    {
+        // Get-MgxTelemetry's PacingState is parsed by the benchmark harness, so a comma-decimal
+        // locale must not turn "1.8x" into "1,8x".
+        using var scope = new PacerScope();
+
+        var original = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE");
+
+            // The baseline is a slow EMA, so a second, slower sample leaves a fractional ratio:
+            // baseline 100ms -> 112ms against a last latency of 200ms.
+            AdaptiveRequestPacer.RecordLatency(WorkloadBucket.Directory, 100);
+            AdaptiveRequestPacer.RecordLatency(WorkloadBucket.Directory, 200);
+
+            var state = AdaptiveRequestPacer.DescribeState();
+            Assert.NotNull(state);
+            Assert.Contains("1.8x of 112ms baseline", state);
+            Assert.DoesNotContain(",8x", state);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
     }
 
     [Fact]

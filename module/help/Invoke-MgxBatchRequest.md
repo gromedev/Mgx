@@ -162,7 +162,7 @@ Accept wildcard characters: False
 ```
 
 ### -DeadLetterPath
-Path to a JSONL file where failed batch items (status >= 400) are appended, along with any that were never sent because an earlier chunk failed. Each line contains Url, Method, Body (with sensitive fields redacted), Status, Error, and Timestamp. It is a record of what to retry, not a request you can replay directly: the redaction that keeps passwords out of the file also means a redacted Body is no longer the body that was sent. Read it to decide what to resubmit, and supply the sensitive fields again yourself.
+Path to a JSONL file where the batch's failed and never-sent items are appended: anything the server answered with a status >= 400, the items of a chunk whose own POST was refused, which carry that refusal's status, and the items of chunks that were never POSTed, which carry status 0. Nothing the server confirmed is ever written, so the file holds only work that is still outstanding. Each line contains Url, Method, Body (with sensitive fields redacted), Status, Error, and Timestamp. It is a record of what to retry, not a request you can replay directly: the redaction that keeps passwords out of the file also means a redacted Body is no longer the body that was sent. Read it to decide what to resubmit, and supply the sensitive fields again yourself. A refused item's request did reach the server, so it may have been applied without an answer coming back; resending one is a decision about duplicates rather than a free retry.
 
 ```yaml
 Type: String
@@ -311,12 +311,12 @@ String URLs, or hashtables or PSCustomObjects with Url, Method, and Body members
 ## OUTPUTS
 
 ### System.Collections.Hashtable
-Per-request results with Url, Method, Status, and Body keys, plus NotSent on any operation that was never sent because an earlier chunk failed. Body here is the RESPONSE body - for a failure that is the error envelope, not the request - so piping results straight back resubmits the wrong thing. Use Url and Method to rebuild the requests you want to retry.
+Per-request results with Url, Method, Status, and Body keys. Status says what became of the operation: an item the server answered keeps the status it answered with; an item whose chunk was POSTed and then refused carries the refusal's status (>= 400), because its request went out and may have been applied; only an item in a chunk that was never POSTed gets status 0, and only those carry NotSent - another chunk of the batch failed, not necessarily one before it, since chunks can run in parallel. Body here is the RESPONSE body - for a failure that is the error envelope, not the request - so piping results straight back resubmits the wrong thing. Use Url and Method to rebuild the requests you want to retry.
 
 ## NOTES
 Each batch item is retried individually on 429 (throttled) or 5xx errors (for idempotent methods). POST requests only retry on 429 because POST is non-idempotent - retrying a failed POST on 5xx could create duplicates if the server processed the request before the error. This matches the Kiota SDK retry behavior. Source: [Microsoft Graph error responses and resource types](https://learn.microsoft.com/en-us/graph/errors)
 
-Items that exhaust per-chunk retries get one additional batch-level retry pass.
+Items that exhaust per-chunk retries get one additional batch-level retry pass, except after a chunk failure: the run has stopped sending, and that pass is a send. It is skipped for every item it would have picked up, including items in chunks that were POSTed and answered in full, and they are handed back with the status the server gave them rather than resent.
 
 Use -Verbose to see retry counts, throttle encounters, and timing.
 

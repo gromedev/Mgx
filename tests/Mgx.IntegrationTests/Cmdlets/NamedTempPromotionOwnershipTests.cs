@@ -1,0 +1,372 @@
+using System.Management.Automation;
+using System.Net;
+using System.Text;
+using Mgx.Engine.Pagination;
+
+namespace Mgx.IntegrationTests;
+
+/// <summary>
+/// Recovery from a checkpoint that NAMES its temp - every checkpoint this release writes.
+/// The temp is taken by name rather than by the glob adoption searches with, which says which
+/// file holds the counted items but nothing at all about whether anyone is still writing it:
+/// a run whose export dies partway leaves that state on disk, and so does one that is still
+/// going. Promotion copied the rows into its own output and unlinked the file underneath the
+/// run that was filling it, which then wrote into an unlinked inode and failed its own
+/// promotion naming the OUTPUT. A scheduled export overlapping itself reaches this with
+/// nothing misconfigured.
+/// </summary>
+[Collection("Pipeline")]
+public class NamedTempPromotionOwnershipTests
+{
+    private const string Page1 = """
+    {"value":[{"id":"u1"},{"id":"u2"}],"@odata.nextLink":"https://graph.microsoft.com/v1.0/users?$skiptoken=P2"}
+    """;
+    private const string Page2 = """
+    {"value":[{"id":"u3"}]}
+    """;
+    private const string Baseline = """
+    {"value":[{"id":"a1"},{"id":"a2"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D1"}
+    """;
+    private const string ChangesPage1 = """
+    {"value":[{"id":"b1"},{"id":"b2"}],"@odata.nextLink":"https://graph.microsoft.com/v1.0/users/delta?$skiptoken=B2"}
+    """;
+    private const string ChangesPage2 = """
+    {"value":[{"id":"b3"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D2"}
+    """;
+    private const string ServerError = """{"error":{"code":"InternalServerError","message":"boom"}}""";
+
+    /// <summary>
+    /// Answers what it was queued with, and 500s once the queue is empty - so a run dying on
+    /// the wire needs no assumption about how many times the client retries first.
+    /// </summary>
+    private sealed class ScriptedHandler : HttpMessageHandler
+    {
+        private readonly Queue<(HttpStatusCode Status, string Body)> _steps = new();
+        private readonly object _lock = new();
+
+        public void Queue(HttpStatusCode status, string body)
+        {
+            lock (_lock) _steps.Enqueue((status, body));
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            (HttpStatusCode Status, string Body) step;
+            lock (_lock)
+                step = _steps.Count > 0 ? _steps.Dequeue() : (HttpStatusCode.InternalServerError, ServerError);
+            return Task.FromResult(new HttpResponseMessage(step.Status)
+            {
+                RequestMessage = request,
+                Content = new StringContent(step.Body, Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private static string NewDir() =>
+        Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"mgx-promote-owner-{Guid.NewGuid():N}")).FullName;
+
+    private sealed record RunResult(List<string> Warnings, List<PSObject> Output);
+
+    private static PowerShell Shell(bool withContext = false)
+    {
+        var ps = PowerShell.Create();
+        ps.AddCommand("Import-Module")
+          .AddParameter("Assembly", typeof(Mgx.Cmdlets.Cmdlets.Export.ExportMgxCollection).Assembly);
+        ps.Invoke();
+        ps.Commands.Clear();
+        if (withContext)
+        {
+            ps.AddScript("function Get-MgContext { [PSCustomObject]@{ TenantId = 'test-tenant-00000000-0000-0000-0000-000000000000' } }");
+            ps.Invoke();
+            ps.Commands.Clear();
+        }
+        return ps;
+    }
+
+    private static RunResult Export(string output, string checkpoint)
+    {
+        using var ps = Shell();
+        ps.AddCommand("Export-MgxCollection")
+          .AddParameter("Uri", "/users")
+          .AddParameter("OutputFile", output)
+          .AddParameter("CheckpointPath", checkpoint)
+          .AddParameter("All");
+        // A run that dies is the subject here, so a terminating error is an expected outcome.
+        List<PSObject> results = [];
+        try { results = [.. ps.Invoke()]; }
+        catch (CmdletInvocationException) { }
+        return new RunResult([.. ps.Streams.Warning.Select(w => w.Message)], results);
+    }
+
+    private static RunResult Sync(string deltaPath, string checkpoint, string output)
+    {
+        using var ps = Shell(withContext: true);
+        ps.AddCommand("Sync-MgxDelta")
+          .AddParameter("Uri", "/users/delta")
+          .AddParameter("DeltaPath", deltaPath)
+          .AddParameter("CheckpointPath", checkpoint)
+          .AddParameter("OutputFile", output);
+        List<PSObject> results = [];
+        try { results = [.. ps.Invoke()]; }
+        catch (CmdletInvocationException) { }
+        return new RunResult([.. ps.Streams.Warning.Select(w => w.Message)], results);
+    }
+
+    /// <summary>
+    /// Reopens a temp the way the cmdlet opens its own - new StreamWriter(path, append: false),
+    /// which asks for FileShare.Read - with the bytes the checkpoint counted already in it.
+    /// This is the run that has not died: it is between pages, and its next flush is still to
+    /// come.
+    /// </summary>
+    private static StreamWriter HoldLikeALiveRun(string tempPath)
+    {
+        var counted = File.ReadAllText(tempPath);
+        var writer = new StreamWriter(tempPath, append: false);
+        writer.Write(counted);
+        writer.Flush();
+        return writer;
+    }
+
+    /// <summary>
+    /// The reproduction. A run dies after its first page, leaving a temp and a checkpoint
+    /// naming it; the same export is running again against that -OutputFile before the first
+    /// one has finished. The second run must not take the file the first is writing: it copied
+    /// those rows into its own output, unlinked the temp, and the first run's closing move then
+    /// failed with a FileNotFoundException reported against the output it never got to write.
+    /// </summary>
+    [Fact]
+    public void An_export_does_not_promote_a_temp_a_running_export_still_holds()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // The first run: one page collected, then the wire dies. A real temp, and a real
+            // checkpoint naming it with the flushed length.
+            handler.Queue(HttpStatusCode.OK, Page1);
+            Export(output, checkpoint);
+            var temp = Assert.Single(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+            Assert.False(File.Exists(output));
+            Assert.Equal(2, PaginationCheckpoint.Load(checkpoint)!.ItemsCollected);
+
+            // It is not dead. It still holds that temp, with its two rows in it.
+            using var live = HoldLikeALiveRun(temp);
+
+            // The second run, same -OutputFile and same -CheckpointPath, which finishes.
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var second = Export(output, checkpoint);
+
+            Assert.True(File.Exists(temp), "a running export's temp was unlinked under it");
+            Assert.DoesNotContain(second.Warnings, w => w.Contains("Recovered"));
+            Assert.Contains(second.Warnings, w =>
+                w.Contains("Another export is still writing the temp file")
+                && w.Contains(checkpoint)
+                && w.Contains("exported from the beginning"));
+
+            // Its output is what it enumerated itself, not the other run's rows.
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"],
+                File.ReadAllLines(output));
+
+            // And the first run goes on: the page it fetched since its last save lands, and
+            // the move it ends with finds the file it has been writing all along.
+            live.WriteLine("{\"id\":\"u3-live\"}");
+            live.Flush();
+            Assert.True(File.Exists(temp));
+            live.Dispose();
+            File.Move(temp, output, overwrite: true);
+            Assert.Equal(
+                ["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3-live\"}"],
+                File.ReadAllLines(output));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// What the refusal leaves behind. A temp that is missing or short means the counted items
+    /// are in no file, and the checkpoint describing them is deleted on the way to exporting
+    /// again - but a temp another run is writing is the position that run comes back to, and
+    /// deleting it is the same mistake as unlinking the temp, one file over. Both files are
+    /// still there, and still say exactly what they said.
+    /// </summary>
+    [Fact]
+    public void A_refused_promotion_leaves_the_running_exports_checkpoint_and_temp_alone()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            Export(output, checkpoint);
+            var temp = Assert.Single(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+
+            var checkpointBefore = File.ReadAllBytes(checkpoint);
+            var tempBefore = File.ReadAllBytes(temp);
+
+            using (HoldLikeALiveRun(temp))
+            {
+                // The second run gets nothing off the wire, so it never saves a checkpoint of
+                // its own: whatever is on disk afterwards is what the refusal left.
+                Export(output, checkpoint);
+
+                Assert.Equal(checkpointBefore, File.ReadAllBytes(checkpoint));
+                Assert.Equal(tempBefore, ReadShared(temp));
+                Assert.False(File.Exists(output), "the other run's rows were published as an output");
+                Assert.False(File.Exists(output + ".adopt"));
+                Assert.Equal([temp], Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+            }
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// The ordinary resume, which is the same state on disk minus the holder: the run that
+    /// wrote the temp is gone, so its items are recovered into the output and the enumeration
+    /// carries on from the page the checkpoint records. A claim that cannot tell the two apart
+    /// would cost every resume this release writes.
+    /// </summary>
+    [Fact]
+    public void An_export_promotes_the_named_temp_of_a_run_that_is_gone()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            handler.Queue(HttpStatusCode.OK, Page1);
+            Export(output, checkpoint);
+            Assert.Single(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var resumed = Export(output, checkpoint);
+
+            Assert.Contains(resumed.Warnings, w =>
+                w.Contains("Recovered 2 items from an interrupted export's temp file"));
+            Assert.Equal(["{\"id\":\"u1\"}", "{\"id\":\"u2\"}", "{\"id\":\"u3\"}"],
+                File.ReadAllLines(output));
+            Assert.Equal(3L, Assert.IsType<Mgx.Cmdlets.Models.MgxExportResult>(
+                Assert.Single(resumed.Output).BaseObject).ItemCount);
+            Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+            Assert.False(File.Exists(checkpoint), "a completed export deletes its checkpoint");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// Where the claim must not go. A checkpoint written before the output file was recorded is
+    /// diagnosed as this export's by the temp it names corroborating it - the same resolution
+    /// the promotion below uses - so a claim taken during that reading would answer "this names
+    /// no file of mine" for a temp that is merely open at the moment, and a settled ownership
+    /// diagnosis would swing on which second the export started in. The checkpoint is still
+    /// this export's; it is the promotion that refuses.
+    /// </summary>
+    [Fact]
+    public void A_held_temp_does_not_change_who_a_checkpoint_without_an_output_belongs_to()
+    {
+        var dir = NewDir();
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        var temp = Path.Combine(dir, $"out.jsonl.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using var live = new StreamWriter(temp, append: false);
+            live.WriteLine("{\"id\":\"u1\"}");
+            live.WriteLine("{\"id\":\"u2\"}");
+            live.Flush();
+
+            // No "outputFile" field: the shape a release that did not record one leaves.
+            File.WriteAllText(checkpoint, $$"""
+            {"resource":"https://graph.microsoft.com/v1.0/users?$top=999",
+             "nextLink":"https://graph.microsoft.com/v1.0/users?$skiptoken=P2",
+             "itemsCollected":2,"pageItemsAlreadyWritten":0,
+             "tempFile":"{{Path.GetFileName(temp)}}",
+             "dataLength":{{new FileInfo(temp).Length}}}
+            """);
+
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+            handler.Queue(HttpStatusCode.OK, Page1);
+            handler.Queue(HttpStatusCode.OK, Page2);
+            var run = Export(output, checkpoint);
+
+            Assert.Contains(run.Warnings, w => w.Contains("Another export is still writing the temp file"));
+            Assert.DoesNotContain(run.Warnings, w => w.Contains("no longer corroborate it"));
+            Assert.True(File.Exists(temp), "a running export's temp was unlinked under it");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// The same helper, reached the same way, from the other cmdlet. A sync has one thing more
+    /// to lose: taking the live run's temp and then resuming past its items advances the delta
+    /// token over changes that are in no file this run can produce, and a delta token that has
+    /// moved cannot be asked for them again.
+    /// </summary>
+    [Fact]
+    public void A_sync_does_not_promote_a_temp_a_running_sync_still_holds()
+    {
+        var dir = NewDir();
+        var delta = Path.Combine(dir, "state.json");
+        var output = Path.Combine(dir, "out.jsonl");
+        var checkpoint = Path.Combine(dir, "run.checkpoint");
+        try
+        {
+            var handler = new ScriptedHandler();
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // A baseline sync, then one that dies after its first page of changes.
+            handler.Queue(HttpStatusCode.OK, Baseline);
+            Sync(delta, checkpoint, output);
+            handler.Queue(HttpStatusCode.OK, ChangesPage1);
+            Sync(delta, checkpoint, output);
+            var temp = Assert.Single(Directory.GetFiles(dir, "out.jsonl.*.tmp"));
+            Assert.Equal(["{\"id\":\"b1\"}", "{\"id\":\"b2\"}"], File.ReadAllLines(temp));
+
+            using var live = HoldLikeALiveRun(temp);
+
+            // The overlapping sync, which re-enumerates from the delta token instead.
+            handler.Queue(HttpStatusCode.OK, ChangesPage1);
+            handler.Queue(HttpStatusCode.OK, ChangesPage2);
+            var second = Sync(delta, checkpoint, output);
+
+            Assert.True(File.Exists(temp), "a running sync's temp was unlinked under it");
+            Assert.DoesNotContain(second.Warnings, w => w.Contains("Recovered"));
+            Assert.Contains(second.Warnings, w =>
+                w.Contains("Another sync is still writing the temp file")
+                && w.Contains("re-enumerates from the last saved delta token"));
+            Assert.Equal(["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                File.ReadAllLines(output));
+
+            live.WriteLine("{\"id\":\"b3-live\"}");
+            live.Flush();
+            live.Dispose();
+            Assert.Equal(
+                ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3-live\"}"],
+                File.ReadAllLines(temp));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Reads a file the test's own live writer still holds open: on Windows the reader
+    // must offer ReadWrite sharing or the holder's write access denies the open.
+    private static byte[] ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var ms = new MemoryStream();
+        fs.CopyTo(ms);
+        return ms.ToArray();
+    }
+}

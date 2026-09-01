@@ -52,6 +52,39 @@ public class BulkWriteTests
         ResiliencePipelineFactory.Reset();
     }
 
+    /// <summary>
+    /// A body that opens with a UTF-8 byte-order mark is a body. Deserialized from the bytes it
+    /// was refused for an invalid start character, and the write - a 201, applied on the server -
+    /// was reported as a status-0 failure of the request that carried it.
+    /// </summary>
+    [Fact]
+    public async Task BulkWriteAsync_BomPrefixedBody_CountsAsSucceededAndParses()
+    {
+        ResiliencePipelineFactory.Reset();
+        var handler = new MockHttpHandler();
+        byte[] bom = [0xEF, 0xBB, 0xBF];
+        var body = System.Text.Encoding.UTF8.GetBytes(TestData.SingleUser);
+        handler.QueueBytes(HttpStatusCode.Created, [.. bom, .. body], "application/json");
+
+        using var httpClient = new HttpClient(handler);
+        using var client = new ResilientGraphClient(httpClient, NoRateLimitOptions);
+        var fanOut = new ConcurrentFanOut(client, maxConcurrency: 2);
+
+        var ops = new List<(string id, string url)>
+        {
+            ("op1", "https://graph.microsoft.com/v1.0/users")
+        };
+
+        var result = await fanOut.BulkWriteAsync(HttpMethod.Post, ops, """{"displayName":"Test"}""");
+
+        Assert.Equal(1, result.Succeeded);
+        Assert.Empty(result.Errors);
+        var response = Assert.Single(result.Responses);
+        Assert.Equal("user1", response.Response.GetProperty("id").GetString());
+
+        ResiliencePipelineFactory.Reset();
+    }
+
     [Fact]
     public async Task BulkWriteAsync_EmptyOperations_ReturnsEmptyResult()
     {
@@ -248,9 +281,11 @@ public class BulkWriteTests
         Assert.Equal(1, result.Failed);
         Assert.Single(result.Errors);
         Assert.Equal("bad-json", result.Errors[0].Id);
-        // StatusCode 0 proves error came from deserialization-failure catch path,
-        // not from the HTTP-error path (which would carry the real status code)
-        Assert.Equal(0, result.Errors[0].StatusCode);
+        // What the body did is what tells the deserialization failure from the HTTP-error
+        // path. The status is the one the server answered with: the write reached it, and a
+        // 0 there says it never did.
+        Assert.Equal(201, result.Errors[0].StatusCode);
+        Assert.Contains("invalid start of a value", result.Errors[0].Message, StringComparison.Ordinal);
 
         ResiliencePipelineFactory.Reset();
     }
@@ -295,6 +330,72 @@ public class BulkWriteTests
         // Verify status codes are preserved correctly so warning logic can count them
         var statusCodes = result.Errors.Select(e => e.StatusCode).OrderBy(s => s).ToArray();
         Assert.Equal(new[] { 403, 404, 404 }, statusCodes);
+
+        ResiliencePipelineFactory.Reset();
+    }
+
+    /// <summary>
+    /// A server that sends the headers of an error and then stops sending the body. The stall
+    /// was recorded as if it were the body, run through the Graph-error parser that does not
+    /// know it, and reached the caller as "HTTP 500" - which is the one thing it already knew.
+    /// </summary>
+    [Fact]
+    public async Task BulkWriteAsync_StalledErrorBody_KeepsTheStallInTheRecord()
+    {
+        ResiliencePipelineFactory.Reset();
+
+        using var httpClient = new HttpClient(new StallingErrorHandler());
+        using var client = new ResilientGraphClient(httpClient, NoRateLimitOptions)
+        {
+            BodyReadTimeout = TimeSpan.FromSeconds(2)
+        };
+        var fanOut = new ConcurrentFanOut(client, maxConcurrency: 1);
+
+        var ops = new List<(string id, string url)>
+        {
+            ("op1", "https://graph.microsoft.com/v1.0/users/u1")
+        };
+
+        var result = await fanOut.BulkWriteAsync(HttpMethod.Patch, ops, """{"displayName":"Test"}""");
+
+        Assert.Equal(1, result.Failed);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(500, error.StatusCode);
+        Assert.Equal(ResilientGraphClient.BodyReadTimedOutMessage, error.Message);
+
+        ResiliencePipelineFactory.Reset();
+    }
+
+    /// <summary>
+    /// The same stall after the server answered 201. The write is on the server; only the read
+    /// of what it created failed. Recorded as status 0 - the code for a write that never
+    /// reached an HTTP status - an applied POST read as a connection failure, which is the one
+    /// kind a caller may safely repeat, and repeating it creates the entity twice.
+    /// </summary>
+    [Fact]
+    public async Task BulkWriteAsync_StalledBodyAfterCreated_KeepsTheStatusTheServerAnswered()
+    {
+        ResiliencePipelineFactory.Reset();
+
+        using var httpClient = new HttpClient(new StallingErrorHandler(HttpStatusCode.Created));
+        using var client = new ResilientGraphClient(httpClient, NoRateLimitOptions)
+        {
+            BodyReadTimeout = TimeSpan.FromSeconds(2)
+        };
+        var fanOut = new ConcurrentFanOut(client, maxConcurrency: 1);
+
+        var ops = new List<(string id, string url)>
+        {
+            ("a1", "https://graph.microsoft.com/v1.0/groups/g1/members/$ref")
+        };
+
+        var result = await fanOut.BulkWriteAsync(HttpMethod.Post, ops,
+            """{"@odata.id":"https://graph.microsoft.com/v1.0/users/a1"}""");
+
+        Assert.Equal(1, result.Failed);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(201, error.StatusCode);
+        Assert.Equal(ResilientGraphClient.BodyReadTimedOutMessage, error.Message);
 
         ResiliencePipelineFactory.Reset();
     }
@@ -415,5 +516,46 @@ public class ExceptionThrowingHandler : HttpMessageHandler
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
         throw _exceptionFactory();
+    }
+}
+
+/// <summary>
+/// Sends the headers of the given status and one byte of body, then nothing, honoring only
+/// the read's own token - the shape of a response whose body stalls. The status defaults to
+/// a 500; a write is answered 201 and stalls exactly the same way.
+/// </summary>
+public class StallingErrorHandler(HttpStatusCode status = HttpStatusCode.InternalServerError)
+    : HttpMessageHandler
+{
+    private sealed class StallingContent : HttpContent
+    {
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => await SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+        protected override async Task SerializeToStreamAsync(
+            Stream stream, TransportContext? context, CancellationToken cancellationToken)
+        {
+            stream.WriteByte((byte)'{');
+            await stream.FlushAsync(cancellationToken);
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 4096;
+            return true;
+        }
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var content = new StallingContent();
+        content.Headers.TryAddWithoutValidation("Content-Type", "application/json");
+        return Task.FromResult(new HttpResponseMessage(status)
+        {
+            RequestMessage = request,
+            Content = content
+        });
     }
 }

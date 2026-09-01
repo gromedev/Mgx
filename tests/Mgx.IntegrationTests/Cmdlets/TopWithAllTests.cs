@@ -1,6 +1,5 @@
 using System.Management.Automation;
 using System.Net;
-using System.Reflection;
 using System.Text;
 using Mgx.Cmdlets.Base;
 using Mgx.Engine.Http;
@@ -45,37 +44,10 @@ public class TopWithAllTests
         }
     }
 
-    private static void InjectMock(HttpMessageHandler handler)
-    {
-        ResiliencePipelineFactory.Reset();
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, new HttpClient(handler));
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        t.GetField("s_ownsHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, false);
-        t.GetField("s_graphEndpoint", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, "https://graph.microsoft.com");
-        t.GetField("s_clientOptions", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void CleanupMock()
-    {
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthContextRef", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        ResiliencePipelineFactory.Reset();
-    }
-
     private static (int Count, int Requests) Enumerate(int top, bool all, int pageSize)
     {
         var handler = new PagedHandler(pageSize, maxPages: 40);
-        InjectMock(handler);
-        try
+        using (MgxTransportScope.Inject(handler))
         {
             using var ps = PowerShell.Create();
             ps.AddCommand("Import-Module")
@@ -95,7 +67,6 @@ public class TopWithAllTests
             var output = ps.Invoke();
             return (output.Count, handler.RequestCount);
         }
-        finally { CleanupMock(); }
     }
 
     [Fact]
@@ -132,7 +103,7 @@ public class TopWithAllTests
         // The sibling of the Invoke-MgxRequest case. Both cmdlets document -Top as a total
         // maximum, so they must not disagree about what -All -Top means.
         var handler = new PagedHandler(pageSize: 50, maxPages: 40);
-        InjectMock(handler);
+        using var transport = MgxTransportScope.Inject(handler);
         var dir = Directory.CreateDirectory(
             Path.Combine(Path.GetTempPath(), $"mgx-topall-{Guid.NewGuid():N}")).FullName;
         var output = Path.Combine(dir, "out.jsonl");
@@ -159,7 +130,6 @@ public class TopWithAllTests
         }
         finally
         {
-            CleanupMock();
             try { Directory.Delete(dir, true); } catch { }
         }
     }

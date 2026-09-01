@@ -6,7 +6,7 @@ namespace Mgx.IntegrationTests;
 /// A service-issued link is opaque: validation may refuse it, but a link that passes is
 /// followed byte-identically - no re-encoding, no normalization, no re-parsing. A repaired
 /// link is a different link, and Graph's skiptokens do not survive repair.
-/// (GraphSDK-2488.)
+/// (Corpus: GraphSDK-2488, opaque service links.)
 /// </summary>
 public class OpaqueLinkTests
 {

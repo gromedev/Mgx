@@ -38,6 +38,14 @@ public static class ResiliencePipelineFactory
     internal static readonly ResiliencePropertyKey<Action<string>?> VerboseWriterKey = new("VerboseWriter");
 
     /// <summary>
+    /// Property key for a caller's stop signal. Once canceled, no further attempt is decided
+    /// on for this request. It deliberately does not cancel the request: the attempt in flight
+    /// finishes and its answer is returned, because that answer is the only record of what the
+    /// server did with it. What stops is the decision to send another one.
+    /// </summary>
+    internal static readonly ResiliencePropertyKey<CancellationToken> StopRetriesKey = new("StopRetries");
+
+    /// <summary>
     /// Get or create a shared resilience pipeline and rate limiter.
     /// Rebuilds when options change (detected by reference equality, since
     /// Set-MgxOption creates a new ResilientGraphClientOptions each time).
@@ -141,6 +149,12 @@ public static class ResiliencePipelineFactory
                 MaxDelay = TimeSpan.FromSeconds(maxRetryAfterCap),
                 ShouldHandle = args =>
                 {
+                    // The caller has stopped sending. Asked before the classification because
+                    // it is not about this outcome: whatever the server said, the run this
+                    // request belongs to is not sending anything else.
+                    if (args.Context.Properties.GetValue(StopRetriesKey, default).IsCancellationRequested)
+                        return ValueTask.FromResult(false);
+
                     // Classification and the retry decision live in Errors/, shared with the
                     // batch client and the download pipeline; ErrorPolicyParityTests holds
                     // them to the decisions this predicate used to make inline. Per-attempt

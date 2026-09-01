@@ -42,9 +42,10 @@ NON-TERMINATING ERRORS
     CircuitBroken               The circuit breaker is open; the record wraps
                                 the guidance text
     BatchItemError              A batch item answered >= 400
-    BatchItemNotSent            A batch item skipped because an earlier chunk
-                                failed
-    BatchChunkFailed            The chunk POST itself failed
+    BatchItemNotSent            A batch item never sent because
+                                another chunk of the batch failed
+    BatchChunkFailed            A chunk's own $batch call failed, or
+                                answered nothing that was sent
     FanOutError                 A per-id GET failed during fan-out
     BulkWriteError              A per-id write failed during fan-out
     BulkWriteInfraError         A fan-out write died before an HTTP status
@@ -64,8 +65,14 @@ NON-TERMINATING ERRORS
     Stop turns the first error record into a terminating error, ending the
     pipeline. For batches this stops at the first failed item - after the
     dead-letter file is written, so -DeadLetterPath always captures every
-    failure even under Stop. SilentlyContinue suppresses and continues;
-    records still land in $Error and -ErrorVariable.
+    failure even under Stop. Continue writes the record and carries on.
+    SilentlyContinue suppresses the display and continues; records still land
+    in $Error and -ErrorVariable.
+
+    Ignore discards the record: nothing is displayed, nothing reaches $Error,
+    and -ErrorVariable stays empty. It is a common parameter only -
+    $ErrorActionPreference cannot be set to Ignore - so it applies to the one
+    invocation that carries it.
 
 -ERRORVARIABLE
 

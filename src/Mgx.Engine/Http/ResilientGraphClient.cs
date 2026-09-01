@@ -40,6 +40,27 @@ public sealed class ResilientGraphClient : IDisposable
     /// </summary>
     public TimeSpan BodyReadTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Where one request is, as a single word. Entering an attempt and the caller's stop each
+    /// take it with one exchange, so the two orderings are the only ones that exist: the stop
+    /// arrives while the request is between attempts and ends the wait, or it finds the attempt
+    /// already on the wire and leaves it - and its answer - alone.
+    /// </summary>
+    private static class SendState
+    {
+        /// <summary>Nothing has gone out. The first attempt is the caller's own to guard.</summary>
+        public const int BeforeFirstAttempt = 0;
+
+        /// <summary>An attempt is on the wire, or its answer is still being handed back.</summary>
+        public const int InAttempt = 1;
+
+        /// <summary>An attempt is behind it and another may be waiting out a backoff.</summary>
+        public const int BetweenAttempts = 2;
+
+        /// <summary>The stop took the request between attempts. Nothing further goes out.</summary>
+        public const int Stopped = 3;
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -88,6 +109,15 @@ public sealed class ResilientGraphClient : IDisposable
     /// response body in memory, which defeats the streaming reads the rest of the client relies on.
     /// </summary>
     public bool DebugEnabled { get; set; }
+
+    /// <summary>
+    /// Runs at the head of each attempt, before it claims the request, and is given the attempt
+    /// number. Null on every shipping path: the suite holds an attempt here to sit inside the
+    /// stretch between the retry decision and the claim, where a stop and the attempt about to
+    /// go out contend for the same word - a window too narrow to enter any other way. Per client
+    /// rather than static, so a test arms only the transport it built.
+    /// </summary>
+    internal Func<int, Task>? AttemptEntryGate { get; set; }
 
     /// <summary>Drain buffered verbose messages. Must be called on the pipeline thread.</summary>
     public void DrainVerboseMessages()
@@ -152,7 +182,8 @@ public sealed class ResilientGraphClient : IDisposable
         int permitCount = 1,
         bool paceGate = true,
         bool traceResponseBody = true,
-        bool redirectIsSuccess = false)
+        bool redirectIsSuccess = false,
+        CancellationToken stopRetries = default)
     {
         // Buffer content bytes before pipeline so retries reconstruct fresh HttpContent.
         // Snapshot ALL content headers (not just ContentType) to preserve
@@ -170,7 +201,58 @@ public sealed class ResilientGraphClient : IDisposable
         }
 
         RateLimitLease? lease = null;
-        var context = ResilienceContextPool.Shared.Get(cancellationToken);
+
+        // A caller that has stopped sending - a batch chunk refused while its siblings are still
+        // going. It ends the retry loop without touching the attempt on the wire: the pipeline
+        // asks the stop before deciding on another attempt, and the token below ends a backoff
+        // that is already running, so the call comes back instead of waiting out a Retry-After
+        // it will not act on. Canceling the request itself would take the answer to the attempt
+        // in flight with it, and that answer is the record of what the server applied - the very
+        // thing the caller stops in order to keep. So the link is canceled only between
+        // attempts: never before the first, which has not gone out and is the caller's own to
+        // guard, and never during one.
+        //
+        // Where the request is lives in one word, and the stop and the attempt about to go out
+        // contend for it with an exchange each. Two words read one after the other cannot say
+        // where the request is: the pair can be read in a state neither of them was ever in.
+        var sendState = SendState.BeforeFirstAttempt;
+        CancellationTokenSource? stopLink = null;
+        var stopReg = default(CancellationTokenRegistration);
+        var pipelineToken = cancellationToken;
+        if (stopRetries.CanBeCanceled)
+        {
+            stopLink = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            pipelineToken = stopLink.Token;
+            stopReg = stopRetries.Register(() =>
+            {
+                // One exchange decides it. Between attempts the stop takes the request and ends
+                // the backoff; from any other state the exchange fails and the stop is left to
+                // the retry predicate, which refuses the next attempt without reaching this one.
+                if (Interlocked.CompareExchange(
+                        ref sendState, SendState.Stopped, SendState.BetweenAttempts)
+                    == SendState.BetweenAttempts)
+                {
+                    stopLink.Cancel();
+                }
+            });
+        }
+
+        // The waits ahead of the first attempt: the pacer's gate and a permit from the token
+        // bucket. Either can park a request for seconds, and a caller that stopped sending
+        // during one of them cannot make the check again - the one it made before calling is
+        // stale by the time the wait ends, and the request would go out on the strength of it.
+        // The stop reaches these two waits and no others: past them the request is going out,
+        // and its answer is the thing the caller stopped in order to keep.
+        CancellationTokenSource? preSendLink = null;
+        var preSendToken = cancellationToken;
+        if (stopRetries.CanBeCanceled)
+        {
+            preSendLink = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopRetries);
+            preSendToken = preSendLink.Token;
+        }
+
+        var context = ResilienceContextPool.Shared.Get(pipelineToken);
+        context.Properties.Set(ResiliencePipelineFactory.StopRetriesKey, stopRetries);
         context.Properties.Set(ResiliencePipelineFactory.IsIdempotentKey, IsIdempotent(method));
         // Always set VerboseWriterKey to buffer messages (prevents stale writers from pooled contexts)
         context.Properties.Set(ResiliencePipelineFactory.VerboseWriterKey,
@@ -181,6 +263,9 @@ public sealed class ResilientGraphClient : IDisposable
 
         var totalSw = Stopwatch.StartNew();
         bool succeeded = false;
+        // The last status an attempt got, for a stop that ends the request between attempts:
+        // the answer is gone by then, but what it said is not.
+        HttpStatusCode? lastStatus = null;
         var bucket = AdaptivePacing.Classify(requestUri);
         try
         {
@@ -189,7 +274,7 @@ public sealed class ResilientGraphClient : IDisposable
             // GraphBatchClient owns batch throughput - but their responses still feed signals.
             if (paceGate)
             {
-                var pacedMs = await AdaptiveRequestPacer.WaitAsync(bucket, cancellationToken);
+                var pacedMs = await AdaptiveRequestPacer.WaitAsync(bucket, preSendToken);
                 if (pacedMs > 0)
                 {
                     MgxTelemetryCollector.Current.RecordPacingWait(pacedMs);
@@ -200,7 +285,7 @@ public sealed class ResilientGraphClient : IDisposable
             if (_rateLimiter != null)
             {
                 var limiterSw = Stopwatch.StartNew();
-                lease = await _rateLimiter.AcquireAsync(permitCount, cancellationToken);
+                lease = await _rateLimiter.AcquireAsync(permitCount, preSendToken);
                 MgxTelemetryCollector.Current.RecordRateLimiterWait(limiterSw.ElapsedMilliseconds);
                 if (!lease.IsAcquired)
                     throw new InvalidOperationException("Rate limit exceeded. Too many concurrent requests. Reduce -Concurrency on fan-out cmdlets, increase the queue with Set-MgxOption -RateLimitQueueLimit, or disable with Set-MgxOption -NoRateLimit.");
@@ -211,6 +296,7 @@ public sealed class ResilientGraphClient : IDisposable
                 async ctx =>
                 {
                     attempt++;
+                    if (AttemptEntryGate is { } gate) await gate(attempt);
                     var request = new HttpRequestMessage(method, requestUri);
                     if (contentBytes != null)
                     {
@@ -266,28 +352,63 @@ public sealed class ResilientGraphClient : IDisposable
                         _pendingDebug.Enqueue(GraphRequestTracer.FormatRequest(request, contentBytes, attempt));
 
                     var httpSw = Stopwatch.StartNew();
-                    // Stream response headers immediately instead of buffering entire body
-                    var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ctx.CancellationToken);
-                    MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);
-                    // Per-attempt network time feeds the latency baseline (telemetry-only:
-                    // makes the SPO soft-clamp visible; not a pacing input in 2.1).
-                    AdaptiveRequestPacer.RecordLatency(bucket, httpSw.ElapsedMilliseconds);
-
-                    if (DebugEnabled)
+                    // From here to the answer is the window a stop must not touch: the request
+                    // is going out, and canceling it would lose what the server did with it.
+                    // The window is claimed rather than announced - a stop that took the request
+                    // first keeps it, and this attempt ends here instead of going out on the
+                    // strength of having overwritten the stop.
+                    int seen;
+                    do
                     {
-                        if (traceResponseBody)
-                        {
-                            await TraceResponseAsync(response, httpSw.ElapsedMilliseconds, ctx.CancellationToken);
-                        }
-                        else
-                        {
-                            // Content path: buffering a multi-megabyte download to trace it
-                            // would defeat the streaming read. Headers-only line instead.
-                            _pendingDebug.Enqueue(GraphRequestTracer.FormatResponse(response, httpSw.ElapsedMilliseconds, null));
-                        }
+                        seen = Volatile.Read(ref sendState);
+                        // The stop reached the request before this attempt claimed it, so this
+                        // one does not go out. Ended here rather than left to meet the canceled
+                        // token below: the stop takes the word and cancels the link as two
+                        // steps, and between them lies every instruction from here to the send.
+                        // An attempt that read the word and went anyway is on the transport
+                        // before the token arrives - the transport has the request and the
+                        // cancel lands on a send already made - and the caller is then told
+                        // that nothing further was sent over a request that was.
+                        if (seen == SendState.Stopped)
+                            throw new OperationCanceledException(stopRetries);
                     }
+                    while (Interlocked.CompareExchange(ref sendState, SendState.InAttempt, seen) != seen);
+                    try
+                    {
+                        // Stream response headers immediately instead of buffering entire body
+                        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ctx.CancellationToken);
+                        lastStatus = response.StatusCode;
+                        MgxTelemetryCollector.Current.RecordHttpTime(httpSw.ElapsedMilliseconds);
+                        // Per-attempt network time feeds the latency baseline (telemetry-only:
+                        // makes the SPO soft-clamp visible; not a pacing input in 2.1).
+                        AdaptiveRequestPacer.RecordLatency(bucket, httpSw.ElapsedMilliseconds);
 
-                    return response;
+                        if (DebugEnabled)
+                        {
+                            if (traceResponseBody)
+                            {
+                                await TraceResponseAsync(response, httpSw.ElapsedMilliseconds, ctx.CancellationToken);
+                            }
+                            else
+                            {
+                                // Content path: buffering a multi-megabyte download to trace it
+                                // would defeat the streaming read. Headers-only line instead.
+                                _pendingDebug.Enqueue(GraphRequestTracer.FormatResponse(response, httpSw.ElapsedMilliseconds, null));
+                            }
+                        }
+
+                        return response;
+                    }
+                    finally
+                    {
+                        // One transition out, so there is no instant at which the state says the
+                        // attempt is over while its response is still being handed back unread.
+                        // A stop that landed during the attempt is not resumed here: the retry it
+                        // would have stopped is already refused by the retry predicate, and
+                        // canceling now would take the answer the attempt was kept alive for.
+                        Interlocked.CompareExchange(
+                            ref sendState, SendState.BetweenAttempts, SendState.InAttempt);
+                    }
                 },
                 context);
             // A redirect counts as success only for the caller that expects one. Graph answers
@@ -319,9 +440,26 @@ public sealed class ResilientGraphClient : IDisposable
 
             return result;
         }
+        // The caller stopped this request's retries while it was waiting to be retried, and the
+        // wait ended with them. What the server last said is what the request is reported as: a
+        // retry that never went out does not turn a throttle into a call that got no answer.
+        catch (OperationCanceledException) when (stopRetries.IsCancellationRequested
+            && !cancellationToken.IsCancellationRequested)
+        {
+            // Nothing of this request went out: the stop reached it while it was still waiting
+            // for its turn to send. Said in its own words rather than as a refusal - a refusal
+            // means the server may have applied the writes, and whether the caller sends them
+            // again turns on exactly that difference.
+            if (Volatile.Read(ref sendState) == SendState.BeforeFirstAttempt)
+                throw new RequestNotSentException();
+            throw new HttpRequestException(RetriesStoppedMessage, null, lastStatus);
+        }
         finally
         {
             MgxTelemetryCollector.Current.RecordRequest(succeeded, totalSw.ElapsedMilliseconds);
+            stopReg.Dispose();
+            stopLink?.Dispose();
+            preSendLink?.Dispose();
             ResilienceContextPool.Shared.Return(context);
             lease?.Dispose();
         }
@@ -345,8 +483,10 @@ public sealed class ResilientGraphClient : IDisposable
         CancellationToken cancellationToken = default,
         Dictionary<string, string>? headers = null,
         int permitCount = 1,
-        bool paceGate = true)
-        => SendAsync(HttpMethod.Post, requestUri, content, headers, cancellationToken, permitCount, paceGate);
+        bool paceGate = true,
+        CancellationToken stopRetries = default)
+        => SendAsync(HttpMethod.Post, requestUri, content, headers, cancellationToken, permitCount, paceGate,
+            stopRetries: stopRetries);
 
     /// <summary>
     /// Fetch content bytes ($value / /content endpoints), optionally a byte range.
@@ -380,7 +520,60 @@ public sealed class ResilientGraphClient : IDisposable
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new HttpRequestException("Response body read timed out. The server sent headers but the body stream stalled.");
+            throw new HttpRequestException(BodyReadTimedOutMessage);
+        }
+    }
+
+    /// <summary>
+    /// What a caller sees when it stopped this request's retries while it was waiting to be
+    /// retried. Nothing further was sent; the status the exception carries is the last one the
+    /// server gave, so a stopped retry does not read as a request that never got an answer.
+    /// </summary>
+    internal const string RetriesStoppedMessage =
+        "The caller stopped retrying this request. No further attempt was sent.";
+
+    /// <summary>
+    /// What a caller sees when a server sends headers and then stops sending the body.
+    /// </summary>
+    internal const string BodyReadTimedOutMessage =
+        "Response body read timed out. The server sent headers but the body stream stalled.";
+
+    /// <summary>
+    /// Read a response body as bytes under <see cref="BodyReadTimeout"/>. Requests are sent
+    /// with HttpCompletionOption.ResponseHeadersRead, and under that option HttpClient.Timeout
+    /// does not bound the content read at all - nor does the pipeline's attempt timeout, which
+    /// ends when the headers arrive. A read on the caller's token alone therefore never returns
+    /// against a stream that stalls without closing.
+    /// </summary>
+    public async Task<byte[]> ReadBodyAsBytesAsync(
+        HttpResponseMessage response, CancellationToken cancellationToken = default)
+    {
+        using var bodyCts = CreateBodyReadCts(cancellationToken);
+        try
+        {
+            return await response.Content.ReadAsByteArrayAsync(bodyCts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new HttpRequestException(BodyReadTimedOutMessage);
+        }
+    }
+
+    /// <summary>
+    /// Read a response body as text under <see cref="BodyReadTimeout"/>, for the same reason as
+    /// <see cref="ReadBodyAsBytesAsync"/>. An error body stalls exactly as a success body does.
+    /// </summary>
+    public async Task<string> ReadBodyAsStringAsync(
+        HttpResponseMessage response, CancellationToken cancellationToken = default)
+    {
+        using var bodyCts = CreateBodyReadCts(cancellationToken);
+        try
+        {
+            return await response.Content.ReadAsStringAsync(bodyCts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new HttpRequestException(BodyReadTimedOutMessage);
         }
     }
 
@@ -425,7 +618,17 @@ public sealed class ResilientGraphClient : IDisposable
     {
         if (response.IsSuccessStatusCode) return;
         using var bodyCts = CreateBodyReadCts(ct);
-        var body = await response.Content.ReadAsStringAsync(bodyCts.Token);
+        string body;
+        try
+        {
+            body = await response.Content.ReadAsStringAsync(bodyCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // An error body stalls as a success body does, and the caller's contract has no
+            // room for the raw cancellation: it catches HttpRequestException.
+            throw new HttpRequestException(BodyReadTimedOutMessage);
+        }
         throw new GraphServiceException(response.StatusCode, body);
     }
 
@@ -484,5 +687,20 @@ public sealed class ResilientGraphClient : IDisposable
     {
         // Pipeline and rate limiter are shared via ResiliencePipelineFactory.
         // Don't dispose _httpClient either: it's owned by the caller (MgxCmdletBase).
+    }
+}
+
+/// <summary>
+/// A request the caller's stop ended before any attempt of it went out. Distinct from
+/// <see cref="ResilientGraphClient.RetriesStoppedMessage" />, which ends a request that had
+/// already been sent at least once and carries the status the server last gave it: this one
+/// carries no status because there is nothing to report, and it is the only shape of stop
+/// after which a caller can resubmit without asking whether the write already landed.
+/// </summary>
+internal sealed class RequestNotSentException : Exception
+{
+    public RequestNotSentException()
+        : base("The caller stopped sending before this request went out. Nothing was sent.")
+    {
     }
 }

@@ -1,6 +1,5 @@
 using System.Management.Automation;
 using System.Net;
-using System.Reflection;
 using Mgx.Cmdlets.Base;
 using Mgx.Engine.Http;
 using Mgx.Engine.Pagination;
@@ -31,32 +30,6 @@ public class DeltaCheckpointIntegrityTests
     {"value":[{"id":"b3"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D2"}
     """;
     private const string ServerError = """{"error":{"code":"InternalServerError","message":"boom"}}""";
-
-    private static void InjectMock(MockHttpHandler handler)
-    {
-        ResiliencePipelineFactory.Reset();
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, new HttpClient(handler));
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        t.GetField("s_ownsHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, false);
-        t.GetField("s_graphEndpoint", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, "https://graph.microsoft.com");
-        t.GetField("s_clientOptions", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void CleanupMock()
-    {
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthContextRef", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        ResiliencePipelineFactory.Reset();
-    }
 
     private static PowerShell Shell()
     {
@@ -108,6 +81,21 @@ public class DeltaCheckpointIntegrityTests
     private static string[] Ids(string outputPath) =>
         File.Exists(outputPath) ? File.ReadAllLines(outputPath) : [];
 
+    private static void SyncToPipeline(Env env)
+    {
+        using var ps = Shell();
+        ps.AddCommand("Sync-MgxDelta")
+          .AddParameter("Uri", "/users/delta")
+          .AddParameter("DeltaPath", env.DeltaPath)
+          .AddParameter("CheckpointPath", env.CheckpointPath);
+        try { ps.Invoke(); }
+        catch (CmdletInvocationException) { }
+    }
+
+    /// <summary>A checkpoint torn between the write and the rename: no position in it at all.</summary>
+    private const string TornCheckpoint =
+        """{"resource":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D1","nextLi""";
+
     // ---------------------------------------------------------------- D5
 
     /// <summary>
@@ -127,7 +115,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);                  // run 2 re-enumerates
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
             var temp = Directory.GetFiles(env.Dir, "out.jsonl.*.tmp").Single();
@@ -146,7 +134,7 @@ public class DeltaCheckpointIntegrityTests
                 ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
                 Ids(env.OutputPath));
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D6
@@ -171,7 +159,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
             var temp = Directory.GetFiles(env.Dir, "out.jsonl.*.tmp")
@@ -189,7 +177,7 @@ public class DeltaCheckpointIntegrityTests
                 ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
                 Ids(env.OutputPath));
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D7
@@ -215,7 +203,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);                  // run 3 re-enumerates
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage3);
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
             Sync(env);
@@ -234,7 +222,7 @@ public class DeltaCheckpointIntegrityTests
                 ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}", "{\"id\":\"b4\"}"],
                 Ids(env.OutputPath));
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D8
@@ -258,7 +246,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage3);                  // run 3: b4
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
             Sync(env);
@@ -276,7 +264,7 @@ public class DeltaCheckpointIntegrityTests
                 ids);
             Assert.Equal(ids.Length, ids.Distinct().Count());
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D9
@@ -300,7 +288,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);  // run 2: adopts, then dies
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);             // run 3: b3
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
             var temp = Directory.GetFiles(env.Dir, "out.jsonl.*.tmp").Single();
@@ -319,7 +307,7 @@ public class DeltaCheckpointIntegrityTests
                 ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
                 Ids(env.OutputPath));
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     /// <summary>
@@ -345,7 +333,7 @@ public class DeltaCheckpointIntegrityTests
             var handler = new MockHttpHandler();
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
 
@@ -354,7 +342,7 @@ public class DeltaCheckpointIntegrityTests
                 ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
                 Ids(env.OutputPath));
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     /// <summary>
@@ -382,7 +370,7 @@ public class DeltaCheckpointIntegrityTests
             var handler = new MockHttpHandler();
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
 
@@ -391,7 +379,7 @@ public class DeltaCheckpointIntegrityTests
                 ["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
                 Ids(env.OutputPath));
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D10
@@ -411,7 +399,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.InternalServerError, ServerError);
             handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);                                   // leaves its own temp with b1,b2
             var own = Directory.GetFiles(env.Dir, "out.jsonl.*.tmp").Single();
@@ -428,7 +416,7 @@ public class DeltaCheckpointIntegrityTests
             Assert.Contains("{\"id\":\"b1\"}", ids);
             Assert.Contains("{\"id\":\"b2\"}", ids);
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D11
@@ -447,7 +435,7 @@ public class DeltaCheckpointIntegrityTests
             var handler = new MockHttpHandler();
             handler.QueueResponse(HttpStatusCode.OK,
                 """{"value":[{"id":"b1"},"not-an-object",{"id":"b2"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D2"}""");
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Exception? escaped = null;
             using (var ps = Shell())
@@ -466,7 +454,7 @@ public class DeltaCheckpointIntegrityTests
             Assert.Contains("{\"id\":\"b1\"}", ids);
             Assert.Contains("{\"id\":\"b2\"}", ids);
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 
     // ---------------------------------------------------------------- D12
@@ -514,7 +502,7 @@ public class DeltaCheckpointIntegrityTests
             handler.QueueResponse(HttpStatusCode.OK, Page(Page2Link));
             handler.QueueResponse(HttpStatusCode.OK,
                 """{"value":[{"id":"tail"}],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/users/delta?$deltatoken=D2"}""");
-            InjectMock(handler);
+            using var transport = MgxTransportScope.Inject(handler);
 
             Sync(env);
 
@@ -531,6 +519,147 @@ public class DeltaCheckpointIntegrityTests
             Assert.Equal(1001, ids.Length);
             Assert.Equal("{\"id\":\"tail\"}", ids[^1]);
         }
-        finally { CleanupMock(); try { Directory.Delete(env.Dir, true); } catch { } }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// PaginationCheckpoint.Load answers null for a file torn by a crash and for one that is
+    /// locked or that this account cannot open, and the sync does the same thing either way:
+    /// resume stays null, so it re-enumerates from the delta token. Deleting the file changed
+    /// nothing about the run and destroyed a position the next run, or another account, could
+    /// still have resumed from. In file mode the delete came out of the branch that reads
+    /// "output file is missing" - a reading of contents, off a checkpoint with none to read.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_this_sync_cannot_read_is_left_for_a_sync_that_can()
+    {
+        var env = NewEnv();
+        try
+        {
+            File.WriteAllText(env.CheckpointPath, TornCheckpoint);
+            var before = File.ReadAllBytes(env.CheckpointPath);
+
+            var handler = new MockHttpHandler();
+            handler.SetDefaultResponse(HttpStatusCode.InternalServerError, ServerError);
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // The interrupted run never promoted its output, so this is the branch that used to
+            // call the checkpoint stale for it. The sync then fails on its first page, so
+            // nothing on the success path can be what removes the file.
+            Assert.False(File.Exists(env.OutputPath));
+            Sync(env);
+
+            Assert.True(File.Exists(env.CheckpointPath),
+                "a position this sync could not read was deleted anyway");
+            Assert.Equal(before, File.ReadAllBytes(env.CheckpointPath));
+        }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// The same checkpoint against a sync writing to the pipeline, which reaches the second of
+    /// the two deletes and took the file with no warning on any stream.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_a_pipeline_sync_cannot_read_is_left_for_a_sync_that_can()
+    {
+        var env = NewEnv();
+        try
+        {
+            File.WriteAllText(env.CheckpointPath, TornCheckpoint);
+            var before = File.ReadAllBytes(env.CheckpointPath);
+
+            var handler = new MockHttpHandler();
+            handler.SetDefaultResponse(HttpStatusCode.InternalServerError, ServerError);
+            using var transport = MgxTransportScope.Inject(handler);
+
+            SyncToPipeline(env);
+
+            Assert.True(File.Exists(env.CheckpointPath),
+                "a position this sync could not read was deleted anyway");
+            Assert.Equal(before, File.ReadAllBytes(env.CheckpointPath));
+        }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// A checkpoint recording no nextLink says something an unreadable one cannot: the sync
+    /// that wrote it got to the end. That one is still deleted by a run that gets nowhere,
+    /// because -Latest is suppressed by the checkpoint file merely existing - a marker left
+    /// lying there costs the next -Latest run the baseline it asked for.
+    /// </summary>
+    [Fact]
+    public void A_checkpoint_that_says_the_previous_sync_finished_is_deleted()
+    {
+        var env = NewEnv();
+        try
+        {
+            new PaginationCheckpoint
+            {
+                Resource = DeltaLink1,
+                NextLink = null,
+                ItemsCollected = 3,
+                PageItemsAlreadyWritten = 0,
+                TempFile = null,
+                DataLength = null,
+            }.Save(env.CheckpointPath);
+
+            var handler = new MockHttpHandler();
+            handler.SetDefaultResponse(HttpStatusCode.InternalServerError, ServerError);
+            using var transport = MgxTransportScope.Inject(handler);
+
+            SyncToPipeline(env);
+
+            Assert.False(File.Exists(env.CheckpointPath));
+        }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// The last step of a completed sync is the move that puts its temp over the output, and it
+    /// can fail with every page already fetched: a destination another process holds open, a
+    /// read-only file, a share that dropped. The checkpoint goes only once that move has
+    /// landed, so a failure leaves both files exactly as an interruption leaves them and the
+    /// next run resumes from them instead of re-enumerating from the delta token.
+    /// </summary>
+    [Fact]
+    public void A_failed_promotion_keeps_the_checkpoint_and_the_temp_holding_the_sync()
+    {
+        var env = NewEnv();
+        try
+        {
+            var handler = new MockHttpHandler();
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage1);       // run 1: b1,b2
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);  // run 1: b3, then the deltaLink
+            handler.QueueResponse(HttpStatusCode.OK, ChangesPage2Final);  // run 2, resumed
+            using var transport = MgxTransportScope.Inject(handler);
+
+            // Something at the output path the promotion cannot replace, so both pages are
+            // fetched and written and the move at the end of the run is what fails.
+            Directory.CreateDirectory(env.OutputPath);
+
+            Sync(env);
+
+            Assert.True(File.Exists(env.CheckpointPath),
+                "the failed promotion deleted the position the next run resumes from");
+            var cp = PaginationCheckpoint.Load(env.CheckpointPath);
+            Assert.NotNull(cp);
+            Assert.NotNull(cp!.TempFile);
+            var temp = Path.Combine(env.Dir, cp.TempFile!);
+            Assert.True(File.Exists(temp),
+                "the failed promotion deleted the temp holding every item the sync fetched");
+            Assert.Equal(["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"],
+                File.ReadAllLines(temp));
+
+            // With the occupier gone: the temp is promoted, one page is fetched - the one the
+            // checkpoint recorded - and the enumeration does not start over.
+            Directory.Delete(env.OutputPath);
+            var before = handler.RequestCount;
+            Sync(env);
+
+            Assert.Equal(1, handler.RequestCount - before);
+            Assert.Equal(["{\"id\":\"b1\"}", "{\"id\":\"b2\"}", "{\"id\":\"b3\"}"], Ids(env.OutputPath));
+        }
+        finally { try { Directory.Delete(env.Dir, true); } catch { } }
     }
 }

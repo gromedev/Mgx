@@ -1,5 +1,4 @@
 using System.Net;
-using System.Reflection;
 using Mgx.Engine.Http;
 
 namespace Mgx.IntegrationTests;
@@ -13,35 +12,6 @@ namespace Mgx.IntegrationTests;
 [Collection("Pipeline")]
 public class UriEncodingTests
 {
-    private static readonly Type Base = typeof(Mgx.Cmdlets.Base.MgxCmdletBase);
-    private const BindingFlags Static = BindingFlags.NonPublic | BindingFlags.Static;
-
-    private static void InjectTransport(HttpMessageHandler wire)
-    {
-        Base.GetField("s_graphHttpClient", Static)!.SetValue(null, new HttpClient(wire));
-        Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null,
-            Mgx.Cmdlets.Base.MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
-        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
-        Base.GetField("s_clientOptions", Static)!.SetValue(null,
-            new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 });
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void ResetTransport()
-    {
-        // Restore every static InjectTransport touched - a later test in the collection
-        // that drives a cmdlet without injecting must not inherit this class's transport.
-        Base.GetField("s_graphHttpClient", Static)!.SetValue(null, null);
-        Base.GetField("s_cachedAuthFingerprint", Static)!.SetValue(null, null);
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, false);
-        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null, 0);
-        Base.GetField("s_graphEndpoint", Static)!.SetValue(null, "https://graph.microsoft.com");
-        Base.GetField("s_clientOptions", Static)!.SetValue(null, new ResilientGraphClientOptions());
-        ResiliencePipelineFactory.Reset();
-    }
-
     private static string WireUriFor(MockHttpHandler wire, Action<System.Management.Automation.PowerShell> configure)
     {
         using var ps = System.Management.Automation.PowerShell.Create();
@@ -64,8 +34,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.SingleUser);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                 .AddParameter("Uri", "/me/drive/root:/reports/a#b.txt"));
@@ -73,7 +42,6 @@ public class UriEncodingTests
             Assert.Contains("/reports/a%23b.txt", uri);
             Assert.DoesNotContain("#", uri);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -81,8 +49,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                 .AddParameter("Uri", "/users")
@@ -90,7 +57,6 @@ public class UriEncodingTests
 
             Assert.Contains("$filter=displayName%20eq%20%27O%27%27Brien%20%26%20S%C3%B6hne%27", uri);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -98,8 +64,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                 .AddParameter("Uri", "/users")
@@ -108,7 +73,6 @@ public class UriEncodingTests
             Assert.Contains("$filter=displayName%20eq%20%27Bob%27", uri);
             Assert.DoesNotContain("%25", uri);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -116,8 +80,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                 .AddParameter("Uri", "/users")
@@ -125,7 +88,6 @@ public class UriEncodingTests
 
             Assert.Contains("50%25%20off", uri);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -135,14 +97,9 @@ public class UriEncodingTests
         // built from pipeline data, so the injection point escapes rather than trusts.
         var wire = new MockHttpHandler();
         wire.QueueBytes(HttpStatusCode.OK, [1, 2, 3], "application/octet-stream");
-        InjectTransport(wire);
         // Get-MgxContent refuses borrowed transports (the SDK's RedirectHandler would
-        // auto-follow the content 302); this injected client is mgx-owned. An owned client
-        // is rebuilt when the cached timeout disagrees with options, so keep them equal.
-        Base.GetField("s_ownsHttpClient", Static)!.SetValue(null, true);
-        Base.GetField("s_cachedTotalTimeoutSeconds", Static)!.SetValue(null,
-            new ResilientGraphClientOptions().TotalTimeoutSeconds);
-        try
+        // auto-follow the content 302); this injected client is mgx-owned.
+        using (MgxTransportScope.Inject(wire, owned: true))
         {
             using var ps = System.Management.Automation.PowerShell.Create();
             ps.AddCommand("Import-Module")
@@ -165,7 +122,6 @@ public class UriEncodingTests
             Assert.True(captured.Count > 0, $"no request sent; errors: {errText}");
             Assert.Contains("/drives/b%21x_y/items/01ABC%21DEF%3AXYZ/content", captured[0].Uri);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -177,8 +133,7 @@ public class UriEncodingTests
         {
             var wire = new MockHttpHandler();
             wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-            InjectTransport(wire);
-            try
+            using (MgxTransportScope.Inject(wire))
             {
                 var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                     .AddParameter("Uri", "/users")
@@ -192,7 +147,6 @@ public class UriEncodingTests
                 Assert.DoesNotContain('+', query);
                 Assert.Equal(filter, System.Uri.UnescapeDataString(query));
             }
-            finally { ResetTransport(); }
         }
     }
 
@@ -201,8 +155,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                 .AddParameter("Uri", "/users?$top=5")
@@ -211,7 +164,6 @@ public class UriEncodingTests
             Assert.Single(System.Text.RegularExpressions.Regex.Matches(uri, "top="));
             Assert.Contains("$top=5", uri);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -219,8 +171,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             using var ps = System.Management.Automation.PowerShell.Create();
             ps.AddCommand("Import-Module")
@@ -242,7 +193,6 @@ public class UriEncodingTests
             // Deferring must be loud: the caller's -Filter was not sent.
             Assert.Contains(ps.Streams.Warning, w => w.Message.Contains("-Filter"));
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -250,8 +200,7 @@ public class UriEncodingTests
     {
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.OK, TestData.EmptyCollection);
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             var uri = WireUriFor(wire, ps => ps.AddCommand("Invoke-MgxRequest")
                 .AddParameter("Uri", "/users?%24top=10")
@@ -260,7 +209,6 @@ public class UriEncodingTests
             // %24top IS $top to the server; a second $top would draw a 400.
             Assert.Single(System.Text.RegularExpressions.Regex.Matches(uri, "top="));
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -271,8 +219,7 @@ public class UriEncodingTests
         var wire = new MockHttpHandler();
         wire.SetDefaultResponse(HttpStatusCode.BadRequest,
             """{ "error": { "code": "BadRequest", "message": "no" } }""");
-        InjectTransport(wire);
-        try
+        using (MgxTransportScope.Inject(wire))
         {
             using var ps = System.Management.Automation.PowerShell.Create();
             ps.AddCommand("Import-Module")
@@ -289,7 +236,6 @@ public class UriEncodingTests
             // $count was never mgx's to drop.
             Assert.Single(wire.CapturedRequests);
         }
-        finally { ResetTransport(); }
     }
 
     [Fact]
@@ -302,8 +248,7 @@ public class UriEncodingTests
         {
             var wire = new MockHttpHandler();
             wire.SetDefaultResponse(HttpStatusCode.OK, TestData.SingleUser);
-            InjectTransport(wire);
-            try
+            using (MgxTransportScope.Inject(wire))
             {
                 using var ps = System.Management.Automation.PowerShell.Create();
                 ps.AddCommand("Import-Module")
@@ -320,7 +265,6 @@ public class UriEncodingTests
                 Assert.Contains($"/items/{System.Uri.EscapeDataString(segment)}", sent.Uri);
                 Assert.DoesNotContain('#', sent.Uri);
             }
-            finally { ResetTransport(); }
         }
     }
 

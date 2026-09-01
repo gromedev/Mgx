@@ -15,11 +15,9 @@ public class ResilienceWrapTests
 {
     private static HttpClient? BuildWrapper(HttpClient sdkClient, List<string> warnings)
     {
-        var build = typeof(EnableMgxResilience).GetMethod(
-            "BuildResilientSdkClient", BindingFlags.NonPublic | BindingFlags.Static)!;
         try
         {
-            return (HttpClient?)build.Invoke(null, [sdkClient, (Action<string>)warnings.Add]);
+            return EnableMgxResilience.BuildResilientSdkClient(sdkClient, warnings.Add);
         }
         finally
         {

@@ -88,6 +88,13 @@ public sealed class GraphBatchResponseItem
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The status the server answered this item with. The deserializer leaves it at 0 for a
+    /// sub-response carrying no "status" member at all, and 0 is
+    /// <see cref="Http.GraphBatchClient.NotSentStatus" /> - so a value here is a status only after
+    /// <see cref="Http.GraphBatchClient" /> has checked the envelope actually supplied one. Nothing
+    /// else may read a 0 on a deserialized item as "the request was never sent".
+    /// </summary>
     [JsonPropertyName("status")]
     public int Status { get; set; }
 

@@ -183,7 +183,7 @@ Accept wildcard characters: False
 ### -Body
 Request body for write operations (POST, PATCH, PUT). Accepts a hashtable, PSObject or array, which is serialized to JSON, or a string already holding JSON, which is sent verbatim. Ignored (with a warning) on GET.
 
-Enums serialize as camelCase names, byte arrays as base64, TimeSpan as an ISO-8601 duration, and a DateTime without a kind is treated as UTC. A SecureString, PSCredential, script block, certificate, NaN or Infinity anywhere in the body is refused before anything is sent, with an error naming the property. A string that is not JSON is sent verbatim; add a Content-Type to -Headers to declare its real type.
+Enums serialize as camelCase names, byte arrays as base64, TimeSpan as an ISO-8601 duration, and a DateTime without a kind is treated as UTC. A [Flags] combination goes out in the comma-joined form OData expects, with no space: `ignoreCase,multiline`. Each member of a combination is named as it would be alone, so a name set by JsonStringEnumMemberName, or the choice between two members sharing a value, reads the same either way. camelCase lowercases a leading acronym whole, so a member named `IOS` is sent as `ios`; where Graph wants `iOS`, pass the string rather than the enum. A SecureString, PSCredential, script block, certificate, NaN or Infinity anywhere in the body is refused before anything is sent, with an error naming the property. A string that is not JSON is sent verbatim; add a Content-Type to -Headers to declare its real type.
 
 ```yaml
 Type: Object

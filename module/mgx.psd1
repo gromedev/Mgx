@@ -1,6 +1,6 @@
 @{
     RootModule        = 'mgx.psm1'
-    ModuleVersion     = '2.1.3'
+    ModuleVersion     = '2.1.4'
     GUID              = 'a3f7e8d2-5b4c-4a1e-9f6d-2c8b0e3a7d5f'
     Author            = 'Thomas Maillo Grome'
     CompanyName       = 'Mgx'
@@ -52,33 +52,20 @@
             LicenseUri   = 'https://github.com/gromedev/mgx/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/gromedev/mgx'
             ReleaseNotes = @'
-v2.1.3
+v2.1.4
+Fixed
+- Interrupted exports resume safely: unreadable, foreign, legacy, and case-differing checkpoints are handled without data loss or duplication.
+- Batch items the server answered keep their results through chunk failures; the dead-letter file never contains an applied write.
+- Batch summaries count only sent operations, and any chunk refusal reads as a failure.
+- A stalled response or error body fails at the body-read timeout in the error contract's terms.
+- A UTF-8 byte-order mark no longer discards fan-out, bulk-write, or expanded-relation results.
+- Headers, telemetry ratios, and flags enum combinations render culture-invariantly with their attribute-supplied names.
+- Removing the module restores the SDK's own client; re-enabling resilience never stacks wrappers.
+- A resuming run never takes a file a live run is writing, and never resumes a checkpoint it gave up on.
+- A caller's stop keeps the next retry off the wire; completed runs leave no abandoned partial files.
 Added
-- about_Mgx_Errors documentation: termination behavior, error records, -ErrorAction/-ErrorVariable handling.
-- Live test suite supports client secret authentication alongside certificates.
-Fixed
-- SecureString, credential objects, and script blocks in -Body throw explicit errors rather than serializing as reflection noise.
-- Server errors, timeouts, and precondition failures assign specific ErrorCategory values instead of NotSpecified.
-- Get-MgxContent forwards the conditional header family (including If-None-Match) to content download hosts.
-- Failed batch chunks under -ErrorAction Stop write dead-letter files prior to terminating.
-- Typed parameters deferring to options already present in -Uri emit warnings rather than dropping silently.
-- Request bodies over 4 MB pass directly to the SDK chain under Enable-MgxResilience instead of being rejected.
-- HTTP 304 on conditional downloads completes cleanly without an error record.
-- Circular self-referencing objects in -Body raise validation errors instead of a process stack overflow.
-Changed
-- Unified failure classification across retries, circuit breaking, batch retry checks, content downloads, and adaptive pacing.
+- Ecosystem isolation matrix over Az.Accounts, PnP.PowerShell, and ExchangeOnlineManagement, with its own CI job.
 See CHANGELOG.md for the full list.
-
-v2.1.2
-Fixed
-- URI handling: a '#' in a path dropped everything after it, pre-encoded query values were encoded twice, piped drive and item ids went unescaped, an absolute -Uri was mangled rather than refused, and a typed parameter could repeat an option already in -Uri.
-- Body serialization: enums went out as numbers, byte arrays as integer lists, TimeSpan and a Kind-less DateTime in forms Graph refuses, and a PSCustomObject body lost every property that was not a NoteProperty.
-- Headers: content headers from -Headers were dropped, arrays were sent as System.String[], names merged case-sensitively, and a caller's client-request-id was doubled.
-- Failed batch items wrote no error records, so -ErrorAction Stop did not stop.
-- An empty, non-JSON or malformed response body ended the cmdlet with an unhandled error.
-- An unexpected failure discarded the retry history explaining it, and a timed-out attempt could retry after Ctrl-C.
-
-See CHANGELOG.md for the full history.
 '@
         }
     }

@@ -5,6 +5,7 @@
 # tmp
 bin/
 obj/
+tmp/
 publish/
 *.jsonl
 *.json

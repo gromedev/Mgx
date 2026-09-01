@@ -1513,10 +1513,11 @@ Describe 'Expand-MgxRelation Buffer Warning' {
     }
 }
 
-Describe 'HttpClient Ownership Disposal Guard' {
-    # Tests the s_ownsHttpClient guard in MgxCmdletBase.ScheduleDelayedHttpClientDispose.
-    # When s_ownsHttpClient is false (SDK fallback path), ResetHttpClient must NOT dispose
-    # the HttpClient (it belongs to the SDK). When true, it must dispose after delay.
+Describe 'HttpClient Reset Leaves A Held Client Alone' {
+    # A replaced transport is dropped, not closed. Every ResilientGraphClient built on it
+    # captured it in its constructor and keeps sending through it for as long as its
+    # enumeration runs, so closing it on a timer killed long-running cmdlets mid-stream; and a
+    # borrowed SDK client was never mgx's to close at all. ResetHttpClient must leave both.
 
     BeforeAll {
         # Ensure Mgx.Engine types are loaded (transitive dep of Mgx.Cmdlets)
@@ -1554,7 +1555,6 @@ Describe 'HttpClient Ownership Disposal Guard' {
         $script:CmdletBaseType.GetField('s_clientOptions', $script:Flags).SetValue(
             $null, $script:ShortTimeoutOptions)
 
-        # ResetHttpClient -> ScheduleDelayedHttpClientDispose checks s_ownsHttpClient
         # ResetHttpClient is public static, so use 'Static,Public' (not $script:Flags which is NonPublic)
         $script:CmdletBaseType.GetMethod('ResetHttpClient',
             [System.Reflection.BindingFlags]'Static,Public').Invoke($null, $null)
@@ -1566,7 +1566,7 @@ Describe 'HttpClient Ownership Disposal Guard' {
         $script:DisposedField.GetValue($httpClient) | Should -BeFalse
     }
 
-    It 'Should dispose HttpClient when s_ownsHttpClient is true' {
+    It 'Should NOT dispose an owned HttpClient a running cmdlet may still hold' {
         $httpClient = [System.Net.Http.HttpClient]::new()
 
         $script:CmdletBaseType.GetField('s_graphHttpClient', $script:Flags).SetValue($null, $httpClient)
@@ -1577,11 +1577,11 @@ Describe 'HttpClient Ownership Disposal Guard' {
         $script:CmdletBaseType.GetMethod('ResetHttpClient',
             [System.Reflection.BindingFlags]'Static,Public').Invoke($null, $null)
 
-        # Wait longer than TotalTimeoutSeconds (1s) to let scheduled disposal fire
+        # Longer than the TotalTimeoutSeconds (1s) the disposal used to be scheduled on
         Start-Sleep -Seconds 3
 
-        # HttpClient SHOULD be disposed (we own it)
-        $script:DisposedField.GetValue($httpClient) | Should -BeTrue
+        # Ownership says who may replace it, not how long anything still using it will live
+        $script:DisposedField.GetValue($httpClient) | Should -BeFalse
     }
 }
 

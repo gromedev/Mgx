@@ -429,7 +429,9 @@ internal static class AdaptiveRequestPacer
                 if (s_latencyBaselineMs[i] > 0)
                 {
                     var ratio = (double)s_lastLatencyMs[i] / s_latencyBaselineMs[i];
-                    (facts ??= []).Add($"latency {s_lastLatencyMs[i]}ms ({ratio:0.0}x of {s_latencyBaselineMs[i]}ms baseline)");
+                    // Parsed by the benchmark harness, so the separator must not follow the ambient culture.
+                    var ratioText = ratio.ToString("0.0", CultureInfo.InvariantCulture);
+                    (facts ??= []).Add($"latency {s_lastLatencyMs[i]}ms ({ratioText}x of {s_latencyBaselineMs[i]}ms baseline)");
                 }
             }
             if (facts != null)

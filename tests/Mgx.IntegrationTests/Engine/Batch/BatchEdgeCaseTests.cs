@@ -124,7 +124,7 @@ public class BatchEdgeCaseTests
     // ── R2-3: Mismatched response count ───────────────────────────────────────
 
     [Fact]
-    public async Task Batch_MismatchedResponseCount_Throws()
+    public async Task Batch_MismatchedResponseCount_IsReportedAsAChunkFailure()
     {
         // Send 5 items but server returns only 3 responses
         var truncatedResponse = """
@@ -148,12 +148,16 @@ public class BatchEdgeCaseTests
             .Select(i => new BatchOperation($"/users/user{i}", "GET"))
             .ToList();
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => batchClient.ExecuteBatchIndexedAsync(operations));
+        var result = await batchClient.ExecuteBatchIndexedAsync(operations);
 
+        var ex = Assert.IsType<InvalidOperationException>(result.ChunkFailure);
         Assert.Contains("count mismatch", ex.Message);
         Assert.Contains("sent 5", ex.Message);
         Assert.Contains("received 3", ex.Message);
+        // The envelope cannot be matched to what was sent, so no item has an answer - but the
+        // requests went out, and every one of them is accounted for by position.
+        Assert.Equal(5, result.Results.Count);
+        Assert.DoesNotContain(result.Results, r => r.Response.Status == GraphBatchClient.NotSentStatus);
     }
 
     // ── R2-8: 0 items — empty batch ──────────────────────────────────────────

@@ -197,6 +197,10 @@ public sealed class ConcurrentFanOut
         var tasks = operations.Select(async op =>
         {
             bool acquired = false;
+            // The status this operation was answered with, for a failure that happens after
+            // the answer arrived. 0 until the server answers: the code for a write that never
+            // reached one.
+            int answered = 0;
             try
             {
                 await semaphore.WaitAsync(cancellationToken);
@@ -209,20 +213,23 @@ public sealed class ConcurrentFanOut
                 try
                 {
                     using var response = await _client.SendAsync(method, op.url, content, headers, cancellationToken);
+                    answered = (int)response.StatusCode;
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        string body;
+                        string errorMessage;
                         using var errCts = _client.CreateBodyReadCts(cancellationToken);
                         try
                         {
-                            body = await response.Content.ReadAsStringAsync(errCts.Token);
+                            var body = await response.Content.ReadAsStringAsync(errCts.Token);
+                            errorMessage = TryExtractGraphError(body) ?? $"HTTP {(int)response.StatusCode}";
                         }
                         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                         {
-                            body = $"Response body read timed out (HTTP {(int)response.StatusCode})";
+                            // Reported as it stands: a stall is not a Graph error document, and
+                            // running it through TryExtractGraphError leaves a bare status line.
+                            errorMessage = ResilientGraphClient.BodyReadTimedOutMessage;
                         }
-                        var errorMessage = TryExtractGraphError(body) ?? $"HTTP {(int)response.StatusCode}";
                         errorBag.Add(new BulkWriteError(op.id, (int)response.StatusCode, errorMessage));
 
                         var errCurrent = Volatile.Read(ref succeeded) + errorBag.Count;
@@ -233,10 +240,16 @@ public sealed class ConcurrentFanOut
                     // Capture response body for POST/PATCH (created/updated entities)
                     if (response.StatusCode != HttpStatusCode.NoContent)
                     {
-                        var bodyBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                        var bodyBytes = await _client.ReadBodyAsBytesAsync(response, cancellationToken);
                         if (bodyBytes.Length > 0)
                         {
-                            var json = JsonSerializer.Deserialize<JsonElement>(bodyBytes);
+                            // Read as a stream, which skips a UTF-8 byte-order mark - the way
+                            // the batch client already reads its bodies. The byte-level overload
+                            // refuses one, and refused it as a failure of the write: a 201 the
+                            // server had applied came back as a status-0 transport error.
+                            using var bodyStream = new MemoryStream(bodyBytes);
+                            var json = await JsonSerializer.DeserializeAsync<JsonElement>(
+                                bodyStream, cancellationToken: cancellationToken);
                             responseBag.Add((op.id, json));
                         }
                     }
@@ -259,7 +272,12 @@ public sealed class ConcurrentFanOut
             }
             catch (Exception ex)
             {
-                var statusCode = ex is GraphServiceException gse ? (int)gse.StatusCode : 0;
+                // A body that stalls or does not parse is a failure of the read, not of the
+                // write: the server answered, and on a POST it may have applied it. The record
+                // carries the status it answered with and names the body problem, so a caller
+                // cannot mistake an applied write for a request that never reached the service
+                // and repeat it. Only a write with no answer at all is a 0.
+                var statusCode = ex is GraphServiceException gse ? (int)gse.StatusCode : answered;
                 errorBag.Add(new BulkWriteError(op.id, statusCode, ex.Message));
 
                 var current = Volatile.Read(ref succeeded) + errorBag.Count;

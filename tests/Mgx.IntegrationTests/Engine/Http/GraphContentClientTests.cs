@@ -2,7 +2,6 @@ using System.Collections.ObjectModel;
 using System.Management.Automation;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Reflection;
 using System.Text;
 using Mgx.Cmdlets.Base;
 using Mgx.Engine.Http;
@@ -175,40 +174,12 @@ public class GraphContentClientTests : IDisposable
     private const string TestTenantId = "test-tenant-00000000-0000-0000-0000-000000000000";
 
     /// <summary>
-    /// Points MgxCmdletBase's cached transport at this class's Graph mock and declares whether
-    /// mgx owns it (false = the Graph SDK's client, which ships a RedirectHandler). Reflection
-    /// because the statics are private; the fingerprint has to match what the test shell's
-    /// stubbed Get-MgContext produces, or GetClient() sees a credential change and rebuilds.
+    /// Points MgxCmdletBase's transport at this class's Graph mock and declares whether mgx owns
+    /// it (false = the Graph SDK's client, which ships a RedirectHandler). The mock client is
+    /// this class's own, so the scope borrows it rather than disposing it at the end of a test.
     /// </summary>
-    private void InjectCmdletTransport(bool owned, HttpClient? client = null)
-    {
-        ResiliencePipelineFactory.Reset();
-        var options = new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 };
-        SetCmdletStatic("s_graphHttpClient", client ?? _graphHttpClient);
-        SetCmdletStatic("s_cachedAuthFingerprint",
-            MgxCmdletBase.BuildAuthFingerprint(new { TenantId = TestTenantId }, null));
-        SetCmdletStatic("s_cachedAuthContextRef", null);
-        SetCmdletStatic("s_ownsHttpClient", owned);
-        SetCmdletStatic("s_graphEndpoint", "https://graph.microsoft.com");
-        SetCmdletStatic("s_clientOptions", options);
-        SetCmdletStatic("s_cachedTotalTimeoutSeconds", options.TotalTimeoutSeconds);
-    }
-
-    private static void ResetCmdletTransport()
-    {
-        SetCmdletStatic("s_graphHttpClient", null);
-        SetCmdletStatic("s_cachedAuthFingerprint", null);
-        SetCmdletStatic("s_cachedAuthContextRef", null);
-        SetCmdletStatic("s_ownsHttpClient", false);
-        SetCmdletStatic("s_cachedTotalTimeoutSeconds", 0);
-        SetCmdletStatic("s_clientOptions", ResilientGraphClientOptions.Default);
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void SetCmdletStatic(string field, object? value) =>
-        typeof(MgxCmdletBase)
-            .GetField(field, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)!
-            .SetValue(null, value);
+    private MgxTransportScope InjectCmdletTransport(bool owned, HttpClient? client = null) =>
+        MgxTransportScope.Inject(client ?? _graphHttpClient, owned);
 
     private static PowerShell CreateContentShell()
     {
@@ -241,37 +212,30 @@ public class GraphContentClientTests : IDisposable
         // validated - the exact leak the two-hop design exists to prevent.
         _graphHandler.SetDefaultResponse(HttpStatusCode.OK, "bytes-that-must-not-be-fetched");
 
-        try
+        // 1. Borrowed SDK transport: refuse, and refuse before the request is sent.
+        using (InjectCmdletTransport(owned: false))
+        using (var ps = CreateContentShell())
         {
-            // 1. Borrowed SDK transport: refuse, and refuse before the request is sent.
-            InjectCmdletTransport(owned: false);
-            using (var ps = CreateContentShell())
-            {
-                ps.AddCommand("Get-MgxContent").AddParameter("Uri", contentUri);
-                var thrown = Record.Exception(() => ps.Invoke());
+            ps.AddCommand("Get-MgxContent").AddParameter("Uri", contentUri);
+            var thrown = Record.Exception(() => ps.Invoke());
 
-                Assert.Contains(ErrorIds(ps, thrown),
-                    id => id.Contains("ContentRequiresOwnedTransport", StringComparison.Ordinal));
-                Assert.Equal(0, _graphHandler.RequestCount);
-            }
-
-            // 2. The identical call on the mgx-owned transport has to go through, or step 1
-            //    proves nothing: a cmdlet that always refuses would pass it too.
-            InjectCmdletTransport(owned: true);
-            using (var ps = CreateContentShell())
-            {
-                ps.AddCommand("Get-MgxContent").AddParameter("Uri", contentUri);
-                var results = ps.Invoke();
-
-                Assert.Empty(ps.Streams.Error);
-                var bytes = Assert.IsType<byte[]>(Assert.Single(results).BaseObject);
-                Assert.Equal("bytes-that-must-not-be-fetched", Encoding.UTF8.GetString(bytes));
-                Assert.Equal(1, _graphHandler.RequestCount);
-            }
+            Assert.Contains(ErrorIds(ps, thrown),
+                id => id.Contains("ContentRequiresOwnedTransport", StringComparison.Ordinal));
+            Assert.Equal(0, _graphHandler.RequestCount);
         }
-        finally
+
+        // 2. The identical call on the mgx-owned transport has to go through, or step 1
+        //    proves nothing: a cmdlet that always refuses would pass it too.
+        using (InjectCmdletTransport(owned: true))
+        using (var ps = CreateContentShell())
         {
-            ResetCmdletTransport();
+            ps.AddCommand("Get-MgxContent").AddParameter("Uri", contentUri);
+            var results = ps.Invoke();
+
+            Assert.Empty(ps.Streams.Error);
+            var bytes = Assert.IsType<byte[]>(Assert.Single(results).BaseObject);
+            Assert.Equal("bytes-that-must-not-be-fetched", Encoding.UTF8.GetString(bytes));
+            Assert.Equal(1, _graphHandler.RequestCount);
         }
     }
 
@@ -348,18 +312,13 @@ public class GraphContentClientTests : IDisposable
     {
         var handler = new SizedBodyHandler(declaredLength, actualBytes);
         using var http = new HttpClient(handler);
-        try
+        using (InjectCmdletTransport(owned: true, client: http))
         {
-            InjectCmdletTransport(owned: true, client: http);
             using var ps = CreateContentShell();
             ps.AddCommand("Get-MgxContent").AddParameter("Uri", "/me/drive/items/01ABC/content");
             Collection<PSObject> output = [];
             var thrown = Record.Exception(() => output = ps.Invoke());
             return (output, [.. ErrorIds(ps, thrown)], handler.BytesServed);
-        }
-        finally
-        {
-            ResetCmdletTransport();
         }
     }
 
@@ -444,9 +403,8 @@ public class GraphContentClientTests : IDisposable
     {
         var handler = new RangeHonouringHandler(body);
         using var http = new HttpClient(handler);
-        try
+        using (InjectCmdletTransport(owned: true, client: http))
         {
-            InjectCmdletTransport(owned: true, client: http);
             using var ps = CreateContentShell();
             ps.AddCommand("Get-MgxContent").AddParameter("Uri", "/me/drive/items/01ABC/content");
             foreach (var (name, value) in rangeParameters)
@@ -456,10 +414,6 @@ public class GraphContentClientTests : IDisposable
 
             Assert.Empty(ps.Streams.Error);
             return (Assert.IsType<byte[]>(Assert.Single(output).BaseObject), handler.RangeHeader);
-        }
-        finally
-        {
-            ResetCmdletTransport();
         }
     }
 
@@ -518,9 +472,8 @@ public class GraphContentClientTests : IDisposable
     {
         var handler = new RangeIgnoringHandler(body);
         using var http = new HttpClient(handler);
-        try
+        using (InjectCmdletTransport(owned: true, client: http))
         {
-            InjectCmdletTransport(owned: true, client: http);
             using var ps = CreateContentShell();
             ps.AddCommand("Get-MgxContent").AddParameter("Uri", "/me/drive/items/01ABC/content");
             foreach (var (name, value) in rangeParameters)
@@ -530,10 +483,6 @@ public class GraphContentClientTests : IDisposable
 
             Assert.Empty(ps.Streams.Error);
             return (Assert.IsType<byte[]>(Assert.Single(output).BaseObject), handler.RangeHeader);
-        }
-        finally
-        {
-            ResetCmdletTransport();
         }
     }
 
@@ -562,9 +511,9 @@ public class GraphContentClientTests : IDisposable
         var outFile = Path.Combine(Path.GetTempPath(), $"mgx-offset-{Guid.NewGuid():N}.bin");
         var handler = new RangeIgnoringHandler(body);
         using var http = new HttpClient(handler);
+        using var transport = InjectCmdletTransport(owned: true, client: http);
         try
         {
-            InjectCmdletTransport(owned: true, client: http);
             using var ps = CreateContentShell();
             ps.AddCommand("Get-MgxContent")
               .AddParameter("Uri", "/me/drive/items/01ABC/content")
@@ -578,7 +527,6 @@ public class GraphContentClientTests : IDisposable
         }
         finally
         {
-            ResetCmdletTransport();
             if (File.Exists(outFile)) File.Delete(outFile);
         }
     }

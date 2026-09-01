@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.1.4
+
+# Changelog
+
+### Fixed
+
+- `Export-MgxCollection` starts a fresh export when its resume checkpoint is unreadable rather than appending duplicate collection data.
+- Resume checkpoints belonging to different exports, syncs, or modes are rejected without altering existing operation files.
+- Checkpoints from earlier releases resume only when confirmed by corresponding files on disk.
+- Endpoints rejecting `$top` parameters no longer trigger checkpoint refusals or appending to older files.
+- `Sync-MgxDelta` and `Export-MgxCollection` preserve resume eligibility when `-Uri` or `-OutputFile` casing differs from interrupted runs.
+- Orphaned temp adoption and stale temp sweeps restrict file matching to operations written by the export itself.
+- Custom Graph endpoints no longer cause valid resume checkpoints to misclassify as external exports.
+- Running `-WhatIf` on an interrupted export previews recovery actions without modifying state.
+- Batch operations preserve applied server responses even if subsequent chunk retries fail.
+- Batch processing halts immediately upon chunk refusal, canceling pending waits promptly.
+- Batch summaries report never-sent items accurately rather than counting them as successful writes.
+- Batch chunks refused with redirect or not-modified responses record as failures and write to the dead-letter file.
+- Dead-letter files record only failed and never-sent operations, excluding applied server writes.
+- Concurrent batch chunk failures report both failure events in output logs.
+- Malformed batch responses preserve and report received results alongside the error payload.
+- UTF-8 byte-order marks no longer discard fan-out entities, bulk-write results, or expanded relations.
+- Stalled mid-stream response bodies fail at the body-read timeout threshold instead of hanging the pipeline.
+- Stalled error body responses format consistently across all error handling paths.
+- Unsupported response charsets (such as UTF-7 and quoted variants) fall back to UTF-8 decoding without terminating the pipeline.
+- Non-string `-Headers` names and values render culture-invariantly to prevent sending comma-decimal formatted numbers in European locales.
+- `Get-MgxTelemetry` outputs `PacingState` latency ratios culture-invariantly.
+- Flags enum values in `-Body` serialize combination members using standalone item names, including attribute-defined aliases.
+- Mid-enumeration transport swaps (`Connect-MgGraph`, `Set-MgxOption`, `Enable-MgxResilience`) maintain active paging without interrupting execution.
+- Removing the module restores native SDK HTTP clients, and re-enabling resilience after re-importing avoids stacking redundant wrappers.
+- `Disable-MgxResilience` purges untracked wrappers and reports installation status accurately.
+- Telemetry tracks request counts uniquely across enable, remove, and re-import lifecycle events.
+- Cancellation requests landing between retries prevent subsequent attempts from transmitting.
+- Completed exports and sync operations purge partial files leftover from abandoned attempts.
+- Resume logic ignores temp files currently being written by active operations.
+- Un-deletable abandoned checkpoints are skipped to enforce full re-fetching of items.
+- Expired delta tokens prevent stale checkpoints from overriding active operation writes.
+- Refused checkpoints from earlier execution passes are identified cleanly without misattributing to external sync operations.
+
+### Added
+
+- Added ecosystem isolation matrix tests verifying nine load-order permutations across `Az.Accounts`, `PnP.PowerShell`, and `ExchangeOnlineManagement` in CI.
+- Added regression corpus index (`tests/CORPUS.md`) mapping covered issue IDs to test classes with validation guards.
+- Added error-action test coverage verifying termination behavior, `$Error` populating, `-ErrorVariable` handling, and error-stream counts across all failure contexts.
+
+### Documentation
+
+- Updated batch help documentation with answered, refused, and never-sent classifications alongside dead-letter replay semantics.
+- Updated `-Body` help documentation detailing flags enum combination naming and recommending literal strings for leading-acronym members (e.g., iOS).
+
 ## 2.1.3
 
 ### Added

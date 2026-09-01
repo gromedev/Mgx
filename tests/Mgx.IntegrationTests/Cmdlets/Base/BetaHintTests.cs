@@ -1,6 +1,5 @@
 using System.Management.Automation;
 using System.Net;
-using System.Reflection;
 using System.Text;
 using Mgx.Cmdlets.Base;
 using Mgx.Engine.Http;
@@ -34,46 +33,11 @@ public class BetaHintTests
         }
     }
 
-    private static void InjectMock(HttpMessageHandler handler)
-    {
-        ResiliencePipelineFactory.Reset();
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, new HttpClient(handler));
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, MgxCmdletBase.BuildAuthFingerprint(
-                new { TenantId = "test-tenant-00000000-0000-0000-0000-000000000000" }, null));
-        // Get-MgxContent refuses to run over a transport mgx does not own (the SDK client
-        // auto-follows redirects, defeating download-host validation), so the mock must claim
-        // ownership or the cmdlet errors before any HTTP happens and the test is vacuous.
-        t.GetField("s_ownsHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, true);
-        t.GetField("s_graphEndpoint", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, "https://graph.microsoft.com");
-        var options = new ResilientGraphClientOptions { NoRateLimit = true, MaxRetryAttempts = 1 };
-        t.GetField("s_clientOptions", BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public)!
-            .SetValue(null, options);
-        // Owning the client makes GetClient() check the cached timeout; a mismatch forces a
-        // rebuild that cannot succeed under a mock. Cache the value the options carry.
-        t.GetField("s_cachedTotalTimeoutSeconds", BindingFlags.NonPublic | BindingFlags.Static)!
-            .SetValue(null, options.TotalTimeoutSeconds);
-        ResiliencePipelineFactory.Reset();
-    }
-
-    private static void CleanupMock()
-    {
-        var t = typeof(MgxCmdletBase);
-        t.GetField("s_graphHttpClient", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        t.GetField("s_cachedAuthContextRef", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, null);
-        ResiliencePipelineFactory.Reset();
-    }
-
     private static (List<string> Warnings, List<string> Errors) Run(
         string cmdlet, string uri, HttpStatusCode status, string body)
     {
         var handler = new SingleResponseHandler(status, body);
-        InjectMock(handler);
-        try
+        using (MgxTransportScope.Inject(handler, owned: true))
         {
             using var ps = PowerShell.Create();
             ps.AddCommand("Import-Module")
@@ -98,7 +62,6 @@ public class BetaHintTests
                 errors.Add($"(silent; {handler.Requests.Count} HTTP requests: {string.Join(", ", handler.Requests)})");
             return (warnings, errors);
         }
-        finally { CleanupMock(); }
     }
 
     private const string ItemNotFound =

@@ -20,6 +20,12 @@ public class AlcInitializer : IModuleAssemblyInitializer, IModuleAssemblyCleanup
     public void OnImport()
     {
         AssemblyLoadContext.Default.Resolving += ResolveDependency;
+
+        // Re-arms type-cache invalidation. The hook is attached from a static constructor that
+        // has long since run by the time a second import happens, and removal detaches it, so
+        // without this every FindType after the first removal would answer from entries resolved
+        // before it - including a GraphSession belonging to a module that has been replaced.
+        Base.MgxCmdletBase.AttachAssemblyLoadHandler();
     }
 
     private static Assembly? ResolveDependency(AssemblyLoadContext defaultAlc, AssemblyName name)
@@ -80,7 +86,7 @@ public class AlcInitializer : IModuleAssemblyInitializer, IModuleAssemblyCleanup
         // pieces of static state are released by this single call.
         try
         {
-            Base.MgxCmdletBase.ResetHttpClient();
+            ReleaseStaticState();
         }
         catch (Exception ex)
         {
@@ -95,5 +101,33 @@ public class AlcInitializer : IModuleAssemblyInitializer, IModuleAssemblyCleanup
         // resolution, and must not run before ResetHttpClient (which may trigger loads
         // that the type cache should still observe).
         Base.MgxCmdletBase.DetachAssemblyLoadHandler();
+    }
+
+    /// <summary>
+    /// Everything module removal releases except the assembly-load hook, which OnRemove
+    /// detaches itself. Two reasons, neither of them that the detach cannot be undone - it can,
+    /// AttachAssemblyLoadHandler subscribes again and an import calls it. It has to run after
+    /// ResetHttpClient, whose loads the type cache should still observe; and this is the seam
+    /// tests drive a removal through, which is not the same as asking them to unsubscribe the
+    /// process's only invalidation hook.
+    /// <para>
+    /// ResetHttpClient releases mgx's own client and the pipeline factory. The resilience
+    /// injection is separate state: it is installed on GraphSession, which belongs to another
+    /// module and outlives this one, so releasing it means putting the session back on the
+    /// genuine SDK client and only then letting go. Dropping the references alone would leave
+    /// the wrapper installed and the SDK sending through a handler belonging to an unloaded
+    /// module; the bridge-target map survives removal, so a later re-import's
+    /// Disable-MgxResilience can still take it off - the restore here just makes that
+    /// recovery unnecessary on the normal path.
+    /// </para>
+    /// </summary>
+    internal static void ReleaseStaticState()
+    {
+        Base.MgxCmdletBase.ResetHttpClient();
+        Cmdlets.Configuration.EnableMgxResilience.ReleaseInjection();
+
+        // Last: both calls above resolve types through this cache, so clearing it earlier would
+        // only refill it with the entries the removal exists to drop.
+        Base.MgxCmdletBase.ClearTypeCache();
     }
 }

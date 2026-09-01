@@ -38,6 +38,17 @@ public sealed class PaginationCheckpoint
     public string? TempFile { get; set; }
 
     /// <summary>
+    /// Path of the output the writing run was collecting into. DataLength is a byte offset into
+    /// "the output" and nothing else here says WHICH one, so a checkpoint path used by two runs
+    /// let one run's offset cut the other run's file. The whole path and not the name: two
+    /// exports to "users.jsonl" in different directories share a name and share nothing else.
+    /// Null on checkpoints written before this was recorded, which say nothing about ownership
+    /// and are read as evidence of it only where the files on disk corroborate them.
+    /// </summary>
+    [JsonPropertyName("outputFile")]
+    public string? OutputFile { get; set; }
+
+    /// <summary>
     /// Byte length of that file at the moment this checkpoint was saved, captured after the
     /// writer was flushed. Null on checkpoints written before this was recorded, which are
     /// treated as unverifiable rather than as zero-length.
